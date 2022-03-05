@@ -1,10 +1,10 @@
 use memmap2::MmapMut;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Add, Sub, AddAssign, SubAssign)]
-pub struct VirtAddr(u64);
+pub struct VirtAddr(pub u64);
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
-pub struct PhysAddr(*const u8);
+pub struct PhysAddr(pub *const u8);
 
 pub struct Memory {
   memory_base: VirtAddr,
@@ -66,6 +66,10 @@ impl Memory {
 
   pub fn write<T: Copy>(&mut self, addr: VirtAddr, value: T) -> Option<()> {
     self.get_mut(addr).map(|v| *v = value)
+  }
+
+  pub fn copy_from_slice(&mut self, mem: &[u8]) {
+    self.memory.copy_from_slice(mem);
   }
 }
 

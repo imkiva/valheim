@@ -85,3 +85,13 @@ pub union Instr {
   pub u: UType,
   pub j: JType,
 }
+
+impl Instr {
+  pub fn opcode(&self) -> u8 {
+    unsafe { self.peek.opcode() }
+  }
+
+  pub fn repr(&self) -> u32 {
+    unsafe { self.repr }
+  }
+}
