@@ -35,7 +35,7 @@ ij_rust_keep_indents_on_empty_lines = false
 ij_rust_keep_line_breaks = true
 ij_rust_line_comment_add_space = true
 ij_rust_line_comment_at_first_column = false
-ij_rust_min_number_of_blanks_between_items = 1
+ij_rust_min_number_of_blanks_between_items = 0
 ij_rust_preserve_punctuation = false
 ij_rust_spaces_around_assoc_type_binding = false
 
