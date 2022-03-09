@@ -1,7 +1,7 @@
 use std::intrinsics::size_of;
 use crate::cpu::Rv64Cpu;
 use crate::interp::Rv64Interpreter;
-use crate::isa::Bytecode;
+use crate::isa::untyped::Bytecode;
 use crate::memory::VirtAddr;
 
 pub struct ScratchInterpreter;

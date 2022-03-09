@@ -5,7 +5,6 @@ pub struct Regs {
   pub pc: VirtAddr,
 }
 
-
 impl Regs {
   pub fn new(pc: VirtAddr) -> Regs {
     Regs {

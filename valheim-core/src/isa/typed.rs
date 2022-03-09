@@ -1,3 +1,4 @@
+use crate::isa::data::{Fin, workaround};
 use crate::isa::rv32::RV32Instr;
 use crate::isa::rv64::RV64Instr;
 
@@ -7,16 +8,35 @@ pub enum Instr {
   RV64(RV64Instr),
 }
 
-/// This is used to represent the immediate value,
+/// Destination register
+pub struct Rd(pub Reg);
+/// Source register
+pub struct Rs(pub Reg);
+
+/// typed-registers
+pub enum Reg {
+  GP(GpReg),
+  FP(FpReg),
+}
+
+/// General-purpose registers
+pub enum GpReg {
+  X(Fin<32>),
+  PC,
+}
+
+/// Floating-point registers
+pub enum FpReg {
+}
+
+/// This is used to represent lazily-decoded immediate value,
 /// which is written as `imm[HIGH_BIT:LOW_BIT]` in the risc-v specification.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Imm32<const HIGH_BIT: usize, const LOW_BIT: usize> {
-  pub underlying: u32,
-}
+pub struct Imm32<const HIGH_BIT: usize, const LOW_BIT: usize>(u32);
 
 impl<const HIGH_BIT: usize, const LOW_BIT: usize> Imm32<HIGH_BIT, LOW_BIT> {
   pub fn from(underlying: u32) -> Self {
-    Self { underlying }
+    Self(underlying)
   }
 
   pub fn valid_bits(&self) -> usize {
@@ -27,13 +47,9 @@ impl<const HIGH_BIT: usize, const LOW_BIT: usize> Imm32<HIGH_BIT, LOW_BIT> {
   /// according to the risc-v specification.
   pub fn decode(self) -> u32 {
     let mask = (1 << self.valid_bits()) - 1;
-    (self.underlying & mask) << LOW_BIT
+    (self.0 & mask) << LOW_BIT
   }
 }
-
-struct If<const B: bool>;
-trait True {}
-impl True for If<true> {}
 
 impl<
   const LHS_HIGH_BIT: usize,
@@ -41,9 +57,9 @@ impl<
   const RHS_HIGH_BIT: usize,
   const RHS_LOW_BIT: usize
 > std::ops::BitOr<Imm32<RHS_HIGH_BIT, RHS_LOW_BIT>> for Imm32<LHS_HIGH_BIT, LHS_LOW_BIT>
-  where If<{ LHS_HIGH_BIT >= LHS_LOW_BIT }>: True,
-        If<{ RHS_HIGH_BIT >= RHS_LOW_BIT }>: True,
-        If<{ LHS_LOW_BIT - 1 == RHS_HIGH_BIT }>: True,
+  where workaround::If<{ LHS_HIGH_BIT >= LHS_LOW_BIT }>: workaround::True,
+        workaround::If<{ RHS_HIGH_BIT >= RHS_LOW_BIT }>: workaround::True,
+        workaround::If<{ LHS_LOW_BIT - 1 == RHS_HIGH_BIT }>: workaround::True,
 {
   type Output = Imm32<LHS_HIGH_BIT, RHS_LOW_BIT>;
 
