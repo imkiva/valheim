@@ -66,6 +66,18 @@ pub struct JType {
 
 #[bitfield(bits = 32)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct R4Type {
+  pub opcode: B7,
+  pub rd: B5,
+  pub funct3: B3,
+  pub rs1: B5,
+  pub rs2: B5,
+  pub funct2: B2,
+  pub rs3: B5,
+}
+
+#[bitfield(bits = 32)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OpcodePeek {
   pub opcode: B7,
   pub dummy: B25,

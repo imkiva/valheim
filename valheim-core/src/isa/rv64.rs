@@ -1,4 +1,4 @@
-use crate::isa::typed::{AQ, Imm32, Rd, RL, Rs1, Rs2, Shamt};
+use crate::isa::typed::{AQ, Imm32, Rd, RL, RoundingMode, Rs1, Rs2, Shamt};
 
 /// typed RV64 instructions
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -40,4 +40,18 @@ pub enum RV64Instr {
   AMOMAX_D(Rd, Rs1, Rs2, AQ, RL),
   AMOMINU_D(Rd, Rs1, Rs2, AQ, RL),
   AMOMAXU_D(Rd, Rs1, Rs2, AQ, RL),
+
+  // RV64F
+  FCVT_L_S(Rd, Rs1, RoundingMode),
+  FCVT_LU_S(Rd, Rs1, RoundingMode),
+  FCVT_S_L(Rd, Rs1, RoundingMode),
+  FCVT_S_LU(Rd, Rs1, RoundingMode),
+
+  // RV64D
+  FCVT_L_D(Rd, Rs1, RoundingMode),
+  FCVT_LU_D(Rd, Rs1, RoundingMode),
+  FMV_X_D(Rd, Rs1),
+  FCVT_D_L(Rd, Rs1, RoundingMode),
+  FCVT_D_LU(Rd, Rs1, RoundingMode),
+  FMV_D_X(Rd, Rs1),
 }

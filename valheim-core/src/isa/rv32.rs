@@ -1,12 +1,5 @@
 use crate::isa::data::Fin;
-use crate::isa::typed::{AQ, Imm32, Rd, RL, Rs1, Rs2, Shamt};
-
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct FenceFm(pub Fin<16>);
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct FencePred(pub Fin<16>);
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct FenceSucc(pub Fin<16>);
+use crate::isa::typed::{AQ, Imm32, Rd, RL, RoundingMode, Rs1, Rs2, Rs3, Shamt};
 
 /// typed RV32 instructions
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -78,4 +71,67 @@ pub enum RV32Instr {
   AMOMAX_W(Rd, Rs1, Rs2, AQ, RL),
   AMOMINU_W(Rd, Rs1, Rs2, AQ, RL),
   AMOMAXU_W(Rd, Rs1, Rs2, AQ, RL),
+
+  // RV32F
+  FLW(Rd, Rs1, Imm32<11, 0>),
+  FSW(Rs1, Rs2, Imm32<11, 0>),
+  FMADD_S(Rd, Rs1, Rs2, Rs3, RoundingMode),
+  FMSUB_S(Rd, Rs1, Rs2, Rs3, RoundingMode),
+  FNMSUB_S(Rd, Rs1, Rs2, Rs3, RoundingMode),
+  FNMADD_S(Rd, Rs1, Rs2, Rs3, RoundingMode),
+  FADD_S(Rd, Rs1, Rs2, RoundingMode),
+  FSUB_S(Rd, Rs1, Rs2, RoundingMode),
+  FMUL_S(Rd, Rs1, Rs2, RoundingMode),
+  FDIV_S(Rd, Rs1, Rs2, RoundingMode),
+  FSQRT_S(Rd, Rs1, RoundingMode),
+  FSGNJ_S(Rd, Rs1, Rs2),
+  FSGNJN_S(Rd, Rs1, Rs2),
+  FSGNJX_S(Rd, Rs1, Rs2),
+  FMIN_S(Rd, Rs1, Rs2),
+  FMAX_S(Rd, Rs1, Rs2),
+  FCVT_W_S(Rd, Rs1, RoundingMode),
+  FCVT_WU_S(Rd, Rs1, RoundingMode),
+  FMV_X_W(Rd, Rs1),
+  FEQ_S(Rd, Rs1, Rs2),
+  FLT_S(Rd, Rs1, Rs2),
+  FLE_S(Rd, Rs1, Rs2),
+  FCLASS_S(Rd, Rs1),
+  FCVT_S_W(Rd, Rs1, RoundingMode),
+  FCVT_S_WU(Rd, Rs1, RoundingMode),
+  FMV_W_X(Rd, Rs1),
+
+  // RV32D
+  FLD(Rd, Rs1, Imm32<11, 0>),
+  FSD(Rs1, Rs2, Imm32<11, 0>),
+  FMADD_D(Rd, Rs1, Rs2, Rs3, RoundingMode),
+  FMSUB_D(Rd, Rs1, Rs2, Rs3, RoundingMode),
+  FNMSUB_D(Rd, Rs1, Rs2, Rs3, RoundingMode),
+  FNMADD_D(Rd, Rs1, Rs2, Rs3, RoundingMode),
+  FADD_D(Rd, Rs1, Rs2, RoundingMode),
+  FSUB_D(Rd, Rs1, Rs2, RoundingMode),
+  FMUL_D(Rd, Rs1, Rs2, RoundingMode),
+  FDIV_D(Rd, Rs1, Rs2, RoundingMode),
+  FSQRT_D(Rd, Rs1, RoundingMode),
+  FSGNJ_D(Rd, Rs1, Rs2),
+  FSGNJN_D(Rd, Rs1, Rs2),
+  FSGNJX_D(Rd, Rs1, Rs2),
+  FMIN_D(Rd, Rs1, Rs2),
+  FMAX_D(Rd, Rs1, Rs2),
+  FCVT_S_D(Rd, Rs1, RoundingMode),
+  FCVT_D_S(Rd, Rs1, RoundingMode),
+  FEQ_D(Rd, Rs1, Rs2),
+  FLT_D(Rd, Rs1, Rs2),
+  FLE_D(Rd, Rs1, Rs2),
+  FCLASS_D(Rd, Rs1),
+  FCVT_W_D(Rd, Rs1, RoundingMode),
+  FCVT_WU_D(Rd, Rs1, RoundingMode),
+  FCVT_D_W(Rd, Rs1, RoundingMode),
+  FCVT_D_WU(Rd, Rs1, RoundingMode),
 }
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct FenceFm(pub Fin<16>);
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct FencePred(pub Fin<16>);
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct FenceSucc(pub Fin<16>);

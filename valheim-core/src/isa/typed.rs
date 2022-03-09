@@ -16,6 +16,8 @@ pub struct Rd(pub Reg);
 pub struct Rs1(pub Reg);
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Rs2(pub Reg);
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Rs3(pub Reg);
 
 /// Atomic instruction flag: Acquire
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -45,6 +47,26 @@ pub enum GpReg {
 /// Floating-point registers
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum FpReg {
+  F(Fin<32>),
+  FCSR,
+}
+
+/// Floating-point rounding mode
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum RoundingMode {
+  /// Round to nearest, ties to even
+  RNE,
+  /// Round towards zero
+  RTZ,
+  /// Round towards -infinity
+  RDN,
+  /// Round towards +infinity
+  RUP,
+  /// Round to nearest, ties to max magnitude
+  RMM,
+  /// In instruction's rm field, select dynamic rounding mode;
+  /// In Rounding Mode register, reserved.
+  DYN,
 }
 
 /// This is used to represent lazily-decoded immediate value,
