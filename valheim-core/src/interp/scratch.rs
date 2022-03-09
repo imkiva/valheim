@@ -1,7 +1,7 @@
 use std::intrinsics::size_of;
 use crate::cpu::Rv64Cpu;
 use crate::interp::Rv64Interpreter;
-use crate::isa::Instr;
+use crate::isa::Bytecode;
 use crate::memory::VirtAddr;
 
 pub struct ScratchInterpreter;
@@ -13,10 +13,10 @@ impl ScratchInterpreter {
 }
 
 impl ScratchInterpreter {
-  fn fetch(&mut self, cpu: &mut Rv64Cpu) -> Option<(VirtAddr, Instr)> {
+  fn fetch(&mut self, cpu: &mut Rv64Cpu) -> Option<(VirtAddr, Bytecode)> {
     let pc = cpu.regs.pc;
     let instr = cpu.mem.read(pc);
-    cpu.regs.pc += VirtAddr(size_of::<Instr>() as u64);
+    cpu.regs.pc += VirtAddr(size_of::<Bytecode>() as u64);
     instr.map(|instr| (pc, instr))
   }
 }
