@@ -54,4 +54,33 @@ pub enum RV64Instr {
   FCVT_D_L(Rd, Rs1, RoundingMode),
   FCVT_D_LU(Rd, Rs1, RoundingMode),
   FMV_D_X(Rd, Rs1),
+
+  // RV32/64 Zicsr
+  CSRRW(Rd, Rs1, CSRValue),
+  CSRRS(Rd, Rs1, CSRValue),
+  CSRRC(Rd, Rs1, CSRValue),
+  CSRRWI(Rd, UImm, CSRValue),
+  CSRRSI(Rd, UImm, CSRValue),
+  CSRRCI(Rd, UImm, CSRValue),
+
+  // RV32/64 Zifencei
+  FENCE_I(Rd, Rs1, Imm32<11, 0>),
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct CSRValue(Imm32<11, 0>);
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct UImm(Imm32<11, 0>);
+
+impl CSRValue {
+  pub fn value(self) -> u32 {
+    self.0.decode()
+  }
+}
+
+impl UImm {
+  pub fn value(self) -> u32 {
+    self.0.decode()
+  }
 }

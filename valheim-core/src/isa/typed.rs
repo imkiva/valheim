@@ -42,6 +42,7 @@ pub enum Reg {
 pub enum GpReg {
   X(Fin<32>),
   PC,
+  CSR,
 }
 
 /// Floating-point registers
@@ -85,6 +86,10 @@ impl<const HIGH_BIT: usize, const LOW_BIT: usize> Imm32<HIGH_BIT, LOW_BIT> {
 
   /// Decode the immediate value by placing its valid bits at the range of `[HIGH_BIT, LOW_BIT]`
   /// according to the risc-v specification.
+  pub fn decode_signed(self) -> i32 {
+    unsafe { std::mem::transmute::<u32, i32>(self.decode()) }
+  }
+
   pub fn decode(self) -> u32 {
     let mask = (1 << self.valid_bits()) - 1;
     (self.0 & mask) << LOW_BIT
