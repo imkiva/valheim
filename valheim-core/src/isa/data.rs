@@ -1,4 +1,5 @@
 /// Bounded integer within the range `[0, MAX)`.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Fin<const MAX: u32>(pub u32);
 
 impl<const MAX: u32> Fin<MAX> {

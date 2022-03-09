@@ -9,23 +9,41 @@ pub enum Instr {
 }
 
 /// Destination register
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Rd(pub Reg);
 /// Source register
-pub struct Rs(pub Reg);
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Rs1(pub Reg);
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Rs2(pub Reg);
+
+/// Atomic instruction flag: Acquire
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct AQ(pub bool);
+/// Atomic instruction flag: Release
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct RL(pub bool);
+
+/// Shift-amount
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Shamt(pub u8);
 
 /// typed-registers
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Reg {
   GP(GpReg),
   FP(FpReg),
 }
 
 /// General-purpose registers
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum GpReg {
   X(Fin<32>),
   PC,
 }
 
 /// Floating-point registers
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum FpReg {
 }
 
