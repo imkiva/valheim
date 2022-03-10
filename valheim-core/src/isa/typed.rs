@@ -33,22 +33,12 @@ pub struct Shamt(pub u8);
 /// typed-registers
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Reg {
-  GP(GpReg),
-  FP(FpReg),
-}
-
-/// General-purpose registers
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum GpReg {
+  /// Same as `X(Fin(0))`, but for better performance
+  ZERO,
   X(Fin<32>),
+  F(Fin<32>),
   PC,
   CSR,
-}
-
-/// Floating-point registers
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum FpReg {
-  F(Fin<32>),
   FCSR,
 }
 

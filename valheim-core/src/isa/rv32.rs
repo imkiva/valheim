@@ -43,7 +43,7 @@ pub enum RV32Instr {
   SRA(Rd, Rs1, Rs2),
   OR(Rd, Rs1, Rs2),
   AND(Rd, Rs1, Rs2),
-  FENCE(Rd, Rs1, FenceFm, FencePred, FenceSucc),
+  FENCE(Rd, Rs1, FenceSucc, FencePred, FenceFm),
   FENCE_TSO,
   PAUSE,
   ECALL,

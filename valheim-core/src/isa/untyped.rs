@@ -18,7 +18,7 @@ pub struct IType {
   pub rd: B5,
   pub funct3: B3,
   pub rs1: B5,
-  pub imm: B12,
+  pub imm11_0: B12,
 }
 
 #[bitfield(bits = 32)]
@@ -78,32 +78,74 @@ pub struct R4Type {
 
 #[bitfield(bits = 32)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RShamtType {
+  pub opcode: B7,
+  pub rd: B5,
+  pub funct3: B3,
+  pub rs1: B5,
+  pub shamt: B5,
+  pub funct7: B7,
+}
+
+#[bitfield(bits = 32)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FenceType {
+  pub opcode: B7,
+  pub rd: B5,
+  pub funct3: B3,
+  pub rs1: B5,
+  pub succ: B4,
+  pub pred: B4,
+  pub fm: B4,
+}
+
+#[bitfield(bits = 32)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OpcodePeek {
   pub opcode: B7,
   pub dummy: B25,
 }
 
-/// undecoded instruction
+/// untyped instruction
 #[derive(Clone, Copy)]
 pub union Bytecode {
   pub repr: u32,
   pub peek: OpcodePeek,
   pub r: RType,
+  pub r4: R4Type,
+  pub r_shamt: RShamtType,
   pub i: IType,
   pub s: SType,
   pub b: BType,
   pub u: UType,
   pub j: JType,
+  pub fence: FenceType,
+}
+
+macro_rules! unsafe_wrapper {
+  ($ident:ident, $ty:ident) => {
+    #[inline(always)]
+    pub fn $ident(&self) -> $ty {
+      unsafe { self.$ident }
+    }
+  }
 }
 
 impl Bytecode {
+  #[inline(always)]
   pub fn opcode(&self) -> u8 {
     unsafe { self.peek.opcode() }
   }
-
-  pub fn repr(&self) -> u32 {
-    unsafe { self.repr }
-  }
+  unsafe_wrapper!(repr, u32);
+  unsafe_wrapper!(r, RType);
+  unsafe_wrapper!(r4, R4Type);
+  unsafe_wrapper!(r_shamt, RShamtType);
+  unsafe_wrapper!(i, IType);
+  unsafe_wrapper!(s, SType);
+  unsafe_wrapper!(b, BType);
+  unsafe_wrapper!(j, JType);
+  unsafe_wrapper!(u, UType);
+  unsafe_wrapper!(fence, FenceType);
 }
 
 #[cfg(test)]
