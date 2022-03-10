@@ -3,6 +3,7 @@ use crate::isa::rv32::RV32Instr;
 use crate::isa::rv64::RV64Instr;
 use crate::isa::typed::{Imm32, Instr, Rd, Reg, Rs1, Rs2, Rs3, Shamt};
 use crate::isa::rv32::{FenceFm, FenceSucc, FencePred};
+use crate::isa::rv64::{CSRValue, UImm};
 use crate::isa::untyped::Bytecode;
 use crate::isa::data::Fin;
 
@@ -111,11 +112,31 @@ macro_rules! fence {
     $type!($opcode, rd, rs1, succ, pred, fm)
   }};
 }
+macro_rules! zicsr_rs1 {
+  ($type:ident, $opcode:ident, $untyped:expr, $reg:ident) => {{
+    let i = $untyped.i();
+    let rd = Rd($reg(i.rd()));
+    let rs1 = Rs1($reg(i.rs1()));
+    let imm = Imm32::<11, 0>::from(i.imm11_0() as u32);
+    let csr = CSRValue(imm);
+    $type!($opcode, rd, rs1, csr)
+  }};
+}
+macro_rules! zicsr_uimm {
+  ($type:ident, $opcode:ident, $untyped:expr, $reg:ident) => {{
+    let i = $untyped.i();
+    let rd = Rd($reg(i.rd()));
+    let rs1 = Imm32::<4, 0>::from(i.rs1() as u32);
+    let uimm = UImm(rs1);
+    let imm = Imm32::<11, 0>::from(i.imm11_0() as u32);
+    let csr = CSRValue(imm);
+    $type!($opcode, rd, uimm, csr)
+  }};
+}
 
 fn decode_untyped(untyped: Bytecode) -> Instr {
   let opcode = untyped.opcode() >> 2; // stripping away `inst[1:0]=11`
   match opcode {
-    // RV32I
     OpcodeMap::LUI => u!(rv32, LUI, untyped, gp),
     OpcodeMap::AUIPC => u!(rv32, AUIPC, untyped, gp),
     OpcodeMap::JAL => j!(rv32, JAL, untyped, gp),
@@ -239,18 +260,29 @@ fn decode_untyped(untyped: Bytecode) -> Instr {
       _ => panic!(),
     }
 
-    OpcodeMap::MISC_MEM => match untyped.repr() as u32 {
-      0b1000_0011_0011_00000_000_00000_0001111 => rv32!(FENCE_TSO),
-      0b0000_0001_0000_00000_000_00000_0001111 => rv32!(PAUSE),
-      _fence => fence!(rv32, FENCE, untyped, gp),
-    },
-    OpcodeMap::SYSTEM => match untyped.i().imm11_0() as u8 {
-      0b0 => rv32!(ECALL),
-      0b1 => rv32!(EBREAK),
+    OpcodeMap::MISC_MEM => match untyped.i().funct3() as u8 {
+      0b000 => match untyped.repr() as u32 {
+        0b1000_0011_0011_00000_000_00000_0001111 => rv32!(FENCE_TSO),
+        0b0000_0001_0000_00000_000_00000_0001111 => rv32!(PAUSE),
+        _fence => fence!(rv32, FENCE, untyped, gp),
+      },
+      0b001 => i!(rv64, FENCE_I, untyped, gp),
       _ => panic!(),
     },
-
-
+    OpcodeMap::SYSTEM => match untyped.i().funct3() as u8 {
+      0b000 => match untyped.i().imm11_0() as u8 {
+        0b0 => rv32!(ECALL),
+        0b1 => rv32!(EBREAK),
+        _ => panic!(),
+      },
+      0b001 => zicsr_rs1!(rv64, CSRRW, untyped, gp),
+      0b010 => zicsr_rs1!(rv64, CSRRS, untyped, gp),
+      0b011 => zicsr_rs1!(rv64, CSRRC, untyped, gp),
+      0b101 => zicsr_uimm!(rv64, CSRRWI, untyped, gp),
+      0b110 => zicsr_uimm!(rv64, CSRRSI, untyped, gp),
+      0b111 => zicsr_uimm!(rv64, CSRRCI, untyped, gp),
+      _ => panic!(),
+    },
 
     OpcodeMap::_custom_0 |
     OpcodeMap::_custom_1 |

@@ -68,10 +68,10 @@ pub enum RV64Instr {
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct CSRValue(Imm32<11, 0>);
+pub struct CSRValue(pub Imm32<11, 0>);
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct UImm(Imm32<11, 0>);
+pub struct UImm(pub Imm32<4, 0>);
 
 impl CSRValue {
   pub fn value(self) -> u32 {
