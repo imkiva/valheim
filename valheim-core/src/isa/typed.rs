@@ -3,6 +3,7 @@ use crate::isa::rv32::RV32Instr;
 use crate::isa::rv64::RV64Instr;
 
 /// decoded instruction
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Instr {
   RV32(RV32Instr),
   RV64(RV64Instr),

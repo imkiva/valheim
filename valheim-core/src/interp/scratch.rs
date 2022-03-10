@@ -1,6 +1,7 @@
 use std::intrinsics::size_of;
 use crate::cpu::Rv64Cpu;
 use crate::interp::Rv64Interpreter;
+use crate::isa::typed::Instr;
 use crate::isa::untyped::Bytecode;
 use crate::memory::VirtAddr;
 
@@ -19,12 +20,17 @@ impl ScratchInterpreter {
     cpu.regs.pc += VirtAddr(size_of::<Bytecode>() as u64);
     instr.map(|instr| (pc, instr))
   }
+
+  fn decode(&self, bytecode: Bytecode) -> Instr {
+    Instr::from(bytecode)
+  }
 }
 
 impl Rv64Interpreter for ScratchInterpreter {
   fn interp(&mut self, cpu: &mut Rv64Cpu) {
     while let Some((pc, instr)) = self.fetch(cpu) {
-      println!("pc = {:x}, opcode = {:x}, instr = {:x}", pc.0, instr.opcode(), instr.repr());
+      let decoded = self.decode(instr);
+      println!("pc = {:x}, opcode = {:x}, instr = {:x}, decoded = {:?}", pc.0, instr.opcode(), instr.repr(), decoded);
     }
   }
 }
