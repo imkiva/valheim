@@ -223,20 +223,19 @@ fn decode_untyped(untyped: Bytecode) -> Instr {
       0b000 => match untyped.r().funct7() as u8 {
         0b0000000 => r!(rv64, ADDW, untyped, gp),
         0b0100000 => r!(rv64, SUBW, untyped, gp),
-        // 0b0000001 => r!(rv64, MULW, untyped, gp),
+        0b0000001 => r!(rv64, MULW, untyped, gp),
         _ => panic!(),
       },
-      0b001 => match untyped.r().funct7() as u8 {
-        0b0000000 => r!(rv64, SLLW, untyped, gp),
-        // 0b0000001 => r!(rv64, MULH, untyped, gp),
-        _ => panic!(),
-      },
+      0b001 => r!(rv64, SLLW, untyped, gp),
+      0b100 => r!(rv64, DIVW, untyped, gp),
       0b101 => match untyped.r().funct7() as u8 {
         0b0000000 => r!(rv64, SRLW, untyped, gp),
         0b0100000 => r!(rv64, SRAW, untyped, gp),
-        // 0b0000001 => r!(rv32, DIVU, untyped, gp),
+        0b0000001 => r!(rv64, DIVUW, untyped, gp),
         _ => panic!(),
       },
+      0b110 => r!(rv64, REMW, untyped, gp),
+      0b111 => r!(rv64, REMUW, untyped, gp),
       _ => panic!(),
     }
 
