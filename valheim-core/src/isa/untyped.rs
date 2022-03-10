@@ -132,6 +132,7 @@ pub struct OpcodePeek {
 
 /// untyped instruction
 #[derive(Clone, Copy)]
+#[repr(C)]
 pub union Bytecode {
   pub repr: u32,
   pub peek: OpcodePeek,

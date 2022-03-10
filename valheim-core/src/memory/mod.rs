@@ -44,7 +44,7 @@ impl Memory {
     (phys.0 as usize) >= ptr && (phys.0 as usize) < ptr + self.memory_size
   }
 
-  pub fn get_mut<T>(&mut self, virt: VirtAddr) -> Option<&mut T> {
+  pub fn get_mut<T: Sized>(&mut self, virt: VirtAddr) -> Option<&mut T> {
     let phys = self.to_phys(virt)?;
     unsafe {
       let ptr = std::mem::transmute::<*const u8, *mut T>(phys.0);
@@ -52,7 +52,7 @@ impl Memory {
     }
   }
 
-  pub fn get<T>(&self, virt: VirtAddr) -> Option<&T> {
+  pub fn get<T: Sized>(&self, virt: VirtAddr) -> Option<&T> {
     let phys = self.to_phys(virt)?;
     unsafe {
       let ptr = std::mem::transmute::<*const u8, *const T>(phys.0);
@@ -60,16 +60,22 @@ impl Memory {
     }
   }
 
-  pub fn read<T: Copy>(&self, addr: VirtAddr) -> Option<T> {
+  pub fn read<T: Copy + Sized>(&self, addr: VirtAddr) -> Option<T> {
     self.get(addr).map(|v| *v)
   }
 
-  pub fn write<T: Copy>(&mut self, addr: VirtAddr, value: T) -> Option<()> {
+  pub fn write<T: Copy + Sized>(&mut self, addr: VirtAddr, value: T) -> Option<()> {
     self.get_mut(addr).map(|v| *v = value)
   }
 
-  pub fn copy_from_slice(&mut self, mem: &[u8]) {
-    self.memory.copy_from_slice(mem);
+  pub fn reset<T: Sized>(&mut self, mem: &[T]) {
+    unsafe {
+      std::ptr::copy_nonoverlapping(
+        mem.as_ptr() as *const u8,
+        self.memory.as_mut_ptr(),
+        mem.len() * std::mem::size_of::<T>()
+      );
+    }
   }
 }
 

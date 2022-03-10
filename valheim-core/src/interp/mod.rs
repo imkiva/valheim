@@ -1,7 +1,7 @@
 pub mod scratch;
 
-use crate::cpu::Rv64Cpu;
+use crate::cpu::RV64Cpu;
 
 pub trait Rv64Interpreter {
-  fn interp(&mut self, cpu: &mut Rv64Cpu);
+  fn interp(&self, cpu: &mut RV64Cpu);
 }

@@ -406,3 +406,17 @@ mod OpcodeMap {
   pub const _reversed_2: u8 = 0b11101;
   pub const _custom_3_or_rv128: u8 = 0b11110;
 }
+
+#[cfg(test)]
+mod tests {
+  use crate::isa::typed::Instr;
+  use crate::isa::untyped::Bytecode;
+  #[test]
+  fn test_instr_decode() {
+    // jal x0, -6*4
+    let instr_asm: u32 = 0b_1_1111110100_1_11111111_00000_1101111;
+    let bytecode = Bytecode { repr: instr_asm };
+    let instr = Instr::from(bytecode);
+    println!("{:?}", instr);
+  }
+}

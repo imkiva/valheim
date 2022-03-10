@@ -77,10 +77,6 @@ impl<const HIGH_BIT: usize, const LOW_BIT: usize> Imm32<HIGH_BIT, LOW_BIT> {
 
   /// Decode the immediate value by placing its valid bits at the range of `[HIGH_BIT, LOW_BIT]`
   /// according to the risc-v specification.
-  pub fn decode_signed(self) -> i32 {
-    unsafe { std::mem::transmute::<u32, i32>(self.decode()) }
-  }
-
   pub fn decode(self) -> u32 {
     let mask = (1 << self.valid_bits()) - 1;
     (self.0 & mask) << LOW_BIT
@@ -110,7 +106,7 @@ mod tests {
   use crate::isa::typed::Imm32;
   use crate::isa::untyped::JType;
   #[test]
-  fn test_imm_encode() {
+  fn test_imm_decode() {
     // jal x0, -6*4
     let instr_asm: u32 = 0b_1_1111110100_1_11111111_00000_1101111;
     let instr = JType::from_bytes(instr_asm.to_le_bytes());
