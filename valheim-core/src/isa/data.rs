@@ -1,11 +1,16 @@
 /// Bounded integer within the range `[0, MAX)`.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct Fin<const MAX: u32>(pub u32);
+pub struct Fin<const MAX: u32>(u32);
 
 impl<const MAX: u32> Fin<MAX> {
   pub fn new(value: u32) -> Self {
-    debug_assert!(value < MAX);
+    assert!(value < MAX);
     Self(value)
+  }
+
+  #[inline(always)]
+  pub fn value(self) -> u32 {
+    self.0
   }
 }
 

@@ -110,9 +110,9 @@ macro_rules! fence {
     let f = $untyped.fence();
     let rd = Rd($reg(f.rd()));
     let rs1 = Rs1($reg(f.rs1()));
-    let succ = FenceSucc(Fin(f.succ() as u32));
-    let pred = FencePred(Fin(f.pred() as u32));
-    let fm = FenceFm(Fin(f.fm() as u32));
+    let succ = FenceSucc(Fin::new(f.succ() as u32));
+    let pred = FencePred(Fin::new(f.pred() as u32));
+    let fm = FenceFm(Fin::new(f.fm() as u32));
     $type!($opcode, rd, rs1, succ, pred, fm)
   }};
 }
@@ -355,7 +355,7 @@ fn decode_untyped(untyped: Bytecode) -> Option<Instr> {
 fn fp(reg: u8) -> Reg {
   let encoding = reg as u8;
   if encoding <= 31 {
-    Reg::F(Fin(encoding as u32))
+    Reg::F(Fin::new(encoding as u32))
   } else {
     panic!("Inaccessible register encoding: {:b}", encoding)
   }
@@ -366,7 +366,7 @@ fn gp(reg: u8) -> Reg {
   if encoding == 0 {
     Reg::ZERO
   } else if encoding > 0 && encoding <= 31 {
-    Reg::X(Fin(encoding as u32))
+    Reg::X(Fin::new(encoding as u32))
   } else {
     panic!("Inaccessible register encoding: {:b}", encoding)
   }
