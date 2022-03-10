@@ -89,6 +89,19 @@ pub struct RShamt32Type {
 
 #[bitfield(bits = 32)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RAType {
+  pub opcode: B7,
+  pub rd: B5,
+  pub funct3: B3,
+  pub rs1: B5,
+  pub rs2: B5,
+  pub rl: bool,
+  pub aq: bool,
+  pub funct5: B5,
+}
+
+#[bitfield(bits = 32)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RShamt64Type {
   pub opcode: B7,
   pub rd: B5,
@@ -126,6 +139,7 @@ pub union Bytecode {
   pub r4: R4Type,
   pub r_shamt32: RShamt32Type,
   pub r_shamt64: RShamt64Type,
+  pub ra: RAType,
   pub i: IType,
   pub s: SType,
   pub b: BType,
@@ -153,6 +167,7 @@ impl Bytecode {
   unsafe_wrapper!(r4, R4Type);
   unsafe_wrapper!(r_shamt32, RShamt32Type);
   unsafe_wrapper!(r_shamt64, RShamt64Type);
+  unsafe_wrapper!(ra, RAType);
   unsafe_wrapper!(i, IType);
   unsafe_wrapper!(s, SType);
   unsafe_wrapper!(b, BType);

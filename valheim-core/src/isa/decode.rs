@@ -1,7 +1,7 @@
 use std::ops::BitOr;
 use crate::isa::rv32::RV32Instr;
 use crate::isa::rv64::RV64Instr;
-use crate::isa::typed::{Imm32, Instr, Rd, Reg, Rs1, Rs2, Rs3, Shamt};
+use crate::isa::typed::{Imm32, Instr, Rd, Reg, Rs1, Rs2, Rs3, Shamt, AQ, RL};
 use crate::isa::rv32::{FenceFm, FenceSucc, FencePred};
 use crate::isa::rv64::{CSRValue, UImm};
 use crate::isa::untyped::Bytecode;
@@ -133,6 +133,28 @@ macro_rules! zicsr_uimm {
     $type!($opcode, rd, uimm, csr)
   }};
 }
+macro_rules! ra {
+  ($type:ident, $opcode:ident, $untyped:expr, $reg:ident) => {{
+    let r = $untyped.ra();
+    let rd = Rd($reg(r.rd()));
+    let rs1 = Rs1($reg(r.rs1()));
+    let rs2 = Rs2($reg(r.rs2()));
+    let aq = AQ(r.aq());
+    let rl = RL(r.rl());
+    $type!($opcode, rd, rs1, rs2, aq, rl)
+  }};
+}
+macro_rules! ra_only_rs1 {
+  ($type:ident, $opcode:ident, $untyped:expr, $reg:ident) => {{
+    let r = $untyped.ra();
+    let rd = Rd($reg(r.rd()));
+    let rs1 = Rs1($reg(r.rs1()));
+    assert_eq!(r.rs2() as u8, 0);
+    let aq = AQ(r.aq());
+    let rl = RL(r.rl());
+    $type!($opcode, rd, rs1, aq, rl)
+  }};
+}
 
 fn decode_untyped(untyped: Bytecode) -> Instr {
   let opcode = untyped.opcode() >> 2; // stripping away `inst[1:0]=11`
@@ -185,7 +207,7 @@ fn decode_untyped(untyped: Bytecode) -> Instr {
       }
       _ => panic!(),
     }
-    OpcodeMap::OP_IMM_32 =>  match untyped.i().funct3() as u8 {
+    OpcodeMap::OP_IMM_32 => match untyped.i().funct3() as u8 {
       0b000 => i!(rv64, ADDIW, untyped, gp),
       0b001 => r_shamt32!(rv64, SLLIW, untyped, gp),
       0b101 => match untyped.r_shamt32().funct7() as u8 {
@@ -259,7 +281,6 @@ fn decode_untyped(untyped: Bytecode) -> Instr {
       0b111 => r!(rv64, REMUW, untyped, gp),
       _ => panic!(),
     }
-
     OpcodeMap::MISC_MEM => match untyped.i().funct3() as u8 {
       0b000 => match untyped.repr() as u32 {
         0b1000_0011_0011_00000_000_00000_0001111 => rv32!(FENCE_TSO),
@@ -283,6 +304,37 @@ fn decode_untyped(untyped: Bytecode) -> Instr {
       0b111 => zicsr_uimm!(rv64, CSRRCI, untyped, gp),
       _ => panic!(),
     },
+    OpcodeMap::AMO => match untyped.ra().funct3() as u8 {
+      0b010 => match untyped.ra().funct5() as u8 {
+        0b00010 => ra_only_rs1!(rv32, LR_W, untyped, gp),
+        0b00011 => ra!(rv32, SC_W, untyped, gp),
+        0b00001 => ra!(rv32, AMOSWAP_W, untyped, gp),
+        0b00000 => ra!(rv32, AMOADD_W, untyped, gp),
+        0b00100 => ra!(rv32, AMOXOR_W, untyped, gp),
+        0b01100 => ra!(rv32, AMOAND_W, untyped, gp),
+        0b01000 => ra!(rv32, AMOOR_W, untyped, gp),
+        0b10000 => ra!(rv32, AMOMIN_W, untyped, gp),
+        0b10100 => ra!(rv32, AMOMAX_W, untyped, gp),
+        0b11000 => ra!(rv32, AMOMINU_W, untyped, gp),
+        0b11100 => ra!(rv32, AMOMAXU_W, untyped, gp),
+        _ => panic!(),
+      },
+      0b011 => match untyped.ra().funct5() as u8 {
+        0b00010 => ra_only_rs1!(rv64, LR_D, untyped, gp),
+        0b00011 => ra!(rv64, SC_D, untyped, gp),
+        0b00001 => ra!(rv64, AMOSWAP_D, untyped, gp),
+        0b00000 => ra!(rv64, AMOADD_D, untyped, gp),
+        0b00100 => ra!(rv64, AMOXOR_D, untyped, gp),
+        0b01100 => ra!(rv64, AMOAND_D, untyped, gp),
+        0b01000 => ra!(rv64, AMOOR_D, untyped, gp),
+        0b10000 => ra!(rv64, AMOMIN_D, untyped, gp),
+        0b10100 => ra!(rv64, AMOMAX_D, untyped, gp),
+        0b11000 => ra!(rv64, AMOMINU_D, untyped, gp),
+        0b11100 => ra!(rv64, AMOMAXU_D, untyped, gp),
+        _ => panic!(),
+      },
+      _ => panic!(),
+    }
 
     OpcodeMap::_custom_0 |
     OpcodeMap::_custom_1 |
