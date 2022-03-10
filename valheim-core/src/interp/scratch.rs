@@ -21,21 +21,24 @@ impl ScratchInterpreter {
     instr.map(|instr| (pc, instr))
   }
 
-  fn decode(&self, bytecode: Bytecode) -> Instr {
-    Instr::from(bytecode)
+  fn decode(&self, bytecode: Bytecode) -> Option<Instr> {
+    Instr::try_from(bytecode)
   }
 }
 
 impl Rv64Interpreter for ScratchInterpreter {
   fn interp(&self, cpu: &mut RV64Cpu) {
     while let Some((pc, instr)) = self.fetch(cpu) {
-      let decoded = self.decode(instr);
-      println!("pc = {:#010x}, instr = {:#010x}, decoded = {:?}", pc.0, instr.repr(), decoded);
-      match decoded {
-        Instr::RV32(RV32Instr::EBREAK) => break,
-        _ => (),
+      if let Some(decoded) = self.decode(instr) {
+        println!("pc = {:#010x}, instr = {:#010x}, decoded = {:?}", pc.0, instr.repr(), decoded);
+        match decoded {
+          Instr::RV32(RV32Instr::EBREAK) => break,
+          _ => (),
+        }
+        cpu.regs.pc += VirtAddr(size_of::<Bytecode>() as u64);
+      } else {
+        // TODO: invalid instruction interrupt?
       }
-      cpu.regs.pc += VirtAddr(size_of::<Bytecode>() as u64);
     }
     println!("CPU halt with registers: {:?}", cpu.regs);
   }

@@ -9,6 +9,10 @@ use crate::isa::data::Fin;
 
 impl Instr {
   pub fn from(untyped: Bytecode) -> Instr {
+    Instr::try_from(untyped).expect("Invalid instruction")
+  }
+  
+  pub fn try_from(untyped: Bytecode) -> Option<Instr> {
     decode_untyped(untyped)
   }
 }
@@ -156,9 +160,9 @@ macro_rules! ra_only_rs1 {
   }};
 }
 
-fn decode_untyped(untyped: Bytecode) -> Instr {
+fn decode_untyped(untyped: Bytecode) -> Option<Instr> {
   let opcode = untyped.opcode() >> 2; // stripping away `inst[1:0]=11`
-  match opcode {
+  let instr = match opcode {
     OpcodeMap::LUI => u!(rv32, LUI, untyped, gp),
     OpcodeMap::AUIPC => u!(rv32, AUIPC, untyped, gp),
     OpcodeMap::JAL => j!(rv32, JAL, untyped, gp),
@@ -170,7 +174,7 @@ fn decode_untyped(untyped: Bytecode) -> Instr {
       0b101 => b!(rv32, BGE, untyped, gp),
       0b110 => b!(rv32, BLTU, untyped, gp),
       0b111 => b!(rv32, BGEU, untyped, gp),
-      _ => panic!("illegal branch condition {:b} in {:b}", untyped.b().funct3(), untyped.repr()),
+      _ => return None,
     },
     OpcodeMap::LOAD => match untyped.i().funct3() as u8 {
       0b000 => i!(rv32, LB, untyped, gp),
@@ -180,14 +184,14 @@ fn decode_untyped(untyped: Bytecode) -> Instr {
       0b101 => i!(rv32, LHU, untyped, gp),
       0b110 => i!(rv64, LWU, untyped, gp),
       0b011 => i!(rv64, LD, untyped, gp),
-      _ => panic!(),
+      _ => return None,
     },
     OpcodeMap::STORE => match untyped.s().funct3() as u8 {
       0b000 => s!(rv32, SB, untyped, gp),
       0b001 => s!(rv32, SH, untyped, gp),
       0b010 => s!(rv32, SW, untyped, gp),
       0b011 => s!(rv64, SD, untyped, gp),
-      _ => panic!(),
+      _ => return None,
     }
     OpcodeMap::OP_IMM => match untyped.i().funct3() as u8 {
       0b000 => i!(rv32, ADDI, untyped, gp),
@@ -203,9 +207,9 @@ fn decode_untyped(untyped: Bytecode) -> Instr {
       0b101 => match untyped.r_shamt64().funct6() as u8 {
         0b0000000 => r_shamt64!(rv64, SRLI, untyped, gp),
         0b0100000 => r_shamt64!(rv64, SRAI, untyped, gp),
-        _ => panic!(),
+        _ => return None,
       }
-      _ => panic!(),
+      _ => return None,
     }
     OpcodeMap::OP_IMM_32 => match untyped.i().funct3() as u8 {
       0b000 => i!(rv64, ADDIW, untyped, gp),
@@ -213,61 +217,61 @@ fn decode_untyped(untyped: Bytecode) -> Instr {
       0b101 => match untyped.r_shamt32().funct7() as u8 {
         0b0000000 => r_shamt32!(rv64, SRLIW, untyped, gp),
         0b0100000 => r_shamt32!(rv64, SRAIW, untyped, gp),
-        _ => panic!(),
+        _ => return None,
       }
-      _ => panic!(),
+      _ => return None,
     },
     OpcodeMap::OP => match untyped.r().funct3() as u8 {
       0b000 => match untyped.r().funct7() as u8 {
         0b0000000 => r!(rv32, ADD, untyped, gp),
         0b0100000 => r!(rv32, SUB, untyped, gp),
         0b0000001 => r!(rv32, MUL, untyped, gp),
-        _ => panic!(),
+        _ => return None,
       },
       0b001 => match untyped.r().funct7() as u8 {
         0b0000000 => r!(rv32, SLL, untyped, gp),
         0b0000001 => r!(rv32, MULH, untyped, gp),
-        _ => panic!(),
+        _ => return None,
       },
       0b010 => match untyped.r().funct7() as u8 {
         0b0000000 => r!(rv32, SLT, untyped, gp),
         0b0000001 => r!(rv32, MULHSU, untyped, gp),
-        _ => panic!(),
+        _ => return None,
       }
       0b011 => match untyped.r().funct7() as u8 {
         0b0000000 => r!(rv32, SLTU, untyped, gp),
         0b0000001 => r!(rv32, MULHU, untyped, gp),
-        _ => panic!(),
+        _ => return None,
       },
       0b100 => match untyped.r().funct7() as u8 {
         0b0000000 => r!(rv32, XOR, untyped, gp),
         0b0000001 => r!(rv32, DIV, untyped, gp),
-        _ => panic!(),
+        _ => return None,
       },
       0b101 => match untyped.r().funct7() as u8 {
         0b0000000 => r!(rv32, SRL, untyped, gp),
         0b0100000 => r!(rv32, SRA, untyped, gp),
         0b0000001 => r!(rv32, DIVU, untyped, gp),
-        _ => panic!(),
+        _ => return None,
       },
       0b110 => match untyped.r().funct7() as u8 {
         0b0000000 => r!(rv32, OR, untyped, gp),
         0b0000001 => r!(rv32, REM, untyped, gp),
-        _ => panic!(),
+        _ => return None,
       },
       0b111 => match untyped.r().funct7() as u8 {
         0b0000000 => r!(rv32, AND, untyped, gp),
         0b0000001 => r!(rv32, REMU, untyped, gp),
-        _ => panic!(),
+        _ => return None,
       },
-      _ => panic!(),
+      _ => return None,
     }
     OpcodeMap::OP_32 => match untyped.r().funct3() as u8 {
       0b000 => match untyped.r().funct7() as u8 {
         0b0000000 => r!(rv64, ADDW, untyped, gp),
         0b0100000 => r!(rv64, SUBW, untyped, gp),
         0b0000001 => r!(rv64, MULW, untyped, gp),
-        _ => panic!(),
+        _ => return None,
       },
       0b001 => r!(rv64, SLLW, untyped, gp),
       0b100 => r!(rv64, DIVW, untyped, gp),
@@ -275,11 +279,11 @@ fn decode_untyped(untyped: Bytecode) -> Instr {
         0b0000000 => r!(rv64, SRLW, untyped, gp),
         0b0100000 => r!(rv64, SRAW, untyped, gp),
         0b0000001 => r!(rv64, DIVUW, untyped, gp),
-        _ => panic!(),
+        _ => return None,
       },
       0b110 => r!(rv64, REMW, untyped, gp),
       0b111 => r!(rv64, REMUW, untyped, gp),
-      _ => panic!(),
+      _ => return None,
     }
     OpcodeMap::MISC_MEM => match untyped.i().funct3() as u8 {
       0b000 => match untyped.repr() as u32 {
@@ -288,13 +292,13 @@ fn decode_untyped(untyped: Bytecode) -> Instr {
         _fence => fence!(rv32, FENCE, untyped, gp),
       },
       0b001 => i!(rv64, FENCE_I, untyped, gp),
-      _ => panic!(),
+      _ => return None,
     },
     OpcodeMap::SYSTEM => match untyped.i().funct3() as u8 {
       0b000 => match untyped.i().imm11_0() as u8 {
         0b0 => rv32!(ECALL),
         0b1 => rv32!(EBREAK),
-        _ => panic!(),
+        _ => return None,
       },
       0b001 => zicsr_rs1!(rv64, CSRRW, untyped, gp),
       0b010 => zicsr_rs1!(rv64, CSRRS, untyped, gp),
@@ -302,7 +306,7 @@ fn decode_untyped(untyped: Bytecode) -> Instr {
       0b101 => zicsr_uimm!(rv64, CSRRWI, untyped, gp),
       0b110 => zicsr_uimm!(rv64, CSRRSI, untyped, gp),
       0b111 => zicsr_uimm!(rv64, CSRRCI, untyped, gp),
-      _ => panic!(),
+      _ => return None,
     },
     OpcodeMap::AMO => match untyped.ra().funct3() as u8 {
       0b010 => match untyped.ra().funct5() as u8 {
@@ -317,7 +321,7 @@ fn decode_untyped(untyped: Bytecode) -> Instr {
         0b10100 => ra!(rv32, AMOMAX_W, untyped, gp),
         0b11000 => ra!(rv32, AMOMINU_W, untyped, gp),
         0b11100 => ra!(rv32, AMOMAXU_W, untyped, gp),
-        _ => panic!(),
+        _ => return None,
       },
       0b011 => match untyped.ra().funct5() as u8 {
         0b00010 => ra_only_rs1!(rv64, LR_D, untyped, gp),
@@ -331,9 +335,9 @@ fn decode_untyped(untyped: Bytecode) -> Instr {
         0b10100 => ra!(rv64, AMOMAX_D, untyped, gp),
         0b11000 => ra!(rv64, AMOMINU_D, untyped, gp),
         0b11100 => ra!(rv64, AMOMAXU_D, untyped, gp),
-        _ => panic!(),
+        _ => return None,
       },
-      _ => panic!(),
+      _ => return None,
     }
 
     OpcodeMap::_custom_0 |
@@ -342,9 +346,10 @@ fn decode_untyped(untyped: Bytecode) -> Instr {
     OpcodeMap::_custom_3_or_rv128 |
     OpcodeMap::_reversed_0 |
     OpcodeMap::_reversed_1 |
-    OpcodeMap::_reversed_2 => panic!("No custom instructions implemented yet"),
-    _ => panic!("unimplemented opcode: {:b}", untyped.opcode()),
-  }
+    OpcodeMap::_reversed_2 => return None,
+    _ => return None,
+  };
+  Some(instr)
 }
 
 fn fp(reg: u8) -> Reg {
