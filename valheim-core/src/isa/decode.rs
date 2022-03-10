@@ -82,9 +82,18 @@ macro_rules! j {
     $type!($opcode, rd, imm)
   }};
 }
-macro_rules! r_shamt {
+macro_rules! r_shamt32 {
   ($type:ident, $opcode:ident, $untyped:expr, $reg:ident) => {{
-    let r = $untyped.r_shamt();
+    let r = $untyped.r_shamt32();
+    let rd = Rd($reg(r.rd()));
+    let rs1 = Rs1($reg(r.rs1()));
+    let shamt = Shamt(r.shamt());
+    $type!($opcode, rd, rs1, shamt)
+  }};
+}
+macro_rules! r_shamt64 {
+  ($type:ident, $opcode:ident, $untyped:expr, $reg:ident) => {{
+    let r = $untyped.r_shamt64();
     let rd = Rd($reg(r.rd()));
     let rs1 = Rs1($reg(r.rs1()));
     let shamt = Shamt(r.shamt());
@@ -126,12 +135,15 @@ fn decode_untyped(untyped: Bytecode) -> Instr {
       0b010 => i!(rv32, LW, untyped, gp),
       0b100 => i!(rv32, LBU, untyped, gp),
       0b101 => i!(rv32, LHU, untyped, gp),
+      0b110 => i!(rv64, LWU, untyped, gp),
+      0b011 => i!(rv64, LD, untyped, gp),
       _ => panic!(),
     },
     OpcodeMap::STORE => match untyped.s().funct3() as u8 {
       0b000 => s!(rv32, SB, untyped, gp),
       0b001 => s!(rv32, SH, untyped, gp),
       0b010 => s!(rv32, SW, untyped, gp),
+      0b011 => s!(rv64, SD, untyped, gp),
       _ => panic!(),
     }
     OpcodeMap::OP_IMM => match untyped.i().funct3() as u8 {
@@ -141,14 +153,27 @@ fn decode_untyped(untyped: Bytecode) -> Instr {
       0b100 => i!(rv32, XORI, untyped, gp),
       0b110 => i!(rv32, ORI, untyped, gp),
       0b111 => i!(rv32, ANDI, untyped, gp),
-      0b001 => r_shamt!(rv32, SLLI, untyped, gp),
-      0b101 => match untyped.r_shamt().funct7() as u8 {
-        0b0000000 => r_shamt!(rv32, SRLI, untyped, gp),
-        0b0100000 => r_shamt!(rv32, SRAI, untyped, gp),
+      // RV64's SLLI, SRLI, SRAI have a 1-bit-more `shamt` field compared to RV32:
+      // The `shamt` field in RV32: 5 bits
+      // The `shamt` field in RV64: 6 bits
+      0b001 => r_shamt64!(rv64, SLLI, untyped, gp),
+      0b101 => match untyped.r_shamt64().funct6() as u8 {
+        0b0000000 => r_shamt64!(rv64, SRLI, untyped, gp),
+        0b0100000 => r_shamt64!(rv64, SRAI, untyped, gp),
         _ => panic!(),
       }
       _ => panic!(),
     }
+    OpcodeMap::OP_IMM_32 =>  match untyped.i().funct3() as u8 {
+      0b000 => i!(rv64, ADDIW, untyped, gp),
+      0b001 => r_shamt32!(rv64, SLLIW, untyped, gp),
+      0b101 => match untyped.r_shamt32().funct7() as u8 {
+        0b0000000 => r_shamt32!(rv64, SRLIW, untyped, gp),
+        0b0100000 => r_shamt32!(rv64, SRAIW, untyped, gp),
+        _ => panic!(),
+      }
+      _ => panic!(),
+    },
     OpcodeMap::OP => match untyped.r().funct3() as u8 {
       0b000 => match untyped.r().funct7() as u8 {
         0b0000000 => r!(rv32, ADD, untyped, gp),
@@ -194,6 +219,27 @@ fn decode_untyped(untyped: Bytecode) -> Instr {
       },
       _ => panic!(),
     }
+    OpcodeMap::OP_32 => match untyped.r().funct3() as u8 {
+      0b000 => match untyped.r().funct7() as u8 {
+        0b0000000 => r!(rv64, ADDW, untyped, gp),
+        0b0100000 => r!(rv64, SUBW, untyped, gp),
+        // 0b0000001 => r!(rv64, MULW, untyped, gp),
+        _ => panic!(),
+      },
+      0b001 => match untyped.r().funct7() as u8 {
+        0b0000000 => r!(rv64, SLLW, untyped, gp),
+        // 0b0000001 => r!(rv64, MULH, untyped, gp),
+        _ => panic!(),
+      },
+      0b101 => match untyped.r().funct7() as u8 {
+        0b0000000 => r!(rv64, SRLW, untyped, gp),
+        0b0100000 => r!(rv64, SRAW, untyped, gp),
+        // 0b0000001 => r!(rv32, DIVU, untyped, gp),
+        _ => panic!(),
+      },
+      _ => panic!(),
+    }
+
     OpcodeMap::MISC_MEM => match untyped.repr() as u32 {
       0b1000_0011_0011_00000_000_00000_0001111 => rv32!(FENCE_TSO),
       0b0000_0001_0000_00000_000_00000_0001111 => rv32!(PAUSE),
