@@ -1,5 +1,5 @@
 use valheim_core::cpu::RV64Cpu;
-use valheim_core::interp::scratch::ScratchInterpreter;
+use valheim_core::interp::naive::NaiveInterpreter;
 
 mod repl;
 
@@ -16,6 +16,6 @@ fn main() {
   ];
   let mut cpu = RV64Cpu::new();
   cpu.mem.reset(code.as_slice());
-  let interp = ScratchInterpreter::new();
+  let interp = NaiveInterpreter::new();
   cpu.run(&interp);
 }

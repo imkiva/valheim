@@ -4,7 +4,7 @@ use crate::isa::untyped::Bytecode;
 use crate::memory::VirtAddr;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TraceState {
+pub struct Journal {
   pub init_regs: Regs,
   pub init_mem_base: VirtAddr,
   pub init_mem_size: usize,

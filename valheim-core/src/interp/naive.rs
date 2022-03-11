@@ -1,20 +1,20 @@
 use std::intrinsics::size_of;
 use crate::cpu::RV64Cpu;
-use crate::interp::Rv64Interpreter;
+use crate::interp::RV64Interpreter;
 use crate::isa::rv32::RV32Instr;
 use crate::isa::typed::Instr;
 use crate::isa::untyped::Bytecode;
 use crate::memory::VirtAddr;
 
-pub struct ScratchInterpreter;
+pub struct NaiveInterpreter;
 
-impl ScratchInterpreter {
-  pub fn new() -> ScratchInterpreter {
-    ScratchInterpreter {}
+impl NaiveInterpreter {
+  pub fn new() -> NaiveInterpreter {
+    NaiveInterpreter {}
   }
 }
 
-impl ScratchInterpreter {
+impl NaiveInterpreter {
   fn fetch(&self, cpu: &mut RV64Cpu) -> Option<(VirtAddr, Bytecode)> {
     let pc = cpu.regs.pc;
     let instr = cpu.mem.read(pc);
@@ -26,7 +26,7 @@ impl ScratchInterpreter {
   }
 }
 
-impl Rv64Interpreter for ScratchInterpreter {
+impl RV64Interpreter for NaiveInterpreter {
   fn interp(&self, cpu: &mut RV64Cpu) {
     while let Some((pc, instr)) = self.fetch(cpu) {
       if let Some(decoded) = self.decode(instr) {

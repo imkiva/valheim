@@ -1,4 +1,4 @@
-use crate::interp::Rv64Interpreter;
+use crate::interp::RV64Interpreter;
 use crate::memory;
 use crate::memory::VirtAddr;
 
@@ -26,7 +26,7 @@ impl RV64Cpu {
     }
   }
 
-  pub fn run(&mut self, int: &dyn Rv64Interpreter) {
+  pub fn run(&mut self, int: &dyn RV64Interpreter) {
     int.interp(self)
   }
 }
