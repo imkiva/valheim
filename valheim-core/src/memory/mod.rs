@@ -6,6 +6,7 @@ pub struct VirtAddr(pub u64);
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
 pub struct PhysAddr(pub *const u8);
 
+#[derive(Debug)]
 pub struct Memory {
   memory_base: VirtAddr,
   memory_size: usize,

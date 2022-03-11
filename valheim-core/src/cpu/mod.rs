@@ -8,6 +8,7 @@ const RV64_MEMORY_BASE: u64 = 0x80000000;
 const RV64_CPU_RESET_OFFSET: u64 = 0x0;
 const VALHEIM_MEMORY_SIZE: usize = 4 * 1024 * 1024 * 1024; // 4GiB
 
+#[derive(Debug)]
 pub struct RV64Cpu {
   pub regs: regs::Regs,
   pub mem: memory::Memory,

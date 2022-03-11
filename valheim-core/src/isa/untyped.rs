@@ -1,3 +1,4 @@
+use std::fmt::{Debug, Formatter};
 use modular_bitfield::prelude::*;
 
 #[bitfield(bits = 32)]
@@ -176,6 +177,20 @@ impl Bytecode {
   unsafe_wrapper!(u, UType);
   unsafe_wrapper!(fence, FenceType);
 }
+
+impl Debug for Bytecode {
+  fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    write!(f, "Bytecode({:#010b})", self.repr())
+  }
+}
+
+impl PartialEq for Bytecode {
+  fn eq(&self, other: &Self) -> bool {
+    self.repr() == other.repr()
+  }
+}
+
+impl Eq for Bytecode {}
 
 #[cfg(test)]
 mod tests {
