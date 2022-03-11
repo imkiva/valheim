@@ -1,0 +1,180 @@
+use std::str::FromStr;
+use crate::debug::repl::*;
+use crate::isa::typed::*;
+use crate::isa::data::*;
+use crate::memory::VirtAddr;
+use lalrpop_util::ParseError;
+
+grammar;
+
+extern {
+  type Error = ReplParseError;
+}
+
+pub Stmt: Stmt = {
+  "watch" <e: Expr> => Stmt::AddWatch(e),
+  "watch-rm" <e: DecLit> => Stmt::RemoveWatch(e),
+  "b" <e: VirtAddr> => Stmt::AddBreakpoint(e),
+  "b-rm" <e: VirtAddr> => Stmt::RemoveBreakpoint(e),
+  "ls" => Stmt::ShowRelevantAsm,
+  Expr => Stmt::Eval(<>),
+}
+
+pub VirtAddr: VirtAddr = {
+  <HexLit> => VirtAddr(<>),
+}
+
+pub Expr: Expr = {
+  <e: Expr> "=" <e2: AddSubExpr> => Expr::Assign(Box::new(e), Box::new(e2)),
+  AddSubExpr,
+}
+
+pub AddSubExpr: Expr = {
+  <lhs: AddSubExpr> "+" <rhs: MulDivExpr> => Expr::Add(Box::new(lhs), Box::new(rhs)),
+  <lhs: AddSubExpr> "-" <rhs: MulDivExpr> => Expr::Sub(Box::new(lhs), Box::new(rhs)),
+  MulDivExpr,
+}
+
+pub MulDivExpr: Expr = {
+  <lhs: MulDivExpr> "*" <rhs: UnaryExpr> => Expr::Mul(Box::new(lhs), Box::new(rhs)),
+  <lhs: MulDivExpr> "/" <rhs: UnaryExpr> => Expr::Div(Box::new(lhs), Box::new(rhs)),
+}
+
+pub UnaryExpr: Expr = {
+  "*" <e: AtomExpr> => Expr::Deref(Box::new(e)),
+  AtomExpr,
+}
+
+pub AtomExpr: Expr = {
+  Reg => Expr::Register(<>),
+  DecLit => Expr::Literal(<>),
+  HexLit => Expr::Literal(<>),
+}
+
+pub Reg: Reg = {
+  // abi names
+  "$zero" => Reg::ZERO,
+  "$ra" => Reg::X(Fin::new(1)),
+  "$sp" => Reg::X(Fin::new(2)),
+  "$gp" => Reg::X(Fin::new(3)),
+  "$tp" => Reg::X(Fin::new(4)),
+  "$t0" => Reg::X(Fin::new(5)),
+  "$t1" => Reg::X(Fin::new(6)),
+  "$t2" => Reg::X(Fin::new(7)),
+  "$s0" => Reg::X(Fin::new(8)),
+  "$fp" => Reg::X(Fin::new(8)),
+  "$s1" => Reg::X(Fin::new(9)),
+  "$a0" => Reg::X(Fin::new(10)),
+  "$a1" => Reg::X(Fin::new(11)),
+  "$a2" => Reg::X(Fin::new(12)),
+  "$a3" => Reg::X(Fin::new(13)),
+  "$a4" => Reg::X(Fin::new(14)),
+  "$a5" => Reg::X(Fin::new(15)),
+  "$a6" => Reg::X(Fin::new(16)),
+  "$a7" => Reg::X(Fin::new(17)),
+  "$s2" => Reg::X(Fin::new(18)),
+  "$s3" => Reg::X(Fin::new(19)),
+  "$s4" => Reg::X(Fin::new(20)),
+  "$s5" => Reg::X(Fin::new(21)),
+  "$s6" => Reg::X(Fin::new(22)),
+  "$s7" => Reg::X(Fin::new(23)),
+  "$s8" => Reg::X(Fin::new(24)),
+  "$s9" => Reg::X(Fin::new(25)),
+  "$s10" => Reg::X(Fin::new(26)),
+  "$s11" => Reg::X(Fin::new(27)),
+  "$t3" => Reg::X(Fin::new(28)),
+  "$t4" => Reg::X(Fin::new(29)),
+  "$t5" => Reg::X(Fin::new(30)),
+  "$t6" => Reg::X(Fin::new(31)),
+
+  // registers
+  "$pc" => Reg::PC,
+  "$csr" => Reg::CSR,
+  "$fcsr" => Reg::FCSR,
+  "$x0" => Reg::ZERO,
+  "$x1" => Reg::X(Fin::new(1)),
+  "$x2" => Reg::X(Fin::new(2)),
+  "$x3" => Reg::X(Fin::new(3)),
+  "$x4" => Reg::X(Fin::new(4)),
+  "$x5" => Reg::X(Fin::new(5)),
+  "$x6" => Reg::X(Fin::new(6)),
+  "$x7" => Reg::X(Fin::new(7)),
+  "$x8" => Reg::X(Fin::new(8)),
+  "$x9" => Reg::X(Fin::new(9)),
+  "$x10" => Reg::X(Fin::new(10)),
+  "$x11" => Reg::X(Fin::new(11)),
+  "$x12" => Reg::X(Fin::new(12)),
+  "$x13" => Reg::X(Fin::new(13)),
+  "$x14" => Reg::X(Fin::new(14)),
+  "$x15" => Reg::X(Fin::new(15)),
+  "$x16" => Reg::X(Fin::new(16)),
+  "$x17" => Reg::X(Fin::new(17)),
+  "$x18" => Reg::X(Fin::new(18)),
+  "$x19" => Reg::X(Fin::new(19)),
+  "$x20" => Reg::X(Fin::new(20)),
+  "$x21" => Reg::X(Fin::new(21)),
+  "$x22" => Reg::X(Fin::new(22)),
+  "$x23" => Reg::X(Fin::new(23)),
+  "$x24" => Reg::X(Fin::new(24)),
+  "$x25" => Reg::X(Fin::new(25)),
+  "$x26" => Reg::X(Fin::new(26)),
+  "$x27" => Reg::X(Fin::new(27)),
+  "$x28" => Reg::X(Fin::new(28)),
+  "$x29" => Reg::X(Fin::new(29)),
+  "$x30" => Reg::X(Fin::new(30)),
+  "$x31" => Reg::X(Fin::new(31)),
+  "$f0" => Reg::F(Fin::new(0)),
+  "$f1" => Reg::F(Fin::new(1)),
+  "$f2" => Reg::F(Fin::new(2)),
+  "$f3" => Reg::F(Fin::new(3)),
+  "$f4" => Reg::F(Fin::new(4)),
+  "$f5" => Reg::F(Fin::new(5)),
+  "$f6" => Reg::F(Fin::new(6)),
+  "$f7" => Reg::F(Fin::new(7)),
+  "$f8" => Reg::F(Fin::new(8)),
+  "$f9" => Reg::F(Fin::new(9)),
+  "$f10" => Reg::F(Fin::new(10)),
+  "$f11" => Reg::F(Fin::new(11)),
+  "$f12" => Reg::F(Fin::new(12)),
+  "$f13" => Reg::F(Fin::new(13)),
+  "$f14" => Reg::F(Fin::new(14)),
+  "$f15" => Reg::F(Fin::new(15)),
+  "$f16" => Reg::F(Fin::new(16)),
+  "$f17" => Reg::F(Fin::new(17)),
+  "$f18" => Reg::F(Fin::new(18)),
+  "$f19" => Reg::F(Fin::new(19)),
+  "$f20" => Reg::F(Fin::new(20)),
+  "$f21" => Reg::F(Fin::new(21)),
+  "$f22" => Reg::F(Fin::new(22)),
+  "$f23" => Reg::F(Fin::new(23)),
+  "$f24" => Reg::F(Fin::new(24)),
+  "$f25" => Reg::F(Fin::new(25)),
+  "$f26" => Reg::F(Fin::new(26)),
+  "$f27" => Reg::F(Fin::new(27)),
+  "$f28" => Reg::F(Fin::new(28)),
+  "$f29" => Reg::F(Fin::new(29)),
+  "$f30" => Reg::F(Fin::new(30)),
+  "$f31" => Reg::F(Fin::new(31)),
+}
+
+pub DecLit: u64 = {
+  <s:@L> <i:r"[0-9]+"> <e:@L> =>? {
+    u64::from_str(i).map_err(|_| ParseError::User {
+      error: ReplParseError {
+        kind: ReplParseErrorKind::LiteralTooLarge,
+        location: s,
+      }
+    })
+  }
+}
+
+pub HexLit: u64 = {
+  <s:@L> <i:r"0x[0-9]+"> <e:@L> =>? {
+    u64::from_str_radix(i.trim_start_matches("0x"), 16).map_err(|_| ParseError::User {
+      error: ReplParseError {
+        kind: ReplParseErrorKind::LiteralTooLarge,
+        location: s,
+      }
+    })
+  }
+}
