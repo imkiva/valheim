@@ -2,14 +2,9 @@
 name = "valheim-core"
 version = "0.1.0"
 edition = "2021"
-build = "build.rs"
-
-[build-dependencies]
-lalrpop = { version = "0.19.7", features = [ "lexer" ] }
 
 [dependencies]
 modular-bitfield = "0.11.2"
 memmap2 = "0.5.3"
 derive_more = "0.99.0"
-lalrpop-util = { version = "0.19.7", features = [ "lexer" ] }
-regex = "1"
+

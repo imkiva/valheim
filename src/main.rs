@@ -1,6 +1,8 @@
 use valheim_core::cpu::RV64Cpu;
 use valheim_core::interp::scratch::ScratchInterpreter;
 
+mod repl;
+
 fn main() {
   let code : Vec<u32> = vec![
     0x1bf520b7,  // 0:  lui x1, 114514

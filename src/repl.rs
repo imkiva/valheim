@@ -1,6 +1,6 @@
 use lalrpop_util::lalrpop_mod;
-use crate::isa::typed::Reg;
-use crate::memory::VirtAddr;
+use valheim_core::isa::typed::Reg;
+use valheim_core::memory::VirtAddr;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Stmt {

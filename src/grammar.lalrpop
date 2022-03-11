@@ -1,8 +1,8 @@
 use std::str::FromStr;
-use crate::debug::repl::*;
-use crate::isa::typed::*;
-use crate::isa::data::*;
-use crate::memory::VirtAddr;
+use crate::repl::*;
+use valheim_core::isa::typed::*;
+use valheim_core::isa::data::*;
+use valheim_core::memory::VirtAddr;
 use lalrpop_util::ParseError;
 
 grammar;
