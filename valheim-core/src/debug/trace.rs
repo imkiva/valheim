@@ -37,3 +37,10 @@ pub enum MemTrace {
   Write(VirtAddr, usize, u64),
 }
 
+impl Journal {
+  #[inline(always)]
+  pub fn trace<F: Fn() -> Trace>(&mut self, f: F) {
+    #[cfg(feature = "trace")]
+    self.trace.push(f());
+  }
+}
