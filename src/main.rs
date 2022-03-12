@@ -15,7 +15,7 @@ fn main() {
     0x00100073,  // ebreak
   ];
   let mut cpu = RV64Cpu::new();
-  cpu.mem.reset(code.as_slice());
+  cpu.reset(code.as_slice());
   let interp = NaiveInterpreter::new();
   cpu.run(&interp);
 }
