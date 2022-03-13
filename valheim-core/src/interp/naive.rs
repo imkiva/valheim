@@ -17,6 +17,7 @@ impl RV64Interpreter for NaiveInterpreter {
         if cpu.execute(pc, decoded).is_none() { break; }
       } else {
         // TODO: invalid instruction interrupt?
+        println!("pc = {:#010x}, instr = {:#010x}, which is an invalid instruction", pc.0, instr.repr());
       }
     }
     cpu.halt();
