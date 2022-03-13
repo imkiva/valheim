@@ -88,7 +88,7 @@ impl<const HIGH_BIT: usize, const LOW_BIT: usize> Imm32<HIGH_BIT, LOW_BIT> {
 }
 
 #[inline(always)]
-pub fn sign_extend32(data: u32, size: usize) -> i32 {
+fn sign_extend32(data: u32, size: usize) -> i32 {
   ((data << (32 - size)) as i32) >> (32 - size)
 }
 
