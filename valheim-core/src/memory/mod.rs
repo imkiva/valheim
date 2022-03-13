@@ -1,10 +1,23 @@
+use std::fmt::Debug;
 use memmap2::MmapMut;
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Add, Sub, AddAssign, SubAssign)]
+#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Add, Sub, AddAssign, SubAssign)]
 pub struct VirtAddr(pub u64);
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
 pub struct PhysAddr(pub *const u8);
+
+impl Debug for VirtAddr {
+  fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+    write!(f, "VirtAddr({:#x})", self.0)
+  }
+}
+
+impl Debug for PhysAddr {
+  fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+    write!(f, "PhysAddr({:#x})", self.0 as usize)
+  }
+}
 
 #[derive(Debug)]
 pub struct Memory {
