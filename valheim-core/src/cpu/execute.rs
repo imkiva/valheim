@@ -1,6 +1,6 @@
 use crate::cpu::RV64Cpu;
 use crate::isa::rv32::RV32Instr;
-use crate::isa::typed::{Imm32, Instr, Rd, Reg, Rs1, Rs2, Rs3, sign_extend32};
+use crate::isa::typed::{Imm32, Instr, Rd, Reg, Rs1, Rs2, Rs3};
 use crate::isa::untyped::Bytecode;
 use crate::memory::VirtAddr;
 use crate::isa::rv32::RV32Instr::*;
