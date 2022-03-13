@@ -1,12 +1,11 @@
-use crate::debug::trace::{Journal, Trace};
+use crate::debug::trace::Journal;
 use crate::interp::RV64Interpreter;
-use crate::isa::rv32::RV32Instr;
-use crate::isa::typed::{Instr, Reg};
-use crate::isa::untyped::Bytecode;
+use crate::isa::typed::Reg;
 use crate::memory;
 use crate::memory::VirtAddr;
 
 pub mod regs;
+pub mod execute;
 
 const RV64_MEMORY_BASE: u64 = 0x80000000;
 const RV64_CPU_RESET_OFFSET: u64 = 0x0;
@@ -38,18 +37,22 @@ impl RV64Cpu {
     }
   }
 
+  #[inline(always)]
   pub fn read_mem<T: Copy + Sized>(&self, addr: VirtAddr) -> Option<T> {
     self.mem.read(addr)
   }
 
+  #[inline(always)]
   pub fn write_mem<T: Copy + Sized>(&mut self, addr: VirtAddr, val: T) -> Option<()> {
     self.mem.write(addr, val)
   }
 
+  #[inline(always)]
   pub fn read_reg(&self, reg: Reg) -> Option<u64> {
     self.regs.read(reg)
   }
 
+  #[inline(always)]
   pub fn write_reg(&mut self, reg: Reg, val: u64) -> Option<()> {
     self.regs.write(reg, val)
   }
@@ -64,26 +67,6 @@ impl RV64Cpu {
   #[inline(always)]
   fn write_pc(&mut self, pc: VirtAddr) {
     self.regs.pc = pc
-  }
-
-  pub fn fetch(&mut self) -> Option<(VirtAddr, Bytecode)> {
-    let pc = self.read_pc();
-    let instr = self.read_mem(pc);
-    instr.map(|instr| (pc, instr))
-  }
-
-  pub fn decode(&self, _: VirtAddr, untyped: Bytecode) -> Option<Instr> {
-    Instr::try_from(untyped)
-  }
-
-  pub fn execute(&mut self, pc: VirtAddr, instr: Instr) -> Option<()> {
-    match instr {
-      Instr::RV32(RV32Instr::EBREAK) => return None,
-      _ => (),
-    }
-    let new_pc = VirtAddr(pc.0 + std::mem::size_of::<Bytecode>() as u64);
-    self.write_pc(new_pc);
-    Some(())
   }
 
   pub fn run(&mut self, int: &dyn RV64Interpreter) {

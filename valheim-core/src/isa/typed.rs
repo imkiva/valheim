@@ -64,7 +64,7 @@ pub enum RoundingMode {
 /// This is used to represent lazily-decoded immediate value,
 /// which is written as `imm[HIGH_BIT:LOW_BIT]` in the risc-v specification.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Imm32<const HIGH_BIT: usize, const LOW_BIT: usize>(u32);
+pub struct Imm32<const HIGH_BIT: usize, const LOW_BIT: usize>(pub u32);
 
 impl<const HIGH_BIT: usize, const LOW_BIT: usize> Imm32<HIGH_BIT, LOW_BIT> {
   pub fn from(underlying: u32) -> Self {
@@ -81,6 +81,15 @@ impl<const HIGH_BIT: usize, const LOW_BIT: usize> Imm32<HIGH_BIT, LOW_BIT> {
     let mask = (1 << self.valid_bits()) - 1;
     (self.0 & mask) << LOW_BIT
   }
+
+  pub fn decode_sext(self) -> i32 {
+    sign_extend32(self.decode(), self.valid_bits())
+  }
+}
+
+#[inline(always)]
+pub fn sign_extend32(data: u32, size: usize) -> i32 {
+  ((data << (32 - size)) as i32) >> (32 - size)
 }
 
 impl<

@@ -19,6 +19,8 @@ impl Regs {
 
   pub fn read(&self, reg: Reg) -> Option<u64> {
     match reg {
+      Reg::ZERO => Some(0),
+      Reg::X(x) if x.value() == 0 => Some(0),
       Reg::X(x) => Some(self.x[x.value() as usize]),
       Reg::CSR => Some(self.csr),
       Reg::PC => Some(self.pc.0),
@@ -28,6 +30,8 @@ impl Regs {
 
   pub fn write(&mut self, reg: Reg, value: u64) -> Option<()> {
     match reg {
+      Reg::ZERO => (),
+      Reg::X(x) if x.value() == 0 => (),
       Reg::X(x) => self.x[x.value() as usize] = value,
       Reg::CSR => self.csr = value,
       Reg::PC => self.pc = VirtAddr(value),
