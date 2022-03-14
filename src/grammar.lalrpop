@@ -89,7 +89,6 @@ Reg: Reg = {
 
   // registers
   "$pc" => Reg::PC,
-  "$csr" => Reg::CSR,
   "$fcsr" => Reg::FCSR,
   "$x0" => Reg::ZERO,
   "$x1" => Reg::X(Fin::new(1)),

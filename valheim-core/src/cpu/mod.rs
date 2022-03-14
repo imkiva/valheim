@@ -6,6 +6,9 @@ use crate::memory::VirtAddr;
 
 pub mod regs;
 pub mod execute;
+pub mod exception;
+pub mod bus;
+pub mod csr;
 
 const RV64_MEMORY_BASE: u64 = 0x80000000;
 const RV64_CPU_RESET_OFFSET: u64 = 0x0;

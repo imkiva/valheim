@@ -39,7 +39,6 @@ pub enum Reg {
   X(Fin<32>),
   F(Fin<32>),
   PC,
-  CSR,
   FCSR,
 }
 

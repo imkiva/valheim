@@ -8,10 +8,6 @@ use crate::isa::untyped::Bytecode;
 use crate::isa::data::Fin;
 
 impl Instr {
-  pub fn from(untyped: Bytecode) -> Instr {
-    Instr::try_from(untyped).expect("Invalid instruction")
-  }
-  
   pub fn try_from(untyped: Bytecode) -> Option<Instr> {
     decode_untyped(untyped)
   }
@@ -421,7 +417,7 @@ mod tests {
     // jal x0, -6*4
     let instr_asm: u32 = 0b_1_1111110100_1_11111111_00000_1101111;
     let bytecode = Bytecode { repr: instr_asm };
-    let instr = Instr::from(bytecode);
+    let instr = Instr::try_from(bytecode).unwrap();
     println!("{:?}", instr);
   }
 }
