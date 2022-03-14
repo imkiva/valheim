@@ -1,5 +1,5 @@
 CROSS_COMPILE = riscv64-unknown-elf-
-CFLAGS = -nostdlib -fno-builtin -march=rv64g -mabi=lp64d -g -Wall
+CFLAGS = -nostdlib -fno-builtin -march=rv64gc -mabi=lp64d -g -Wall
 
 GDB = ${CROSS_COMPILE}gdb
 CC = ${CROSS_COMPILE}gcc
