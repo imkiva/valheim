@@ -253,21 +253,21 @@ fn decode_untyped(untyped: Bytecode16) -> Option<Instr> {
 
         0b11 => match (untyped.ca().funct6(), untyped.ca().funct2()) {
           // C.SUB
-          (0b100_0_11, 00) => arith!(rv32, SUB, untyped),
+          (0b100_0_11, 0b00) => arith!(rv32, SUB, untyped),
           // C.XOR
-          (0b100_0_11, 01) => arith!(rv32, XOR, untyped),
+          (0b100_0_11, 0b01) => arith!(rv32, XOR, untyped),
           // C.OR
-          (0b100_0_11, 10) => arith!(rv32, OR, untyped),
+          (0b100_0_11, 0b10) => arith!(rv32, OR, untyped),
           // C.AND
-          (0b100_0_11, 11) => arith!(rv32, AND, untyped),
+          (0b100_0_11, 0b11) => arith!(rv32, AND, untyped),
           // C.SUBW
-          (0b100_1_11, 00) => arith!(rv64, SUBW, untyped),
+          (0b100_1_11, 0b00) => arith!(rv64, SUBW, untyped),
           // C.ADDW
-          (0b100_1_11, 01) => arith!(rv64, ADDW, untyped),
+          (0b100_1_11, 0b01) => arith!(rv64, ADDW, untyped),
           // Reserved
-          (0b100_1_11, 10) => reserved!(),
+          (0b100_1_11, 0b10) => reserved!(),
           // Reserved
-          (0b100_1_11, 11) => reserved!(),
+          (0b100_1_11, 0b11) => reserved!(),
           _ => return None,
         },
 
