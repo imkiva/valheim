@@ -1,3 +1,4 @@
+use crate::cpu::data::Either;
 use crate::cpu::RV64Cpu;
 use crate::interp::RV64Interpreter;
 
@@ -11,13 +12,18 @@ impl NaiveInterpreter {
 
 impl RV64Interpreter for NaiveInterpreter {
   fn interp(&self, cpu: &mut RV64Cpu) {
-    while let Some((pc, instr)) = cpu.fetch() {
-      if let Some(decoded) = cpu.decode(pc, instr) {
-        println!("pc = {:#010x}, instr = {:#010x}, decoded = {:?}", pc.0, instr.repr(), decoded);
-        if cpu.execute(pc, decoded).is_none() { break; }
+    while let Some((pc, untyped, compressed)) = cpu.fetch() {
+      if let Some((from, decoded)) = cpu.decode(pc, untyped, compressed) {
+        let (is_compressed, repr) = match from {
+          Either::Left(untyped) => (false, untyped.repr()),
+          Either::Right(_) => (true, compressed.repr() as u32),
+        };
+        println!("pc = {:#010x}, instr = {:#010x}, decoded = {:?}", pc.0, repr, decoded);
+        if cpu.execute(pc, decoded, is_compressed).is_none() { break; }
       } else {
         // TODO: invalid instruction interrupt?
-        println!("pc = {:#010x}, instr = {:#010x}, which is an invalid instruction", pc.0, instr.repr());
+        println!("pc = {:#010x}, instr = {:#010x} (maybe compressed: {:#010x}), which is an invalid instruction",
+                 pc.0, untyped.repr(), compressed.repr());
       }
     }
     cpu.halt();

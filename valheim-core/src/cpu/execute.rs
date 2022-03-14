@@ -1,4 +1,6 @@
+use crate::cpu::data::Either;
 use crate::cpu::RV64Cpu;
+use crate::isa::compressed::untyped::Bytecode16;
 use crate::isa::rv32::RV32Instr;
 use crate::isa::typed::{Imm32, Instr, Rd, Reg, Rs1, Rs2, Rs3};
 use crate::isa::untyped::Bytecode;
@@ -9,18 +11,26 @@ use crate::isa::rv64::RV64Instr::*;
 use crate::isa::typed::Instr::{RV32, RV64};
 
 impl RV64Cpu {
-  pub fn fetch(&mut self) -> Option<(VirtAddr, Bytecode)> {
+  pub fn fetch(&mut self) -> Option<(VirtAddr, Bytecode, Bytecode16)> {
     let pc = self.read_pc();
-    let instr = self.read_mem(pc);
-    instr.map(|instr| (pc, instr))
+    let bytecode: Bytecode = self.read_mem(pc)?;
+    let compressed: Bytecode16 = self.read_mem(pc)?;
+    Some((pc, bytecode, compressed))
   }
 
-  pub fn decode(&self, _: VirtAddr, untyped: Bytecode) -> Option<Instr> {
-    Instr::try_from(untyped)
+  pub fn decode(&self, _: VirtAddr, untyped: Bytecode, compressed: Bytecode16) -> Option<(Either<Bytecode, Bytecode16>, Instr)> {
+    match Instr::try_from_compressed(compressed) {
+      Some(instr) => Some((Either::Right(compressed), instr)),
+      None => Instr::try_from(untyped).map(|instr| (Either::Left(untyped), instr)),
+    }
   }
 
-  pub fn execute(&mut self, pc: VirtAddr, instr: Instr) -> Option<()> {
-    let mut next_pc = VirtAddr(pc.0.wrapping_add(std::mem::size_of::<Bytecode>() as u64));
+  pub fn execute(&mut self, pc: VirtAddr, instr: Instr, is_compressed: bool) -> Option<()> {
+    let delta = match is_compressed {
+      true => std::mem::size_of::<Bytecode16>() as u64,
+      false => std::mem::size_of::<Bytecode>() as u64,
+    };
+    let mut next_pc = VirtAddr(pc.0.wrapping_add(delta));
     match instr {
       Instr::NOP => (),
       // nop is also encoded as `ADDI x0, x0, 0`
