@@ -46,7 +46,9 @@ impl Instr {
     match (repr, repr & 0b11) {
       // A 16-bit instruction with all bits zero is permanently reserved as an illegal instruction.
       (0, _) => None,
-      (_, 0 | 1 | 2) => decode_untyped(untyped),
+      (_, 0) => decode_untyped(untyped),
+      (_, 1) => decode_untyped(untyped),
+      (_, 2) => decode_untyped(untyped),
       _ => None,
     }
   }
