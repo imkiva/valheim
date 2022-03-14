@@ -22,7 +22,8 @@ impl RV64Cpu {
   pub fn execute(&mut self, pc: VirtAddr, instr: Instr) -> Option<()> {
     let mut next_pc = VirtAddr(pc.0.wrapping_add(std::mem::size_of::<Bytecode>() as u64));
     match instr {
-      // nop is encoded as `ADDI x0, x0, 0`
+      Instr::NOP => (),
+      // nop is also encoded as `ADDI x0, x0, 0`
       RV32(ADDI(Rd(Reg::ZERO), Rs1(Reg::ZERO), Imm32(0))) => (),
       RV32(LUI(rd, imm)) => rd.write(self, imm.decode() as i32 as i64 as u64),
       RV32(AUIPC(rd, offset)) => rd.write(self, pc.0.wrapping_add(offset.decode() as i32 as i64 as u64)),

@@ -183,7 +183,7 @@ fn decode_untyped(untyped: Bytecode16) -> Option<Instr> {
         let ci = untyped.ci();
         let rd = Rd(gp(ci.rd()));
         // imm[17|16:12] = inst[12|6:2]
-        let imm = (((inst << 5) & 0x20000) | ((inst << 10) & 0x1f000)) as u32;
+        let imm = (((inst as u32) << 5) & 0x20000) | (((inst as u32) << 10) & 0x1f000);
         // Sign-extended.
         let imm = match (imm & 0x20000) == 0 {
           true => imm,
