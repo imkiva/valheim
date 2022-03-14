@@ -16,7 +16,7 @@ impl RV64Interpreter for NaiveInterpreter {
       if let Some((from, decoded)) = cpu.decode(pc, untyped, compressed) {
         let (is_compressed, repr) = match from {
           Either::Left(untyped) => (false, untyped.repr()),
-          Either::Right(_) => (true, compressed.repr() as u32),
+          Either::Right(compressed) => (true, compressed.repr() as u32),
         };
         println!("pc = {:#010x}, instr = {:#010x}, decoded = {:?}", pc.0, repr, decoded);
         if cpu.execute(pc, decoded, is_compressed).is_none() { break; }
