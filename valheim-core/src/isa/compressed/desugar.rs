@@ -142,7 +142,12 @@ fn decode_untyped(untyped: Bytecode16) -> Option<Instr> {
         let rd = Rd(gp(ci.rd()));
         // imm[5|4:0] = inst[12|6:2]
         let imm = ((inst >> 7) & 0x20) | ((inst >> 2) & 0x1f);
-        rv32!(ADDI, rd, Rs1(rd.0), Imm32::from(sign_extend12(imm, 6) as u32))
+        // Sign-extended.
+        let imm = match (imm & 0x20) == 0 {
+          true => imm as u32,
+          false => (0xc0 | imm) as i8 as i32 as u32,
+        };
+        rv32!(ADDI, rd, Rs1(rd.0), Imm32::from(imm))
       }
 
       // C.ADDIW for RV64/128 (RES for rd = 0), C.JAL for RV32 (not supported)
@@ -152,7 +157,12 @@ fn decode_untyped(untyped: Bytecode16) -> Option<Instr> {
         let rd = Rd(gp(ci.rd()));
         // imm[5|4:0] = inst[12|6:2]
         let imm = ((inst >> 7) & 0x20) | ((inst >> 2) & 0x1f);
-        rv64!(ADDIW, rd, Rs1(rd.0), Imm32::from(sign_extend12(imm, 6) as u32))
+        // Sign-extended.
+        let imm = match (imm & 0x20) == 0 {
+          true => imm as u32,
+          false => (0xc0 | imm) as i8 as i32 as u32,
+        };
+        rv64!(ADDIW, rd, Rs1(rd.0), Imm32::from(imm))
       }
 
       // C.LI
@@ -161,7 +171,12 @@ fn decode_untyped(untyped: Bytecode16) -> Option<Instr> {
         let rd = Rd(gp(ci.rd()));
         // imm[5|4:0] = inst[12|6:2]
         let imm = ((inst >> 7) & 0x20) | ((inst >> 2) & 0x1f);
-        rv32!(ADDI, rd, Rs1(Reg::ZERO), Imm32::from(sign_extend12(imm, 6) as u32))
+        // Sign-extended.
+        let imm = match (imm & 0x20) == 0 {
+          true => imm as u32,
+          false => (0xc0 | imm) as i8 as i32 as u32,
+        };
+        rv32!(ADDI, rd, Rs1(Reg::ZERO), Imm32::from(imm))
       }
 
       // C.ADDI16SP (RES for nzimm = 0)
@@ -173,7 +188,12 @@ fn decode_untyped(untyped: Bytecode16) -> Option<Instr> {
           | ((inst << 1) & 0x40) // nzimm[6]
           | ((inst << 4) & 0x180) // nzimm[8:7]
           | ((inst << 3) & 0x20); // nzimm[5]
-        rv32!(ADDI, Rd(Reg::X(Fin::new(2))), Rs1(Reg::X(Fin::new(2))), Imm32::from(sign_extend12(nzimm >> 4, 6) as u32))
+        // Sign-extended.
+        let nzimm = match (nzimm & 0x200) == 0 {
+          true => nzimm as u32,
+          false => (0xfc00 | nzimm) as i16 as i32 as u32,
+        };
+        rv32!(ADDI, Rd(Reg::X(Fin::new(2))), Rs1(Reg::X(Fin::new(2))), Imm32::from(nzimm >> 4))
       }
 
       // C.LUI (RES for imm = 0; HINT for rd = 0)
@@ -223,7 +243,12 @@ fn decode_untyped(untyped: Bytecode16) -> Option<Instr> {
           let rd = Rd(gp_3(cbi.rd_or_rs1()));
           // imm[5|4:0] = inst[12|6:2]
           let imm = ((inst >> 7) & 0x20) | ((inst >> 2) & 0x1f);
-          rv32!(ANDI, rd, Rs1(rd.0), Imm32::from(sign_extend12(imm, 6) as u32))
+          // Sign-extended.
+          let imm = match (imm & 0x20) == 0 {
+            true => imm as u32,
+            false => (0xc0 | imm) as i8 as i32 as u32,
+          };
+          rv32!(ANDI, rd, Rs1(rd.0), Imm32::from(imm))
         }
 
         0b11 => match (untyped.ca().funct6(), untyped.ca().funct2()) {
@@ -278,7 +303,12 @@ fn decode_untyped(untyped: Bytecode16) -> Option<Instr> {
           | ((inst << 3) & 0x20) // offset[5]
           | ((inst >> 7) & 0x18) // offset[4:3]
           | ((inst >> 2) & 0x6); // offset[2:1]
-        rv32!(BEQ, rs1, Rs2(Reg::ZERO), Imm32::from((sign_extend12(offset >> 1, 8) as u32) >> 1))
+        // Sign-extended.
+        let offset = match (offset & 0x100) == 0 {
+          true => offset as u32,
+          false => (0xfe00 | offset) as i16 as i32 as u32,
+        };
+        rv32!(BEQ, rs1, Rs2(Reg::ZERO), Imm32::from(offset >> 1))
       }
 
       // C.BNEZ
@@ -291,7 +321,12 @@ fn decode_untyped(untyped: Bytecode16) -> Option<Instr> {
           | ((inst << 3) & 0x20) // offset[5]
           | ((inst >> 7) & 0x18) // offset[4:3]
           | ((inst >> 2) & 0x6); // offset[2:1]
-        rv32!(BNE, rs1, Rs2(Reg::ZERO), Imm32::from((sign_extend12(offset >> 1, 8) as u32) >> 1))
+        // Sign-extended.
+        let offset = match (offset & 0x100) == 0 {
+          true => offset as u32,
+          false => (0xfe00 | offset) as i16 as i32 as u32,
+        };
+        rv32!(BNE, rs1, Rs2(Reg::ZERO), Imm32::from(offset >> 1))
       }
 
       _ => return None,
@@ -428,9 +463,4 @@ fn gp_3(reg: u8) -> Reg {
     0b111 => Reg::X(Fin::new(15)),
     _ => panic!("Inaccessible register encoding: {:b}", encoding),
   }
-}
-
-#[inline(always)]
-fn sign_extend12(data: u16, size: usize) -> i16 {
-  ((data << (12 - size)) as i16) >> (12 - size)
 }

@@ -18,7 +18,7 @@ impl RV64Interpreter for NaiveInterpreter {
           Either::Left(untyped) => (false, untyped.repr()),
           Either::Right(compressed) => (true, compressed.repr() as u32),
         };
-        println!("pc = {:#010x}, instr = {:#010x}, decoded = {:?}", pc.0, repr, decoded);
+        println!("pc = {:#010x}, instr = {:#010x}, RVC = {}, decoded = {:?}", pc.0, repr, is_compressed, decoded);
         if cpu.execute(pc, decoded, is_compressed).is_none() { break; }
       } else {
         // TODO: invalid instruction interrupt?

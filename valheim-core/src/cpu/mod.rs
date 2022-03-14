@@ -1,3 +1,4 @@
+use std::fmt::Debug;
 use crate::debug::trace::Journal;
 use crate::interp::RV64Interpreter;
 use crate::isa::typed::Reg;
@@ -42,12 +43,12 @@ impl RV64Cpu {
   }
 
   #[inline(always)]
-  pub fn read_mem<T: Copy + Sized>(&self, addr: VirtAddr) -> Option<T> {
+  pub fn read_mem<T: Copy + Sized + Debug>(&self, addr: VirtAddr) -> Option<T> {
     self.mem.read(addr)
   }
 
   #[inline(always)]
-  pub fn write_mem<T: Copy + Sized>(&mut self, addr: VirtAddr, val: T) -> Option<()> {
+  pub fn write_mem<T: Copy + Sized + Debug>(&mut self, addr: VirtAddr, val: T) -> Option<()> {
     self.mem.write(addr, val)
   }
 
