@@ -3,7 +3,6 @@ use std::cell::RefCell;
 use crate::debug::trace::{Journal, MemTrace, RegTrace, Trace};
 use crate::interp::RV64Interpreter;
 use crate::isa::typed::Reg;
-use crate::memory;
 use crate::memory::VirtAddr;
 
 pub mod regs;
@@ -20,7 +19,7 @@ const VALHEIM_MEMORY_SIZE: usize = 4 * 1024 * 1024 * 1024; // 4GiB
 #[derive(Debug)]
 pub struct RV64Cpu {
   regs: regs::Regs,
-  mem: memory::Memory,
+  bus: bus::Bus,
   pub cpu_reset_pc: VirtAddr,
   pub journal: Journal,
 }
@@ -31,8 +30,8 @@ impl RV64Cpu {
     let regs = regs::Regs::new(reset_pc);
     RV64Cpu {
       regs,
-      mem: memory::Memory::new(RV64_MEMORY_BASE, VALHEIM_MEMORY_SIZE)
-        .expect("Failed to create memory"),
+      bus: bus::Bus::new(RV64_MEMORY_BASE, VALHEIM_MEMORY_SIZE)
+        .expect("Failed to create Bus"),
       cpu_reset_pc: reset_pc,
       journal: Journal {
         init_regs: regs,
@@ -47,14 +46,14 @@ impl RV64Cpu {
 
   #[inline(always)]
   pub fn read_mem<T: Copy + Sized + Debug>(&self, addr: VirtAddr) -> Option<T> {
-    let val = self.mem.read(addr);
+    let val = self.bus.read(addr);
     self.journal.trace(|| Trace::Mem(MemTrace::Read(addr, std::mem::size_of::<T>(), format!("{:?}", val))));
     val
   }
 
   #[inline(always)]
   pub fn write_mem<T: Copy + Sized + Debug>(&mut self, addr: VirtAddr, val: T) -> Option<()> {
-    let res = self.mem.write(addr, val);
+    let res = self.bus.write(addr, val);
     self.journal.trace(|| Trace::Mem(MemTrace::Write(addr, std::mem::size_of::<T>(), format!("{:?}", val), res.is_some())));
     res
   }
@@ -92,7 +91,7 @@ impl RV64Cpu {
   }
 
   pub fn reset<T: Sized>(&mut self, mem: &[T]) {
-    self.mem.reset(mem);
+    self.bus.reset_dram(mem);
     self.write_pc(self.cpu_reset_pc);
   }
 
