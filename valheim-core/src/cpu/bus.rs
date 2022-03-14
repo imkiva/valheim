@@ -1,12 +1,12 @@
 use std::collections::BTreeMap;
 use std::fmt::{Debug, Formatter};
-use crate::device::Device;
+use crate::device::MMIODevice;
 use crate::memory::{Memory, VirtAddr};
 
 /// System Bus, which handles DRAM access and memory-mapped IO.
 pub struct Bus {
   mem: Memory,
-  devices: BTreeMap<(VirtAddr, VirtAddr), Box<dyn Device>>,
+  devices: BTreeMap<(VirtAddr, VirtAddr), Box<dyn MMIODevice>>,
 }
 
 impl Debug for Bus {
@@ -29,7 +29,7 @@ impl Bus {
     })
   }
 
-  pub fn add_device(&mut self, mut device: Box<dyn Device>) -> Result<(), ()> {
+  pub fn add_device(&mut self, mut device: Box<dyn MMIODevice>) -> Result<(), ()> {
     let (base, end) = device.init()?;
     self.devices.insert((base, end), device);
     Ok(())
@@ -61,7 +61,7 @@ impl Bus {
     }
   }
 
-  fn select_device_for_read(&self, addr: VirtAddr) -> Option<&Box<dyn Device>> {
+  fn select_device_for_read(&self, addr: VirtAddr) -> Option<&Box<dyn MMIODevice>> {
     for ((base, end), dev) in self.devices.iter() {
       if addr >= *base && addr < *end {
         return Some(dev);
@@ -70,7 +70,7 @@ impl Bus {
     None
   }
 
-  fn select_device_for_write(&mut self, addr: VirtAddr) -> Option<&mut Box<dyn Device>> {
+  fn select_device_for_write(&mut self, addr: VirtAddr) -> Option<&mut Box<dyn MMIODevice>> {
     for ((base, end), dev) in self.devices.iter_mut() {
       if addr >= *base && addr <= *end {
         return Some(dev);

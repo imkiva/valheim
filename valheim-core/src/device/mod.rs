@@ -1,6 +1,6 @@
 use crate::memory::VirtAddr;
 
-pub trait Device {
+pub trait MMIODevice {
   fn name(&self) -> &str;
   fn init(&mut self) -> Result<(VirtAddr, VirtAddr), ()>;
   fn destroy(&mut self) -> Result<(), ()>;
