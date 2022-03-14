@@ -150,7 +150,7 @@ pub union Bytecode {
   pub fence: FenceType,
 }
 
-macro_rules! unsafe_wrapper {
+#[macro_export] macro_rules! unsafe_wrapper {
   ($ident:ident, $ty:ident) => {
     #[inline(always)]
     pub fn $ident(&self) -> $ty {

@@ -13,11 +13,11 @@ impl Instr {
   }
 }
 
-macro_rules! rv32 {
+#[macro_export] macro_rules! rv32 {
   ($ident:ident) => { Instr::RV32(RV32Instr::$ident) };
   ($ident:ident, $($t:expr),*) => { Instr::RV32(RV32Instr::$ident($( $t, )*)) };
 }
-macro_rules! rv64 {
+#[macro_export] macro_rules! rv64 {
   ($ident:ident) => { Instr::RV64(RV64Instr::$ident) };
   ($ident:ident, $($t:expr),*) => { Instr::RV64(RV64Instr::$ident($( $t, )*)) };
 }
@@ -348,7 +348,7 @@ fn decode_untyped(untyped: Bytecode) -> Option<Instr> {
   Some(instr)
 }
 
-fn fp(reg: u8) -> Reg {
+pub fn fp(reg: u8) -> Reg {
   let encoding = reg as u8;
   if encoding <= 31 {
     Reg::F(Fin::new(encoding as u32))
@@ -357,7 +357,7 @@ fn fp(reg: u8) -> Reg {
   }
 }
 
-fn gp(reg: u8) -> Reg {
+pub fn gp(reg: u8) -> Reg {
   let encoding = reg as u8;
   if encoding == 0 {
     Reg::ZERO

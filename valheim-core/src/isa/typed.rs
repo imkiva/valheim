@@ -7,6 +7,7 @@ use crate::isa::rv64::RV64Instr;
 pub enum Instr {
   RV32(RV32Instr),
   RV64(RV64Instr),
+  NOP,
 }
 
 /// Destination register
