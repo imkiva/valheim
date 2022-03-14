@@ -1,7 +1,5 @@
-use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fmt::{Debug, Formatter};
-use std::rc::Rc;
 use crate::device::Device;
 use crate::memory::{Memory, VirtAddr};
 
@@ -74,7 +72,7 @@ impl Bus {
 
   fn select_device_for_write(&mut self, addr: VirtAddr) -> Option<&mut Box<dyn Device>> {
     for ((base, end), dev) in self.devices.iter_mut() {
-      if addr >= *base && addr < *end {
+      if addr >= *base && addr <= *end {
         return Some(dev);
       }
     }
