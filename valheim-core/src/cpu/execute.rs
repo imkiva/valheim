@@ -1,5 +1,6 @@
 use crate::cpu::data::Either;
 use crate::cpu::RV64Cpu;
+use crate::debug::trace::{InstrTrace, Trace};
 use crate::isa::compressed::untyped::Bytecode16;
 use crate::isa::rv32::RV32Instr;
 use crate::isa::typed::{Imm32, Instr, Rd, Reg, Rs1, Rs2, Rs3};
@@ -15,13 +16,22 @@ impl RV64Cpu {
     let pc = self.read_pc();
     let bytecode: Bytecode = self.read_mem(pc)?;
     let compressed: Bytecode16 = self.read_mem(pc)?;
+    self.journal.trace(|| Trace::Instr(InstrTrace::Fetched(pc, bytecode, compressed)));
     Some((pc, bytecode, compressed))
   }
 
-  pub fn decode(&self, _: VirtAddr, untyped: Bytecode, compressed: Bytecode16) -> Option<(Either<Bytecode, Bytecode16>, Instr)> {
+  pub fn decode(&mut self, pc: VirtAddr, untyped: Bytecode, compressed: Bytecode16) -> Option<(Either<Bytecode, Bytecode16>, Instr)> {
     match Instr::try_from_compressed(compressed) {
-      Some(instr) => Some((Either::Right(compressed), instr)),
-      None => Instr::try_from(untyped).map(|instr| (Either::Left(untyped), instr)),
+      Some(instr) => {
+        self.journal.trace(|| Trace::Instr(InstrTrace::DecodedCompressed(pc, compressed, instr)));
+        Some((Either::Right(compressed), instr))
+      },
+      None => {
+        Instr::try_from(untyped).map(|instr| {
+          self.journal.trace(|| Trace::Instr(InstrTrace::Decoded(pc, untyped, instr)));
+          (Either::Left(untyped), instr)
+        })
+      },
     }
   }
 
@@ -31,6 +41,8 @@ impl RV64Cpu {
       false => std::mem::size_of::<Bytecode>() as u64,
     };
     let mut next_pc = VirtAddr(pc.0.wrapping_add(delta));
+
+    self.journal.trace(|| Trace::Instr(InstrTrace::PrepareExecute(pc, instr)));
     match instr {
       Instr::NOP => (),
       // nop is also encoded as `ADDI x0, x0, 0`
@@ -151,6 +163,11 @@ impl RV64Cpu {
       // TODO: RV64MAFD
       RV64(_) => todo!("rv64mafd"),
     };
+
+    self.journal.trace(|| match is_compressed {
+      true => Trace::Instr(InstrTrace::ExecutedCompressed(pc, instr)),
+      false => Trace::Instr(InstrTrace::Executed(pc, instr))
+    });
     self.write_pc(next_pc);
     Some(())
   }

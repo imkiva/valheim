@@ -3,3 +3,4 @@ target/
 *.o
 *.bin
 *.elf
+valheim-trace*.txt

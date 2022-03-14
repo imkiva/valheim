@@ -160,7 +160,7 @@ impl Bytecode16 {
 
 impl Debug for Bytecode16 {
   fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-    write!(f, "Bytecode({:#010b})", self.repr())
+    write!(f, "Bytecode16({:#06b})", self.repr())
   }
 }
 

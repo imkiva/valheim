@@ -10,7 +10,9 @@ mod repl;
 #[clap(author, version, about, long_about = None)]
 struct Args {
   #[clap(short, long)]
-  kernel: String,
+  pub kernel: String,
+  #[clap(long)]
+  pub trace: Option<String>,
 }
 
 fn main() {
@@ -19,7 +21,7 @@ fn main() {
   let mut bytes = vec![];
   file.read_to_end(&mut bytes).expect("Failed to read kernel");
 
-  let mut cpu = RV64Cpu::new();
+  let mut cpu = RV64Cpu::new(args.trace);
   cpu.reset(bytes.as_slice());
   let interp = NaiveInterpreter::new();
   cpu.run(&interp);
