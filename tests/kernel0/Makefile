@@ -1,5 +1,8 @@
 CROSS_COMPILE = riscv64-unknown-elf-
-CFLAGS = -nostdlib -fno-builtin -march=rv64gc -mabi=lp64d -g -Wall
+CFLAGS = -mcmodel=medany -nostdlib -fno-builtin -march=rv64gc -mabi=lp64d -g -Wall
+
+QEMU = qemu-system-riscv64
+QFLAGS = -nographic -smp 1 -machine virt -bios none
 
 GDB = ${CROSS_COMPILE}gdb
 CC = ${CROSS_COMPILE}gcc
@@ -32,3 +35,12 @@ clean:
 
 disassemble: $(KERNEL_ELF)
 	${OBJDUMP} -d $<
+
+qemu: all
+	@${QEMU} -M ? | grep virt >/dev/null || exit
+	@${QEMU} ${QFLAGS} -kernel $(KERNEL_ELF)
+
+.PHONY : debug
+debug: all
+	@${QEMU} ${QFLAGS} -kernel $(KERNEL_ELF) -s -S &
+	@${GDB} os.elf -q -x ../gdbinit

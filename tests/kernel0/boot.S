@@ -22,6 +22,7 @@ park:
 
 kernel_halt:
   ebreak                     # tell valheim emulator that we are done
+  j kernel_halt
 
 stacks:
   .skip STACK_SIZE * MAX_CORE
