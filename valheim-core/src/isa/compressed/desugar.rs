@@ -68,7 +68,7 @@ fn decode_untyped(untyped: Bytecode16) -> Option<Instr> {
           | ((inst >> 7) & 0x30) // nzuimm[5:4]
           | ((inst >> 2) & 0x8) // nzuimm[3]
           | ((inst >> 4) & 0x4); // nzuimm[2]
-        rv32!(ADDI, rd, Rs1(Reg::X(Fin::new(2))), Imm32::from((nzuimm >> 2) as u32))
+        rv32!(ADDI, rd, Rs1(Reg::X(Fin::new(2))), Imm32::from(nzuimm as u32))
       }
 
       // C.FLD for RV32/64, C.LQ for RV128 (not supported)
@@ -84,7 +84,7 @@ fn decode_untyped(untyped: Bytecode16) -> Option<Instr> {
           | ((inst >> 7) & 0x38) // imm[5:3]
           | ((inst >> 4) & 0x4); // imm[2]
 
-        rv32!(LW, rd, rs1, Imm32::from((offset >> 2) as u32))
+        rv32!(LW, rd, rs1, Imm32::from(offset as u32))
       }
 
       // C.LD for RV64/128, C.FLW for RV32 (not supported)
@@ -96,7 +96,7 @@ fn decode_untyped(untyped: Bytecode16) -> Option<Instr> {
         let offset = ((inst << 1) & 0xc0) // imm[7:6]
           | ((inst >> 7) & 0x38); // imm[5:3]
 
-        rv64!(LD, rd, rs1, Imm32::from((offset >> 3) as u32))
+        rv64!(LD, rd, rs1, Imm32::from(offset as u32))
       }
 
       // Reserved
@@ -115,7 +115,7 @@ fn decode_untyped(untyped: Bytecode16) -> Option<Instr> {
           | ((inst >> 7) & 0x38) // imm[5:3]
           | ((inst >> 4) & 0x4); // imm[2]
 
-        rv32!(SW, rs1, rs2, Imm32::from((offset >> 2) as u32))
+        rv32!(SW, rs1, rs2, Imm32::from(offset as u32))
       }
 
       // C.SD for RV64/128, C.FSW for RV32 (not supported)
@@ -127,7 +127,7 @@ fn decode_untyped(untyped: Bytecode16) -> Option<Instr> {
         let offset = ((inst << 1) & 0xc0) // imm[7:6]
           | ((inst >> 7) & 0x38); // imm[5:3]
 
-        rv64!(SD, rs1, rs2, Imm32::from((offset >> 3) as u32))
+        rv64!(SD, rs1, rs2, Imm32::from(offset as u32))
       }
       _ => return None,
     },
@@ -193,7 +193,7 @@ fn decode_untyped(untyped: Bytecode16) -> Option<Instr> {
           true => nzimm as u32,
           false => (0xfc00 | nzimm) as i16 as i32 as u32,
         };
-        rv32!(ADDI, Rd(Reg::X(Fin::new(2))), Rs1(Reg::X(Fin::new(2))), Imm32::from(nzimm >> 4))
+        rv32!(ADDI, Rd(Reg::X(Fin::new(2))), Rs1(Reg::X(Fin::new(2))), Imm32::from(nzimm))
       }
 
       // C.LUI (RES for imm = 0; HINT for rd = 0)
@@ -355,7 +355,7 @@ fn decode_untyped(untyped: Bytecode16) -> Option<Instr> {
         let offset = ((inst << 4) & 0xc0) // offset[7:6]
           | ((inst >> 7) & 0x20) // offset[5]
           | ((inst >> 2) & 0x1c); // offset[4:2]
-        rv32!(LW, rd, Rs1(Reg::X(Fin::new(2))), Imm32::from((offset >> 2) as u32))
+        rv32!(LW, rd, Rs1(Reg::X(Fin::new(2))), Imm32::from(offset as u32))
       }
 
       // C.LDSP for RV64/128 (RES for rd = 0), C.FLWSP for RV32 (not supported)
@@ -367,7 +367,7 @@ fn decode_untyped(untyped: Bytecode16) -> Option<Instr> {
         let offset = ((inst << 4) & 0x1c0) // offset[8:6]
           | ((inst >> 7) & 0x20) // offset[5]
           | ((inst >> 2) & 0x18); // offset[4:3]
-        rv64!(LD, rd, Rs1(Reg::X(Fin::new(2))), Imm32::from((offset >> 3) as u32))
+        rv64!(LD, rd, Rs1(Reg::X(Fin::new(2))), Imm32::from(offset as u32))
       }
 
       // C.JR (RES for rs1/rd = 0)
@@ -415,7 +415,7 @@ fn decode_untyped(untyped: Bytecode16) -> Option<Instr> {
         // offset[5:2|7:6] = inst[12:9|8:7]
         let offset = ((inst >> 1) & 0xc0) // offset[7:6]
           | ((inst >> 7) & 0x3c); // offset[5:2]
-        rv32!(SW, Rs1(Reg::X(Fin::new(2))), rs2, Imm32::from((offset >> 2) as u32))
+        rv32!(SW, Rs1(Reg::X(Fin::new(2))), rs2, Imm32::from(offset as u32))
       }
 
       // C.SDSP for RV64/128, C.FSWSP for RV32 (not supported)
@@ -425,7 +425,7 @@ fn decode_untyped(untyped: Bytecode16) -> Option<Instr> {
         // offset[5:3|8:6] = isnt[12:10|9:7]
         let offset = ((inst >> 1) & 0x1c0) // offset[8:6]
           | ((inst >> 7) & 0x38); // offset[5:3]
-        rv64!(SD, Rs1(Reg::X(Fin::new(2))), rs2, Imm32::from((offset >> 3) as u32))
+        rv64!(SD, Rs1(Reg::X(Fin::new(2))), rs2, Imm32::from(offset as u32))
       }
 
       _ => return None,

@@ -105,7 +105,7 @@ void uart_init() {
 }
 
 int uart_putc(char ch) {
-	while ((uart_read_reg(LSR) & LSR_TX_IDLE) == 0);
+//	while ((uart_read_reg(LSR) & LSR_TX_IDLE) == 0);
 	return uart_write_reg(THR, ch);
 }
 
