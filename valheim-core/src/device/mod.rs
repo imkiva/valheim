@@ -4,7 +4,7 @@ pub trait Device {
   fn name(&self) -> &'static str;
   fn vendor_id(&self) -> u16;
   fn device_id(&self) -> u16;
-  fn init(&mut self) -> Result<Vec<(VirtAddr, VirtAddr)>, ()>;
+  fn init(&'static mut self) -> Result<Vec<(VirtAddr, VirtAddr)>, ()>;
   fn destroy(&mut self) -> Result<(), ()>;
   fn dma_read(&self, addr: VirtAddr) -> Option<&Memory>;
   fn dma_write(&mut self, addr: VirtAddr) -> Option<&mut Memory>;
@@ -64,13 +64,6 @@ pub trait Device {
         Some((hi4 as u64) << 56 | (lo4 as u64) << 48 | (hi3 as u64) << 40 | (lo3 as u64) << 32
           | (hi2 as u64) << 24 | (lo2 as u64) << 16 | (hi as u64) << 8 | lo as u64)
       }
-    }
-  }
-
-  fn write8(&mut self, addr: VirtAddr, data: u8) -> Result<(), ()> {
-    match self.dma_write(addr) {
-      Some(mem) => mem.write(addr, data).ok_or(()),
-      None => self.mmio_write(addr, data),
     }
   }
 

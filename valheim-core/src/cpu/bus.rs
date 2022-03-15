@@ -6,7 +6,7 @@ use crate::memory::{Memory, VirtAddr};
 /// System Bus, which handles DRAM access and memory-mapped IO.
 pub struct Bus {
   mem: Memory,
-  devices: Vec<Box<dyn Device>>,
+  devices: Vec<*mut dyn Device>,
   io_map: BTreeMap<(VirtAddr, VirtAddr), usize>,
 }
 
@@ -16,7 +16,7 @@ impl Debug for Bus {
       f,
       "Bus {{ mem: {:?}, devices: {:?} }}",
       self.mem,
-      self.devices.iter().map(|dev| dev.name()).collect::<Vec<_>>(),
+      self.devices.iter().map(|&dev| unsafe { (*dev).name() }).collect::<Vec<_>>(),
     )
   }
 }
@@ -31,8 +31,8 @@ impl Bus {
     })
   }
 
-  pub fn add_device(&mut self, mut device: Box<dyn Device>) -> Result<(), ()> {
-    let ranges = device.init()?;
+  pub unsafe fn add_device(&mut self, device: *mut dyn Device) -> Result<(), ()> {
+    let ranges = (*device).init()?;
     let idx = self.devices.len();
     self.devices.push(device);
     for range in ranges {
@@ -41,13 +41,20 @@ impl Bus {
     Ok(())
   }
 
+  pub fn halt(&mut self) {
+    self.devices.iter().for_each(|&dev| match unsafe { (*dev).destroy() } {
+      Ok(_) => (),
+      Err(_) => eprintln!("Error destroying device: {}", { unsafe { (*dev).name() } }),
+    });
+  }
+
   pub fn read<T: Copy + Sized>(&self, addr: VirtAddr) -> Option<T> {
     match self.select_device_for_read(addr) {
       Some(dev) => match std::mem::size_of::<T>() {
-        1 => Some(unsafe { *std::mem::transmute::<* const u8, *const T>(&dev.read8(addr)? as *const u8) }),
-        2 => Some(unsafe { *std::mem::transmute::<* const u16, *const T>(&dev.read16(addr)? as *const u16) }),
-        4 => Some(unsafe { *std::mem::transmute::<* const u32, *const T>(&dev.read32(addr)? as *const u32) }),
-        8 => Some(unsafe { *std::mem::transmute::<* const u64, *const T>(&dev.read64(addr)? as *const u64) }),
+        1 => Some(unsafe { *std::mem::transmute::<*const u8, *const T>((*dev).read(addr)? as *const u8) }),
+        2 => Some(unsafe { *std::mem::transmute::<*const u16, *const T>((*dev).read16(addr)? as *const u16) }),
+        4 => Some(unsafe { *std::mem::transmute::<*const u32, *const T>((*dev).read32(addr)? as *const u32) }),
+        8 => Some(unsafe { *std::mem::transmute::<*const u64, *const T>((*dev).read64(addr)? as *const u64) }),
         _ => None,
       }
       None => self.mem.read(addr),
@@ -57,29 +64,35 @@ impl Bus {
   pub fn write<T: Copy + Sized>(&mut self, addr: VirtAddr, val: T) -> Option<()> {
     match self.select_device_for_write(addr) {
       Some(dev) => match std::mem::size_of::<T>() {
-        1 => dev.write8(addr, unsafe { *std::mem::transmute::<* const T, *const u8>(&val as *const T) }).ok(),
-        2 => dev.write16(addr, unsafe { *std::mem::transmute::<* const T, *const u16>(&val as *const T) }).ok(),
-        4 => dev.write32(addr, unsafe { *std::mem::transmute::<* const T, *const u32>(&val as *const T) }).ok(),
-        8 => dev.write64(addr, unsafe { *std::mem::transmute::<* const T, *const u64>(&val as *const T) }).ok(),
+        1 => unsafe { (*dev).write(addr, *std::mem::transmute::<*const T, *const u8>(&val as *const T)) }.ok(),
+        2 => unsafe { (*dev).write16(addr, *std::mem::transmute::<*const T, *const u16>(&val as *const T)) }.ok(),
+        4 => unsafe { (*dev).write32(addr, *std::mem::transmute::<*const T, *const u32>(&val as *const T)) }.ok(),
+        8 => unsafe { (*dev).write64(addr, *std::mem::transmute::<*const T, *const u64>(&val as *const T)) }.ok(),
         _ => None,
       }
       None => self.mem.write(addr, val),
     }
   }
 
-  fn select_device_for_read(&self, addr: VirtAddr) -> Option<&Box<dyn Device>> {
+  fn select_device_for_read(&self, addr: VirtAddr) -> Option<*const dyn Device> {
     for ((base, end), dev_id) in self.io_map.iter() {
       if addr >= *base && addr < *end {
-        return self.devices.get(*dev_id);
+        return match self.devices.get(*dev_id) {
+          Some(&dev) => Some(dev),
+          None => None,
+        };
       }
     }
     None
   }
 
-  fn select_device_for_write(&mut self, addr: VirtAddr) -> Option<&mut Box<dyn Device>> {
+  fn select_device_for_write(&mut self, addr: VirtAddr) -> Option<*mut dyn Device> {
     for ((base, end), dev_id) in self.io_map.iter_mut() {
       if addr >= *base && addr <= *end {
-        return self.devices.get_mut(*dev_id);
+        return match self.devices.get(*dev_id) {
+          Some(&dev) => Some(dev),
+          None => None,
+        };
       }
     }
     None

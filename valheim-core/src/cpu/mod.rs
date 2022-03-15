@@ -19,7 +19,7 @@ const VALHEIM_MEMORY_SIZE: usize = 4 * 1024 * 1024 * 1024; // 4GiB
 #[derive(Debug)]
 pub struct RV64Cpu {
   regs: regs::Regs,
-  bus: bus::Bus,
+  pub bus: bus::Bus,
   pub cpu_reset_pc: VirtAddr,
   pub journal: Journal,
 }
@@ -95,7 +95,8 @@ impl RV64Cpu {
     self.write_pc(self.cpu_reset_pc);
   }
 
-  pub fn halt(&self) {
+  pub fn halt(&mut self) {
+    self.bus.halt();
     println!("CPU halt with registers: {:?}", self.regs);
   }
 }
