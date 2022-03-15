@@ -53,7 +53,6 @@ impl RV64Cpu {
   #[inline(always)]
   pub fn write_mem<T: CanIO + Debug>(&mut self, addr: VirtAddr, val: T) -> Option<()> {
     let res = self.bus.write(addr, val);
-    println!("write_mem: {:x} = {:?}", addr.0, val);
     self.journal.trace(|| Trace::Mem(MemTrace::Write(addr, std::mem::size_of::<T>(), format!("{:?}", val), res.is_some())));
     res
   }
