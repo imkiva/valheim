@@ -1,12 +1,13 @@
 use std::collections::BTreeMap;
 use std::fmt::{Debug, Formatter};
-use crate::device::MMIODevice;
+use crate::device::Device;
 use crate::memory::{Memory, VirtAddr};
 
 /// System Bus, which handles DRAM access and memory-mapped IO.
 pub struct Bus {
   mem: Memory,
-  devices: BTreeMap<(VirtAddr, VirtAddr), Box<dyn MMIODevice>>,
+  devices: Vec<Box<dyn Device>>,
+  io_map: BTreeMap<(VirtAddr, VirtAddr), usize>,
 }
 
 impl Debug for Bus {
@@ -15,7 +16,7 @@ impl Debug for Bus {
       f,
       "Bus {{ mem: {:?}, devices: {:?} }}",
       self.mem,
-      self.devices.iter().map(|(_, dev)| dev.name()).collect::<Vec<_>>(),
+      self.devices.iter().map(|dev| dev.name()).collect::<Vec<_>>(),
     )
   }
 }
@@ -25,13 +26,18 @@ impl Bus {
     let mem = Memory::new(memory_base, memory_size)?;
     Ok(Bus {
       mem,
-      devices: BTreeMap::new(),
+      devices: Vec::with_capacity(8),
+      io_map: BTreeMap::new(),
     })
   }
 
-  pub fn add_device(&mut self, mut device: Box<dyn MMIODevice>) -> Result<(), ()> {
-    let (base, end) = device.init()?;
-    self.devices.insert((base, end), device);
+  pub fn add_device(&mut self, mut device: Box<dyn Device>) -> Result<(), ()> {
+    let ranges = device.init()?;
+    let idx = self.devices.len();
+    self.devices.push(device);
+    for range in ranges {
+      self.io_map.insert(range, idx);
+    }
     Ok(())
   }
 
@@ -61,19 +67,19 @@ impl Bus {
     }
   }
 
-  fn select_device_for_read(&self, addr: VirtAddr) -> Option<&Box<dyn MMIODevice>> {
-    for ((base, end), dev) in self.devices.iter() {
+  fn select_device_for_read(&self, addr: VirtAddr) -> Option<&Box<dyn Device>> {
+    for ((base, end), dev_id) in self.io_map.iter() {
       if addr >= *base && addr < *end {
-        return Some(dev);
+        return self.devices.get(*dev_id);
       }
     }
     None
   }
 
-  fn select_device_for_write(&mut self, addr: VirtAddr) -> Option<&mut Box<dyn MMIODevice>> {
-    for ((base, end), dev) in self.devices.iter_mut() {
+  fn select_device_for_write(&mut self, addr: VirtAddr) -> Option<&mut Box<dyn Device>> {
+    for ((base, end), dev_id) in self.io_map.iter_mut() {
       if addr >= *base && addr <= *end {
-        return Some(dev);
+        return self.devices.get_mut(*dev_id);
       }
     }
     None
