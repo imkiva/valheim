@@ -3,7 +3,7 @@ use std::cell::RefCell;
 use crate::debug::trace::{Journal, MemTrace, RegTrace, Trace};
 use crate::interp::RV64Interpreter;
 use crate::isa::typed::Reg;
-use crate::memory::VirtAddr;
+use crate::memory::{CanIO, VirtAddr};
 
 pub mod regs;
 pub mod execute;
@@ -45,14 +45,14 @@ impl RV64Cpu {
   }
 
   #[inline(always)]
-  pub fn read_mem<T: Copy + Sized + Debug>(&self, addr: VirtAddr) -> Option<T> {
+  pub fn read_mem<T: CanIO + Debug>(&self, addr: VirtAddr) -> Option<T> {
     let val = self.bus.read(addr);
     self.journal.trace(|| Trace::Mem(MemTrace::Read(addr, std::mem::size_of::<T>(), format!("{:?}", val))));
     val
   }
 
   #[inline(always)]
-  pub fn write_mem<T: Copy + Sized + Debug>(&mut self, addr: VirtAddr, val: T) -> Option<()> {
+  pub fn write_mem<T: CanIO + Debug>(&mut self, addr: VirtAddr, val: T) -> Option<()> {
     let res = self.bus.write(addr, val);
     self.journal.trace(|| Trace::Mem(MemTrace::Write(addr, std::mem::size_of::<T>(), format!("{:?}", val), res.is_some())));
     res
@@ -90,7 +90,7 @@ impl RV64Cpu {
     int.interp(self)
   }
 
-  pub fn reset<T: Sized>(&mut self, mem: &[T]) {
+  pub fn reset<T: CanIO>(&mut self, mem: &[T]) {
     self.bus.reset_dram(mem);
     self.write_pc(self.cpu_reset_pc);
   }

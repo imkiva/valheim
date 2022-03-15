@@ -1,5 +1,6 @@
 use std::fmt::{Debug, Formatter};
 use modular_bitfield::prelude::*;
+use crate::memory::CanIO;
 
 #[bitfield(bits = 32)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -177,6 +178,8 @@ impl Bytecode {
   unsafe_wrapper!(u, UType);
   unsafe_wrapper!(fence, FenceType);
 }
+
+impl CanIO for Bytecode {}
 
 impl Debug for Bytecode {
   fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {

@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt::{Debug, Formatter};
 use crate::device::Device;
-use crate::memory::{Memory, VirtAddr};
+use crate::memory::{CanIO, Memory, VirtAddr};
 
 /// System Bus, which handles DRAM access and memory-mapped IO.
 pub struct Bus {
@@ -48,8 +48,9 @@ impl Bus {
     });
   }
 
-  pub fn read<T: Copy + Sized>(&self, addr: VirtAddr) -> Option<T> {
+  pub fn read<T: CanIO>(&self, addr: VirtAddr) -> Option<T> {
     match self.select_device_for_read(addr) {
+      // CanIO trait guarantees that the transmute is safe
       Some(dev) => match std::mem::size_of::<T>() {
         1 => Some(unsafe { *std::mem::transmute::<*const u8, *const T>((*dev).read(addr)? as *const u8) }),
         2 => Some(unsafe { *std::mem::transmute::<*const u16, *const T>((*dev).read16(addr)? as *const u16) }),
@@ -61,8 +62,9 @@ impl Bus {
     }
   }
 
-  pub fn write<T: Copy + Sized>(&mut self, addr: VirtAddr, val: T) -> Option<()> {
+  pub fn write<T: CanIO>(&mut self, addr: VirtAddr, val: T) -> Option<()> {
     match self.select_device_for_write(addr) {
+      // CanIO trait guarantees that the transmute is safe
       Some(dev) => match std::mem::size_of::<T>() {
         1 => unsafe { (*dev).write(addr, *std::mem::transmute::<*const T, *const u8>(&val as *const T)) }.ok(),
         2 => unsafe { (*dev).write16(addr, *std::mem::transmute::<*const T, *const u16>(&val as *const T)) }.ok(),
@@ -98,7 +100,7 @@ impl Bus {
     None
   }
 
-  pub(crate) fn reset_dram<T: Sized>(&mut self, p0: &[T]) {
-    self.mem.reset(p0);
+  pub fn reset_dram<T: CanIO>(&mut self, mem: &[T]) {
+    self.mem.reset(mem);
   }
 }

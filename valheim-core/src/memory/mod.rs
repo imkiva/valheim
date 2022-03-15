@@ -1,6 +1,19 @@
 use std::fmt::Debug;
 use memmap2::MmapMut;
 
+/// `transmutable` data types
+pub trait CanIO: Copy + Sized {}
+impl CanIO for u8 {}
+impl CanIO for u16 {}
+impl CanIO for u32 {}
+impl CanIO for u64 {}
+impl CanIO for i8 {}
+impl CanIO for i16 {}
+impl CanIO for i32 {}
+impl CanIO for i64 {}
+impl CanIO for f32 {}
+impl CanIO for f64 {}
+
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Add, Sub, AddAssign, SubAssign)]
 pub struct VirtAddr(pub u64);
 
@@ -58,36 +71,38 @@ impl Memory {
     (phys.0 as usize) >= ptr && (phys.0 as usize) < ptr + self.memory_size
   }
 
-  pub fn get_mut<T: Sized>(&mut self, virt: VirtAddr) -> Option<&mut T> {
+  pub fn get_mut<T: CanIO>(&mut self, virt: VirtAddr) -> Option<&mut T> {
     let phys = self.to_phys(virt)?;
     unsafe {
+      // CanIO trait guarantees that the transmute is safe
       let ptr = std::mem::transmute::<*const u8, *mut T>(phys.0);
       Some(&mut *ptr)
     }
   }
 
-  pub fn get<T: Sized>(&self, virt: VirtAddr) -> Option<&T> {
+  pub fn get<T: CanIO>(&self, virt: VirtAddr) -> Option<&T> {
     let phys = self.to_phys(virt)?;
     unsafe {
+      // CanIO trait guarantees that the transmute is safe
       let ptr = std::mem::transmute::<*const u8, *const T>(phys.0);
       Some(&*ptr)
     }
   }
 
-  pub fn read<T: Copy + Sized>(&self, addr: VirtAddr) -> Option<T> {
+  pub fn read<T: CanIO>(&self, addr: VirtAddr) -> Option<T> {
     self.get(addr).map(|v| *v)
   }
 
-  pub fn write<T: Copy + Sized>(&mut self, addr: VirtAddr, value: T) -> Option<()> {
+  pub fn write<T: CanIO>(&mut self, addr: VirtAddr, value: T) -> Option<()> {
     self.get_mut(addr).map(|v| *v = value)
   }
 
-  pub fn reset<T: Sized>(&mut self, mem: &[T]) {
+  pub fn reset<T: CanIO>(&mut self, mem: &[T]) {
     unsafe {
       std::ptr::copy_nonoverlapping(
         mem.as_ptr() as *const u8,
         self.memory.as_mut_ptr(),
-        mem.len() * std::mem::size_of::<T>()
+        mem.len() * std::mem::size_of::<T>(),
       );
     }
   }
