@@ -97,11 +97,11 @@ impl Memory {
     self.get_mut(addr).map(|v| *v = value)
   }
 
-  pub fn reset<T: CanIO>(&mut self, mem: &[T]) {
+  pub fn load_kernel<T: CanIO>(&mut self, mem: &[T], offset: usize) {
     unsafe {
       std::ptr::copy_nonoverlapping(
         mem.as_ptr() as *const u8,
-        self.memory.as_mut_ptr(),
+        self.memory.as_mut_ptr().offset(offset as isize),
         mem.len() * std::mem::size_of::<T>(),
       );
     }

@@ -107,10 +107,8 @@ fn main() {
   let mut bytes = vec![];
   file.read_to_end(&mut bytes).expect("Failed to read kernel");
 
-  let mut device = XLBDevice::new();
   let mut cpu = RV64Cpu::new(args.trace);
-  unsafe { cpu.bus.add_device(&mut device).expect("Unable to add device") };
-  cpu.reset(bytes.as_slice());
+  cpu.load_kernel(bytes.as_slice());
   let interp = NaiveInterpreter::new();
   cpu.run(&interp);
 }

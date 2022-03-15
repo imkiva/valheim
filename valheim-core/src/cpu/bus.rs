@@ -100,7 +100,7 @@ impl Bus {
     None
   }
 
-  pub fn reset_dram<T: CanIO>(&mut self, mem: &[T]) {
-    self.mem.reset(mem);
+  pub fn load_kernel<T: CanIO>(&mut self, mem: &[T], offset: usize) {
+    self.mem.load_kernel(mem, offset);
   }
 }
