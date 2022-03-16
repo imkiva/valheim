@@ -6,9 +6,9 @@ use crate::memory::{CanIO, Memory, VirtAddr};
 
 /// System Bus, which handles DRAM access and memory-mapped IO.
 pub struct Bus {
-  mem: Memory,
-  devices: Vec<*mut dyn Device>,
-  io_map: BTreeMap<(VirtAddr, VirtAddr), usize>,
+  pub mem: Memory,
+  pub devices: Vec<*mut dyn Device>,
+  pub io_map: BTreeMap<(VirtAddr, VirtAddr), usize>,
 }
 
 impl Debug for Bus {

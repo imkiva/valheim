@@ -19,9 +19,9 @@ macro_rules! csr {
 }
 
 impl Machine {
-  pub fn new(memory_size: usize) -> Machine {
+  pub fn new(memory_size: usize, trace: Option<String>) -> Machine {
     Machine {
-      cpu: RV64Cpu::new(memory_size, None),
+      cpu: RV64Cpu::new(memory_size, trace),
       interpreter: Box::new(NaiveInterpreter::new()),
     }
   }
@@ -48,6 +48,7 @@ impl Machine {
 
   pub fn halt(&mut self) {
     self.cpu.bus.halt();
+    self.cpu.journal.flush();
     self.show_status();
   }
 

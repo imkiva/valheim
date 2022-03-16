@@ -58,14 +58,23 @@ impl Journal {
     let mut traces = self.traces.borrow_mut();
     traces.push(trace);
     if traces.len() > self.max_recent_traces {
+      self.flush();
+    }
+  }
+
+  pub fn flush(&self) {
+    #[cfg(feature = "trace")] {
       self.trace_file.as_ref()
         .and_then(|filename| std::fs::OpenOptions::new().create(true).write(true).append(true).open(filename).ok())
         .map(|mut file| {
-          traces.iter().for_each(|t| {
+          self.traces.borrow_mut().iter().for_each(|t| {
             let _ = writeln!(file, "{:?}", t);
           });
+          let _ = file.flush();
+          let _ = file.sync_all();
+          std::mem::drop(file);
         });
-      traces.clear();
+      self.traces.borrow_mut().clear();
     }
   }
 }

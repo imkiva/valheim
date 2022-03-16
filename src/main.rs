@@ -31,7 +31,7 @@ fn main() {
   });
 
   let memory_size = 4 * 1024 * 1024 * 1024; // 4GiB
-  let mut machine = Machine::new(memory_size);
+  let mut machine = Machine::new(memory_size, args.trace);
   match bios_bytes {
     Some(bios_bytes) => {
       machine.load(0x80000000, bios_bytes.as_slice());

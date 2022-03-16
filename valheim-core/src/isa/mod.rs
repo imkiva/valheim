@@ -8,3 +8,5 @@ pub mod compressed;
 
 /// untyped -> typed
 pub mod decode;
+
+pub mod pretty;
