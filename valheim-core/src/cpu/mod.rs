@@ -18,6 +18,7 @@ const VALHEIM_MEMORY_SIZE: usize = 4 * 1024 * 1024 * 1024; // 4GiB
 #[derive(Debug)]
 pub struct RV64Cpu {
   regs: regs::Regs,
+  csrs: csr::CSRRegs,
   pub bus: bus::Bus,
   pub cpu_reset_pc: VirtAddr,
   pub journal: Journal,
@@ -27,8 +28,10 @@ impl RV64Cpu {
   pub fn new(trace: Option<String>) -> RV64Cpu {
     let reset_pc = VirtAddr(RV64_KERNEL_BASE);
     let regs = regs::Regs::new(reset_pc);
+    let csrs  = csr::CSRRegs::new();
     RV64Cpu {
       regs,
+      csrs,
       bus: bus::Bus::new(0, VALHEIM_MEMORY_SIZE)
         .expect("Failed to create Bus"),
       cpu_reset_pc: reset_pc,

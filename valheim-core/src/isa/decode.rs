@@ -3,7 +3,7 @@ use crate::isa::rv32::RV32Instr;
 use crate::isa::rv64::RV64Instr;
 use crate::isa::typed::{Imm32, Instr, Rd, Reg, Rs1, Rs2, Rs3, Shamt, AQ, RL};
 use crate::isa::rv32::{FenceFm, FenceSucc, FencePred};
-use crate::isa::rv64::{CSRValue, UImm};
+use crate::isa::rv64::{CSRAddr, UImm};
 use crate::isa::untyped::Bytecode;
 use crate::isa::data::Fin;
 
@@ -118,7 +118,7 @@ macro_rules! zicsr_rs1 {
     let rd = Rd($reg(i.rd()));
     let rs1 = Rs1($reg(i.rs1()));
     let imm = Imm32::<11, 0>::from(i.imm11_0() as u32);
-    let csr = CSRValue(imm);
+    let csr = CSRAddr(imm);
     $type!($opcode, rd, rs1, csr)
   }};
 }
@@ -129,7 +129,7 @@ macro_rules! zicsr_uimm {
     let rs1 = Imm32::<4, 0>::from(i.rs1() as u32);
     let uimm = UImm(rs1);
     let imm = Imm32::<11, 0>::from(i.imm11_0() as u32);
-    let csr = CSRValue(imm);
+    let csr = CSRAddr(imm);
     $type!($opcode, rd, uimm, csr)
   }};
 }
@@ -371,7 +371,6 @@ pub fn gp(reg: u8) -> Reg {
 /// Opcode map, with `inst[1:0]=11` stripped away.
 /// Why not use enum with repr(u8)? Because const patterns are ugly.
 /// see: https://internals.rust-lang.org/t/enum-as-repr-constants-in-match-and-other-patterns/9552
-// #[allow(dead_code)]
 #[allow(non_snake_case)]
 #[allow(non_upper_case_globals)]
 mod OpcodeMap {
