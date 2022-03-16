@@ -101,7 +101,7 @@ impl Bus {
     None
   }
 
-  pub fn load_kernel<T: CanIO>(&mut self, mem: &[T], offset: usize) {
+  pub fn load<T: CanIO>(&mut self, mem: &[T], offset: usize) {
     self.mem.load(mem, offset);
   }
 }

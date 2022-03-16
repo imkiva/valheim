@@ -7,7 +7,7 @@ use crate::isa::rv64::CSRAddr;
 use crate::isa::typed::Imm32;
 use crate::memory::{CanIO, VirtAddr};
 
-const RV64_KERNEL_BASE: u64 = 0x80000000;
+const RV64_PC_RESET: u64 = 0x80000000;
 
 pub struct Machine {
   pub cpu: RV64Cpu,
@@ -27,6 +27,7 @@ impl Machine {
   }
 
   pub fn run(&mut self) {
+    self.cpu.write_pc(VirtAddr(RV64_PC_RESET));
     loop {
       // TODO: check interrupts
       // TODO: update devices
@@ -69,8 +70,7 @@ impl Machine {
     println!("=======================================");
   }
 
-  pub fn load_kernel<T: CanIO>(&mut self, mem: &[T]) {
-    self.cpu.bus.load_kernel(mem, RV64_KERNEL_BASE as usize);
-    self.cpu.write_pc(VirtAddr(RV64_KERNEL_BASE));
+  pub fn load<T: CanIO>(&mut self, offset: usize, mem: &[T]) {
+    self.cpu.bus.load(mem, offset);
   }
 }
