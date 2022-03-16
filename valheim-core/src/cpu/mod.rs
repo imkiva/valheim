@@ -1,7 +1,7 @@
 use std::fmt::Debug;
 use std::cell::RefCell;
+use crate::cpu::exception::Exception;
 use crate::debug::trace::{Journal, MemTrace, RegTrace, Trace};
-use crate::interp::RV64Interpreter;
 use crate::isa::typed::Reg;
 use crate::memory::{CanIO, VirtAddr};
 
@@ -11,34 +11,38 @@ pub mod exception;
 pub mod bus;
 pub mod csr;
 pub mod data;
-
-const RV64_KERNEL_BASE: u64 = 0x80000000;
-const VALHEIM_MEMORY_SIZE: usize = 4 * 1024 * 1024 * 1024; // 4GiB
+pub mod trap;
 
 #[derive(Debug)]
 pub struct RV64Cpu {
-  regs: regs::Regs,
-  csrs: csr::CSRRegs,
+  pub regs: regs::Regs,
+  pub csrs: csr::CSRRegs,
+  pub mode: PrivilegeMode,
   pub bus: bus::Bus,
-  pub cpu_reset_pc: VirtAddr,
   pub journal: Journal,
 }
 
+#[derive(Debug, PartialEq, PartialOrd, Eq, Copy, Clone)]
+pub enum PrivilegeMode {
+  User = 0b00,
+  Supervisor = 0b01,
+  Machine = 0b11,
+}
+
 impl RV64Cpu {
-  pub fn new(trace: Option<String>) -> RV64Cpu {
-    let reset_pc = VirtAddr(RV64_KERNEL_BASE);
-    let regs = regs::Regs::new(reset_pc);
-    let csrs  = csr::CSRRegs::new();
+  pub fn new(memory_size: usize, trace: Option<String>) -> RV64Cpu {
+    let regs = regs::Regs::new();
+    let csrs = csr::CSRRegs::new();
     RV64Cpu {
       regs,
       csrs,
-      bus: bus::Bus::new(0, VALHEIM_MEMORY_SIZE)
+      mode: PrivilegeMode::Machine,
+      bus: bus::Bus::new(0, memory_size)
         .expect("Failed to create Bus"),
-      cpu_reset_pc: reset_pc,
       journal: Journal {
         init_regs: regs,
         init_mem_base: VirtAddr(0),
-        init_mem_size: VALHEIM_MEMORY_SIZE,
+        init_mem_size: memory_size,
         traces: RefCell::new(Vec::with_capacity(1024)),
         max_recent_traces: if trace.is_some() { 1024 } else { 0 },
         trace_file: trace,
@@ -47,16 +51,16 @@ impl RV64Cpu {
   }
 
   #[inline(always)]
-  pub fn read_mem<T: CanIO + Debug>(&self, addr: VirtAddr) -> Option<T> {
+  pub fn read_mem<T: CanIO + Debug>(&self, addr: VirtAddr) -> Result<T, Exception> {
     let val = self.bus.read(addr);
     self.journal.trace(|| Trace::Mem(MemTrace::Read(addr, std::mem::size_of::<T>(), format!("{:?}", val))));
     val
   }
 
   #[inline(always)]
-  pub fn write_mem<T: CanIO + Debug>(&mut self, addr: VirtAddr, val: T) -> Option<()> {
+  pub fn write_mem<T: CanIO + Debug>(&mut self, addr: VirtAddr, val: T) -> Result<(), Exception> {
     let res = self.bus.write(addr, val);
-    self.journal.trace(|| Trace::Mem(MemTrace::Write(addr, std::mem::size_of::<T>(), format!("{:?}", val), res.is_some())));
+    self.journal.trace(|| Trace::Mem(MemTrace::Write(addr, std::mem::size_of::<T>(), format!("{:?}", val))));
     res
   }
 
@@ -76,29 +80,15 @@ impl RV64Cpu {
 
   /// internal fast-path
   #[inline(always)]
-  fn read_pc(&self) -> VirtAddr {
+  pub fn read_pc(&self) -> VirtAddr {
     self.journal.trace(|| Trace::Reg(RegTrace::Read(Reg::PC, Some(self.regs.pc.0))));
     self.regs.pc
   }
 
   /// internal fast-path
   #[inline(always)]
-  fn write_pc(&mut self, pc: VirtAddr) {
+  pub fn write_pc(&mut self, pc: VirtAddr) {
     self.regs.pc = pc;
     self.journal.trace(|| Trace::Reg(RegTrace::Write(Reg::PC, pc.0, true)));
-  }
-
-  pub fn run(&mut self, int: &dyn RV64Interpreter) {
-    int.interp(self)
-  }
-
-  pub fn load_kernel<T: CanIO>(&mut self, mem: &[T]) {
-    self.bus.load_kernel(mem, RV64_KERNEL_BASE as usize);
-    self.write_pc(self.cpu_reset_pc);
-  }
-
-  pub fn halt(&mut self) {
-    self.bus.halt();
-    println!("CPU halt with registers: {:?}", self.regs);
   }
 }

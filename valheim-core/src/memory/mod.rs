@@ -97,7 +97,7 @@ impl Memory {
     self.get_mut(addr).map(|v| *v = value)
   }
 
-  pub fn load_kernel<T: CanIO>(&mut self, mem: &[T], offset: usize) {
+  pub fn load<T: CanIO>(&mut self, mem: &[T], offset: usize) {
     unsafe {
       std::ptr::copy_nonoverlapping(
         mem.as_ptr() as *const u8,

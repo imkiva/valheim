@@ -1,4 +1,5 @@
 use crate::cpu::data::Either;
+use crate::cpu::exception::Exception;
 use crate::cpu::RV64Cpu;
 use crate::debug::trace::{InstrTrace, Trace};
 use crate::isa::compressed::untyped::Bytecode16;
@@ -12,30 +13,30 @@ use crate::isa::rv64::RV64Instr::*;
 use crate::isa::typed::Instr::{RV32, RV64};
 
 impl RV64Cpu {
-  pub fn fetch(&mut self) -> Option<(VirtAddr, Bytecode, Bytecode16)> {
+  pub fn fetch(&mut self) -> Result<(VirtAddr, Bytecode, Bytecode16), Exception> {
     let pc = self.read_pc();
     let bytecode: Bytecode = self.read_mem(pc)?;
     let compressed: Bytecode16 = self.read_mem(pc)?;
     self.journal.trace(|| Trace::Instr(InstrTrace::Fetched(pc, bytecode, compressed)));
-    Some((pc, bytecode, compressed))
+    Ok((pc, bytecode, compressed))
   }
 
-  pub fn decode(&mut self, pc: VirtAddr, untyped: Bytecode, compressed: Bytecode16) -> Option<(Either<Bytecode, Bytecode16>, Instr)> {
+  pub fn decode(&mut self, pc: VirtAddr, untyped: Bytecode, compressed: Bytecode16) -> Result<(Either<Bytecode, Bytecode16>, Instr), Exception> {
     match Instr::try_from_compressed(compressed) {
       Some(instr) => {
         self.journal.trace(|| Trace::Instr(InstrTrace::DecodedCompressed(pc, compressed, instr)));
-        Some((Either::Right(compressed), instr))
+        Ok((Either::Right(compressed), instr))
       },
       None => {
         Instr::try_from(untyped).map(|instr| {
           self.journal.trace(|| Trace::Instr(InstrTrace::Decoded(pc, untyped, instr)));
           (Either::Left(untyped), instr)
-        })
+        }).ok_or(Exception::IllegalInstruction(pc, untyped, compressed))
       },
     }
   }
 
-  pub fn execute(&mut self, pc: VirtAddr, instr: Instr, is_compressed: bool) -> Option<()> {
+  pub fn execute(&mut self, pc: VirtAddr, instr: Instr, is_compressed: bool) -> Result<(), Exception> {
     let delta = match is_compressed {
       true => std::mem::size_of::<Bytecode16>() as u64,
       false => std::mem::size_of::<Bytecode>() as u64,
@@ -144,7 +145,7 @@ impl RV64Cpu {
       RV32(REM(_, _, _)) => unimplemented!(),
       RV32(REMU(_, _, _)) => unimplemented!(),
       // the valheim trap
-      RV32(EBREAK) => return None,
+      RV32(EBREAK) => return Err(Exception::ValheimEbreak),
 
       // TODO: RV32AFD
       RV32(_) => todo!("rv32afd"),
@@ -169,7 +170,7 @@ impl RV64Cpu {
       false => Trace::Instr(InstrTrace::Executed(pc, instr))
     });
     self.write_pc(next_pc);
-    Some(())
+    Ok(())
   }
 }
 

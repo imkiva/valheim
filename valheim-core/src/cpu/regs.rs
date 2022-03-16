@@ -1,17 +1,19 @@
 use crate::isa::typed::Reg;
 use crate::memory::VirtAddr;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 pub struct Regs {
   pub x: [u64; 32],
+  pub f: [f64; 32],
   pub pc: VirtAddr,
 }
 
 impl Regs {
-  pub fn new(pc: VirtAddr) -> Regs {
+  pub fn new() -> Regs {
     Regs {
       x: [0; 32],
-      pc,
+      f: [0.0; 32],
+      pc: VirtAddr(0),
     }
   }
 

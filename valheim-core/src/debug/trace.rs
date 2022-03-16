@@ -6,7 +6,7 @@ use crate::isa::typed::{Instr, Reg};
 use crate::isa::untyped::Bytecode;
 use crate::memory::VirtAddr;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Journal {
   pub init_regs: Regs,
   pub init_mem_base: VirtAddr,
@@ -42,7 +42,7 @@ pub enum RegTrace {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MemTrace {
   Read(VirtAddr, usize, String),
-  Write(VirtAddr, usize, String, bool),
+  Write(VirtAddr, usize, String),
 }
 
 impl Journal {

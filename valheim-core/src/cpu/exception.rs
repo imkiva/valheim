@@ -1,6 +1,12 @@
+use crate::isa::compressed::untyped::Bytecode16;
 use crate::isa::untyped::Bytecode;
+use crate::memory::VirtAddr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Exception {
-  IllegalInstruction(Bytecode),
+  IllegalInstruction(VirtAddr, Bytecode, Bytecode16),
+  LoadAccessFault,
+  StoreAccessFault,
+  // TODO: remove this hack
+  ValheimEbreak,
 }

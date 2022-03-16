@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::fmt::{Debug, Formatter};
+use crate::cpu::exception::Exception;
 use crate::device::Device;
 use crate::memory::{CanIO, Memory, VirtAddr};
 
@@ -48,31 +49,31 @@ impl Bus {
     });
   }
 
-  pub fn read<T: CanIO>(&self, addr: VirtAddr) -> Option<T> {
+  pub fn read<T: CanIO>(&self, addr: VirtAddr) -> Result<T, Exception> {
     match self.select_device_for_read(addr) {
       // CanIO trait guarantees that the transmute is safe
       Some(dev) => match std::mem::size_of::<T>() {
-        1 => Some(unsafe { *std::mem::transmute::<*const u8, *const T>((*dev).read(addr)? as *const u8) }),
-        2 => Some(unsafe { *std::mem::transmute::<*const u16, *const T>((*dev).read16(addr)? as *const u16) }),
-        4 => Some(unsafe { *std::mem::transmute::<*const u32, *const T>((*dev).read32(addr)? as *const u32) }),
-        8 => Some(unsafe { *std::mem::transmute::<*const u64, *const T>((*dev).read64(addr)? as *const u64) }),
-        _ => None,
+        1 => Ok(unsafe { *std::mem::transmute::<*const u8, *const T>((*dev).read(addr).ok_or(Exception::StoreAccessFault)? as *const u8) }),
+        2 => Ok(unsafe { *std::mem::transmute::<*const u16, *const T>((*dev).read16(addr).ok_or(Exception::StoreAccessFault)? as *const u16) }),
+        4 => Ok(unsafe { *std::mem::transmute::<*const u32, *const T>((*dev).read32(addr).ok_or(Exception::StoreAccessFault)? as *const u32) }),
+        8 => Ok(unsafe { *std::mem::transmute::<*const u64, *const T>((*dev).read64(addr).ok_or(Exception::StoreAccessFault)? as *const u64) }),
+        _ => Err(Exception::LoadAccessFault),
       }
-      None => self.mem.read(addr),
+      None => self.mem.read(addr).ok_or(Exception::StoreAccessFault),
     }
   }
 
-  pub fn write<T: CanIO>(&mut self, addr: VirtAddr, val: T) -> Option<()> {
+  pub fn write<T: CanIO>(&mut self, addr: VirtAddr, val: T) -> Result<(), Exception> {
     match self.select_device_for_write(addr) {
       // CanIO trait guarantees that the transmute is safe
       Some(dev) => match std::mem::size_of::<T>() {
-        1 => unsafe { (*dev).write(addr, *std::mem::transmute::<*const T, *const u8>(&val as *const T)) }.ok(),
-        2 => unsafe { (*dev).write16(addr, *std::mem::transmute::<*const T, *const u16>(&val as *const T)) }.ok(),
-        4 => unsafe { (*dev).write32(addr, *std::mem::transmute::<*const T, *const u32>(&val as *const T)) }.ok(),
-        8 => unsafe { (*dev).write64(addr, *std::mem::transmute::<*const T, *const u64>(&val as *const T)) }.ok(),
-        _ => None,
+        1 => unsafe { (*dev).write(addr, *std::mem::transmute::<*const T, *const u8>(&val as *const T)) }.map_err(|_| Exception::StoreAccessFault),
+        2 => unsafe { (*dev).write16(addr, *std::mem::transmute::<*const T, *const u16>(&val as *const T)) }.map_err(|_| Exception::StoreAccessFault),
+        4 => unsafe { (*dev).write32(addr, *std::mem::transmute::<*const T, *const u32>(&val as *const T)) }.map_err(|_| Exception::StoreAccessFault),
+        8 => unsafe { (*dev).write64(addr, *std::mem::transmute::<*const T, *const u64>(&val as *const T)) }.map_err(|_| Exception::StoreAccessFault),
+        _ => Err(Exception::StoreAccessFault),
       }
-      None => self.mem.write(addr, val),
+      None => self.mem.write(addr, val).ok_or(Exception::StoreAccessFault),
     }
   }
 
@@ -101,6 +102,6 @@ impl Bus {
   }
 
   pub fn load_kernel<T: CanIO>(&mut self, mem: &[T], offset: usize) {
-    self.mem.load_kernel(mem, offset);
+    self.mem.load(mem, offset);
   }
 }
