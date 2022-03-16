@@ -43,4 +43,4 @@ qemu: all
 .PHONY : debug
 debug: all
 	@${QEMU} ${QFLAGS} -kernel $(KERNEL_ELF) -s -S &
-	@${GDB} os.elf -q -x ../gdbinit
+	@${GDB} $(KERNEL_ELF) -q -x gdbinit
