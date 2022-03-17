@@ -26,13 +26,13 @@ impl RV64Cpu {
       Some(instr) => {
         self.journal.trace(|| Trace::Instr(InstrTrace::DecodedCompressed(pc, compressed, instr)));
         Ok((Either::Right(compressed), instr))
-      },
+      }
       None => {
         Instr::try_from(untyped).map(|instr| {
           self.journal.trace(|| Trace::Instr(InstrTrace::Decoded(pc, untyped, instr)));
           (Either::Left(untyped), instr)
         }).ok_or(Exception::IllegalInstruction(pc, untyped, compressed))
-      },
+      }
     }
   }
 
@@ -134,18 +134,36 @@ impl RV64Cpu {
       RV64(SRAW(rd, rs1, rs2)) => rd.write(self, ((rs1.read(self) as i32) >> (rs2.read(self) & 0b11111)) as i32 as i64 as u64),
       RV32(OR(rd, rs1, rs2)) => rd.write(self, rs1.read(self) | rs2.read(self)),
       RV32(AND(rd, rs1, rs2)) => rd.write(self, rs1.read(self) & rs2.read(self)),
-      RV32(FENCE(_, _, _, _, _)) => (),
-      RV32(FENCE_TSO) => (),
-      RV32(PAUSE) => unimplemented!(),
-      RV32(ECALL) => unimplemented!(),
-      RV32(MUL(_, _, _)) => unimplemented!(),
-      RV32(MULH(_, _, _)) => unimplemented!(),
-      RV32(MULHSU(_, _, _)) => unimplemented!(),
-      RV32(MULHU(_, _, _)) => unimplemented!(),
-      RV32(DIV(_, _, _)) => unimplemented!(),
-      RV32(DIVU(_, _, _)) => unimplemented!(),
-      RV32(REM(_, _, _)) => unimplemented!(),
-      RV32(REMU(_, _, _)) => unimplemented!(),
+      RV32(FENCE(_, _, _, _, _)) => todo!(),
+      RV32(FENCE_TSO) => todo!(),
+      RV32(PAUSE) => todo!(),
+      RV32(ECALL) => todo!(),
+      RV32(MUL(rd, rs1, rs2)) => rd.write(self, (rs1.read(self) as i64).wrapping_mul(rs2.read(self) as i64) as u64),
+      RV32(MULH(rd, rs1, rs2)) => {
+        let rs1 = rs1.read(self) as i64 as i128;
+        let rs2 = rs2.read(self) as i64 as i128;
+        let val = (rs1.wrapping_mul(rs2) >> 64) as u64;
+        // signed * signed
+        rd.write(self, val)
+      }
+      RV32(MULHSU(rd, rs1, rs2)) => {
+        let rs1 = rs1.read(self) as i64 as i128 as u128;
+        let rs2 = rs2.read(self) as u128;
+        let val = (rs1.wrapping_mul(rs2) >> 64) as u64;
+        // signed × unsigned
+        rd.write(self, val)
+      }
+      RV32(MULHU(rd, rs1, rs2)) => {
+        let rs1 = rs1.read(self) as u128;
+        let rs2 = rs2.read(self) as u128;
+        let val = (rs1.wrapping_mul(rs2) >> 64) as u64;
+        // unsigned * unsigned
+        rd.write(self, val)
+      }
+      RV32(DIV(_, _, _)) => todo!(),
+      RV32(DIVU(_, _, _)) => todo!(),
+      RV32(REM(_, _, _)) => todo!(),
+      RV32(REMU(_, _, _)) => todo!(),
       // the valheim trap
       RV32(EBREAK) => return Err(Exception::ValheimEbreak),
 
@@ -219,13 +237,13 @@ impl RV64Cpu {
         self.csrs.write(csr, rs1.read(self));
         rd.write(self, old);
         // TODO: update page table when csr is SATP
-      },
+      }
       RV64(CSRRS(rd, rs1, csr)) => {
         let old = self.csrs.read(csr);
         self.csrs.write(csr, old | rs1.read(self));
         rd.write(self, old);
         // TODO: update page table when csr is SATP
-      },
+      }
       RV64(CSRRC(_, _, _)) => todo!("csr"),
       RV64(CSRRWI(_, _, _)) => todo!("csr"),
       RV64(CSRRSI(_, _, _)) => todo!("csr"),
