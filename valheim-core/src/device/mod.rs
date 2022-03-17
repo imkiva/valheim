@@ -1,15 +1,18 @@
 use crate::memory::{Memory, VirtAddr};
 
+pub mod ns16550a;
+
 pub trait Device {
   fn name(&self) -> &'static str;
   fn vendor_id(&self) -> u16;
   fn device_id(&self) -> u16;
-  fn init(&'static mut self) -> Result<Vec<(VirtAddr, VirtAddr)>, ()>;
-  fn destroy(&mut self) -> Result<(), ()>;
+  fn init(&self) -> Result<Vec<(VirtAddr, VirtAddr)>, ()>;
+  fn destroy(&self) -> Result<(), ()>;
   fn dma_read(&self, addr: VirtAddr) -> Option<&Memory>;
-  fn dma_write(&mut self, addr: VirtAddr) -> Option<&mut Memory>;
+  fn dma_write(&self, addr: VirtAddr) -> Option<&mut Memory>;
   fn mmio_read(&self, addr: VirtAddr) -> Option<u8>;
-  fn mmio_write(&mut self, addr: VirtAddr, val: u8) -> Result<(), ()>;
+  fn mmio_write(&self, addr: VirtAddr, val: u8) -> Result<(), ()>;
+  fn is_interrupting(&self) -> bool;
 
   fn read(&self, addr: VirtAddr) -> Option<u8> {
     match self.dma_read(addr) {
@@ -18,7 +21,7 @@ pub trait Device {
     }
   }
 
-  fn write(&mut self, addr: VirtAddr, data: u8) -> Result<(), ()> {
+  fn write(&self, addr: VirtAddr, data: u8) -> Result<(), ()> {
     match self.dma_write(addr) {
       Some(mem) => mem.write(addr, data).ok_or(()),
       None => self.mmio_write(addr, data),
@@ -67,7 +70,7 @@ pub trait Device {
     }
   }
 
-  fn write16(&mut self, addr: VirtAddr, data: u16) -> Result<(), ()> {
+  fn write16(&self, addr: VirtAddr, data: u16) -> Result<(), ()> {
     match self.dma_write(addr) {
       Some(mem) => mem.write(addr, data).ok_or(()),
       None => {
@@ -77,7 +80,7 @@ pub trait Device {
     }
   }
 
-  fn write32(&mut self, addr: VirtAddr, data: u32) -> Result<(), ()> {
+  fn write32(&self, addr: VirtAddr, data: u32) -> Result<(), ()> {
     match self.dma_write(addr) {
       Some(mem) => mem.write(addr, data).ok_or(()),
       None => {
@@ -89,7 +92,7 @@ pub trait Device {
     }
   }
 
-  fn write64(&mut self, addr: VirtAddr, data: u64) -> Result<(), ()> {
+  fn write64(&self, addr: VirtAddr, data: u64) -> Result<(), ()> {
     match self.dma_write(addr) {
       Some(mem) => mem.write(addr, data).ok_or(()),
       None => {

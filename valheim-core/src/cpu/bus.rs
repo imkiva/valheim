@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::fmt::{Debug, Formatter};
+use std::sync::Arc;
 use crate::cpu::exception::Exception;
 use crate::device::Device;
 use crate::memory::{CanIO, Memory, VirtAddr};
@@ -9,7 +10,7 @@ const RV64_MEMORY_BASE: u64 = 0x80000000;
 /// System Bus, which handles DRAM access and memory-mapped IO.
 pub struct Bus {
   pub mem: Memory,
-  pub devices: Vec<*mut dyn Device>,
+  pub devices: Vec<Arc<dyn Device>>,
   pub io_map: BTreeMap<(VirtAddr, VirtAddr), usize>,
 }
 
@@ -19,7 +20,7 @@ impl Debug for Bus {
       f,
       "Bus {{ mem: {:?}, devices: {:?} }}",
       self.mem,
-      self.devices.iter().map(|&dev| unsafe { (*dev).name() }).collect::<Vec<_>>(),
+      self.devices.iter().map(|dev| dev.name()).collect::<Vec<_>>(),
     )
   }
 }
@@ -34,8 +35,8 @@ impl Bus {
     })
   }
 
-  pub unsafe fn add_device(&mut self, device: *mut dyn Device) -> Result<(), ()> {
-    let ranges = (*device).init()?;
+  pub unsafe fn add_device(&mut self, mut device: Arc<dyn Device>) -> Result<(), ()> {
+    let ranges =  device.init()?;
     let idx = self.devices.len();
     self.devices.push(device);
     for range in ranges {
@@ -45,7 +46,7 @@ impl Bus {
   }
 
   pub fn halt(&mut self) {
-    self.devices.iter().for_each(|&dev| match unsafe { (*dev).destroy() } {
+    self.devices.iter().for_each(|dev| match unsafe { dev.destroy() } {
       Ok(_) => (),
       Err(_) => eprintln!("Error destroying device: {}", { unsafe { (*dev).name() } }),
     });
@@ -55,13 +56,13 @@ impl Bus {
     match self.select_device_for_read(addr) {
       // CanIO trait guarantees that the transmute is safe
       Some(dev) => match std::mem::size_of::<T>() {
-        1 => Ok(unsafe { *std::mem::transmute::<*const u8, *const T>((*dev).read(addr).ok_or(Exception::StoreAccessFault)? as *const u8) }),
-        2 => Ok(unsafe { *std::mem::transmute::<*const u16, *const T>((*dev).read16(addr).ok_or(Exception::StoreAccessFault)? as *const u16) }),
-        4 => Ok(unsafe { *std::mem::transmute::<*const u32, *const T>((*dev).read32(addr).ok_or(Exception::StoreAccessFault)? as *const u32) }),
-        8 => Ok(unsafe { *std::mem::transmute::<*const u64, *const T>((*dev).read64(addr).ok_or(Exception::StoreAccessFault)? as *const u64) }),
-        _ => Err(Exception::LoadAccessFault),
+        1 => Ok(unsafe { *std::mem::transmute::<*const u8, *const T>(&dev.read(addr).ok_or(Exception::StoreAccessFault(addr))? as *const u8) }),
+        2 => Ok(unsafe { *std::mem::transmute::<*const u16, *const T>(&dev.read16(addr).ok_or(Exception::StoreAccessFault(addr))? as *const u16) }),
+        4 => Ok(unsafe { *std::mem::transmute::<*const u32, *const T>(&dev.read32(addr).ok_or(Exception::StoreAccessFault(addr))? as *const u32) }),
+        8 => Ok(unsafe { *std::mem::transmute::<*const u64, *const T>(&dev.read64(addr).ok_or(Exception::StoreAccessFault(addr))? as *const u64) }),
+        _ => Err(Exception::LoadAccessFault(addr)),
       }
-      None => self.mem.read(addr).ok_or(Exception::StoreAccessFault),
+      None => self.mem.read(addr).ok_or(Exception::StoreAccessFault(addr)),
     }
   }
 
@@ -69,21 +70,21 @@ impl Bus {
     match self.select_device_for_write(addr) {
       // CanIO trait guarantees that the transmute is safe
       Some(dev) => match std::mem::size_of::<T>() {
-        1 => unsafe { (*dev).write(addr, *std::mem::transmute::<*const T, *const u8>(&val as *const T)) }.map_err(|_| Exception::StoreAccessFault),
-        2 => unsafe { (*dev).write16(addr, *std::mem::transmute::<*const T, *const u16>(&val as *const T)) }.map_err(|_| Exception::StoreAccessFault),
-        4 => unsafe { (*dev).write32(addr, *std::mem::transmute::<*const T, *const u32>(&val as *const T)) }.map_err(|_| Exception::StoreAccessFault),
-        8 => unsafe { (*dev).write64(addr, *std::mem::transmute::<*const T, *const u64>(&val as *const T)) }.map_err(|_| Exception::StoreAccessFault),
-        _ => Err(Exception::StoreAccessFault),
+        1 => unsafe { dev.write(addr, *std::mem::transmute::<*const T, *const u8>(&val as *const T)) }.map_err(|_| Exception::StoreAccessFault(addr)),
+        2 => unsafe { dev.write16(addr, *std::mem::transmute::<*const T, *const u16>(&val as *const T)) }.map_err(|_| Exception::StoreAccessFault(addr)),
+        4 => unsafe { dev.write32(addr, *std::mem::transmute::<*const T, *const u32>(&val as *const T)) }.map_err(|_| Exception::StoreAccessFault(addr)),
+        8 => unsafe { dev.write64(addr, *std::mem::transmute::<*const T, *const u64>(&val as *const T)) }.map_err(|_| Exception::StoreAccessFault(addr)),
+        _ => Err(Exception::StoreAccessFault(addr)),
       }
-      None => self.mem.write(addr, val).ok_or(Exception::StoreAccessFault),
+      None => self.mem.write(addr, val).ok_or(Exception::StoreAccessFault(addr)),
     }
   }
 
-  fn select_device_for_read(&self, addr: VirtAddr) -> Option<*const dyn Device> {
+  fn select_device_for_read(&self, addr: VirtAddr) -> Option<Arc<dyn Device>> {
     for ((base, end), dev_id) in self.io_map.iter() {
       if addr >= *base && addr < *end {
         return match self.devices.get(*dev_id) {
-          Some(&dev) => Some(dev),
+          Some(dev) => Some(dev.clone()),
           None => None,
         };
       }
@@ -91,11 +92,11 @@ impl Bus {
     None
   }
 
-  fn select_device_for_write(&mut self, addr: VirtAddr) -> Option<*mut dyn Device> {
+  fn select_device_for_write(&mut self, addr: VirtAddr) -> Option<Arc<dyn Device>> {
     for ((base, end), dev_id) in self.io_map.iter_mut() {
       if addr >= *base && addr <= *end {
         return match self.devices.get(*dev_id) {
-          Some(&dev) => Some(dev),
+          Some(dev) => Some(dev.clone()),
           None => None,
         };
       }

@@ -1,6 +1,8 @@
+use std::sync::Arc;
 use crate::cpu::exception::Exception;
 use crate::cpu::RV64Cpu;
 use crate::cpu::trap::Trap;
+use crate::device::ns16550a::Uart16550a;
 use crate::interp::naive::NaiveInterpreter;
 use crate::interp::RV64Interpreter;
 use crate::isa::rv64::CSRAddr;
@@ -20,8 +22,13 @@ macro_rules! csr {
 
 impl Machine {
   pub fn new(memory_size: usize, trace: Option<String>) -> Machine {
+    let mut cpu = RV64Cpu::new(memory_size, trace);
+    unsafe {
+      cpu.bus.add_device(Arc::new(Uart16550a::new()))
+        .expect("Cannot install UART device")
+    };
     Machine {
-      cpu: RV64Cpu::new(memory_size, trace),
+      cpu,
       interpreter: Box::new(NaiveInterpreter::new()),
     }
   }
@@ -45,7 +52,7 @@ impl Machine {
       Ok(_) => None,
       Err(Exception::ValheimEbreak) => Some(Trap::ValheimEbreak),
       // TODO: handle exceptions
-      Err(_) => None,
+      Err(ex) => panic!("Handle exception {:?}", ex),
     };
     // TODO: traps
     match trap {
