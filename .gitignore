@@ -4,3 +4,5 @@ target/
 *.bin
 *.elf
 valheim-trace*.txt
+flamegraph.svg
+out.stacks
