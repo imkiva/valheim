@@ -55,8 +55,10 @@ impl RV64Cpu {
         next_pc = VirtAddr(pc.0.wrapping_add(offset.decode_sext() as u64));
       }
       RV32(JALR(rd, rs1, imm)) => {
+        let offset = imm.decode_sext() as i64;
+        let target = (rs1.read(self) as i64).wrapping_add(offset) & !1;
         rd.write(self, next_pc.0);
-        next_pc = VirtAddr(rs1.read(self).wrapping_add(imm.decode_sext() as u64) & !1);
+        next_pc = VirtAddr(target as u64);
       }
       RV32(BEQ(rs1, rs2, offset)) |
       RV32(BNE(rs1, rs2, offset)) |
