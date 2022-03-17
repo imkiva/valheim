@@ -30,6 +30,14 @@ macro_rules! r {
     $type!($opcode, rd, rs1, rs2)
   }};
 }
+macro_rules! r_no_rd {
+  ($type:ident, $opcode:ident, $untyped:expr, $reg:ident) => {{
+    let r = $untyped.r();
+    let rs1 = Rs1($reg(r.rs1()));
+    let rs2 = Rs2($reg(r.rs2()));
+    $type!($opcode, rs1, rs2)
+  }};
+}
 macro_rules! i {
   ($type:ident, $opcode:ident, $untyped:expr, $reg:ident) => {{
     let i = $untyped.i();
@@ -294,7 +302,22 @@ fn decode_untyped(untyped: Bytecode) -> Option<Instr> {
       0b000 => match untyped.i().imm11_0() as u8 {
         0b0 => rv32!(ECALL),
         0b1 => rv32!(EBREAK),
-        _ => return None,
+        _ => match untyped.r().funct7() as u8 {
+          0b0001000 => match untyped.r().rs2() as u8 {
+            0b00010 => rv64!(SRET),
+            0b00101 => rv64!(WFI),
+            _ => return None,
+          }
+          0b0011000 => rv64!(MRET),
+          0b0001001 => r_no_rd!(rv64, SFENCE_VMA, untyped, gp),
+          0b0001011 => r_no_rd!(rv64, SINVAL_VMA, untyped, gp),
+          0b0001100 => match untyped.r().rs2() as u8 {
+            0b0 => rv64!(SFENCE_W_INVAL),
+            0b1 => rv64!(SFENCE_INVAL_IR),
+            _ => return None,
+          }
+          _ => todo!("Hypervisor ISA")
+        }
       },
       0b001 => zicsr_rs1!(rv64, CSRRW, untyped, gp),
       0b010 => zicsr_rs1!(rv64, CSRRS, untyped, gp),

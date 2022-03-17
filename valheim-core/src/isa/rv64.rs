@@ -65,6 +65,15 @@ pub enum RV64Instr {
 
   // RV32/64 Zifencei
   FENCE_I(Rd, Rs1, Imm32<11, 0>),
+
+  // Privileged
+  SRET,
+  MRET,
+  WFI,
+  SFENCE_VMA(Rs1, Rs2),
+  SINVAL_VMA(Rs1, Rs2),
+  SFENCE_W_INVAL,
+  SFENCE_INVAL_IR,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
