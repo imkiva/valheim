@@ -4,6 +4,8 @@ use crate::cpu::exception::Exception;
 use crate::device::Device;
 use crate::memory::{CanIO, Memory, VirtAddr};
 
+const RV64_MEMORY_BASE: u64 = 0x80000000;
+
 /// System Bus, which handles DRAM access and memory-mapped IO.
 pub struct Bus {
   pub mem: Memory,
@@ -23,8 +25,8 @@ impl Debug for Bus {
 }
 
 impl Bus {
-  pub fn new(memory_base: u64, memory_size: usize) -> Result<Bus, std::io::Error> {
-    let mem = Memory::new(memory_base, memory_size)?;
+  pub fn new(memory_size: usize) -> Result<Bus, std::io::Error> {
+    let mem = Memory::new(RV64_MEMORY_BASE, memory_size)?;
     Ok(Bus {
       mem,
       devices: Vec::with_capacity(8),

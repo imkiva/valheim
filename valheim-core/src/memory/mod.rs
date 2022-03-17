@@ -73,7 +73,6 @@ impl Memory {
 
   pub fn get_mut<T: CanIO>(&mut self, virt: VirtAddr) -> Option<&mut T> {
     let phys = self.to_phys(virt)?;
-    if cfg!(debug_assertions) { println!("[Valheim] [Memory]: going to write at = {:#x}", phys.0 as u64); }
     unsafe {
       // CanIO trait guarantees that the transmute is safe
       let ptr = std::mem::transmute::<*const u8, *mut T>(phys.0);
@@ -83,7 +82,6 @@ impl Memory {
 
   pub fn get<T: CanIO>(&self, virt: VirtAddr) -> Option<&T> {
     let phys = self.to_phys(virt)?;
-    if cfg!(debug_assertions) { println!("[Valheim] [Memory]: going to read  at = {:#x}", phys.0 as u64); }
     unsafe {
       // CanIO trait guarantees that the transmute is safe
       let ptr = std::mem::transmute::<*const u8, *const T>(phys.0);
@@ -99,14 +97,16 @@ impl Memory {
     self.get_mut(addr).map(|v| *v = value)
   }
 
-  pub fn load<T: CanIO>(&mut self, mem: &[T], offset: usize) {
+  pub fn load<T: CanIO>(&mut self, mem: &[T], offset: usize) -> Option<()> {
+    let phys = self.to_phys(VirtAddr(offset as u64))?;
     unsafe {
       std::ptr::copy_nonoverlapping(
         mem.as_ptr() as *const u8,
-        self.memory.as_mut_ptr().offset(offset as isize),
+        phys.0 as *mut u8,
         mem.len() * std::mem::size_of::<T>(),
       );
     }
+    Some(())
   }
 }
 
