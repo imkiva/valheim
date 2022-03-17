@@ -8,7 +8,8 @@ use crate::memory::{CanIO, Memory, VirtAddr};
 const RV64_MEMORY_BASE: u64 = 0x80000000;
 
 const VIRT_MROM_BASE: u64 = 0x1000;
-const VIRT_MROM_END : u64 = VIRT_MROM_BASE + 0xf000;
+const VIRT_MROM_SIZE: u64 = 0xf000;
+const VIRT_MROM_END: u64 = VIRT_MROM_BASE + VIRT_MROM_SIZE;
 
 /// System Bus, which handles DRAM access and memory-mapped IO.
 /// https://github.com/qemu/qemu/blob/master/hw/riscv/virt.c
@@ -34,15 +35,20 @@ impl Debug for Bus {
 impl Bus {
   pub fn new(memory_size: usize) -> Result<Bus, std::io::Error> {
     let mem = Memory::new(RV64_MEMORY_BASE, memory_size)?;
-    Ok(Bus {
+    let mut bus = Bus {
       mem,
       devices: Vec::with_capacity(8),
       io_map: BTreeMap::new(),
-    })
+    };
+    unsafe {
+      bus.add_device(Arc::new(VirtMROMDevice::new()))
+        .expect("Failed to add VirtMROM device");
+    }
+    Ok(bus)
   }
 
   pub unsafe fn add_device(&mut self, device: Arc<dyn Device>) -> Result<(), ()> {
-    let ranges =  device.init()?;
+    let ranges = device.init()?;
     let idx = self.devices.len();
     self.devices.push(device);
     for range in ranges {
@@ -115,4 +121,57 @@ impl Bus {
   }
 }
 
+struct VirtMROMDevice {
+  pub rom: Memory,
+}
 
+impl VirtMROMDevice {
+  pub fn new() -> Self {
+    let mut rom = Memory::new(VIRT_MROM_BASE, VIRT_MROM_SIZE as usize)
+      .expect("Failed to create VirtMROM memory");
+    // TODO: how to make a device tree?
+    VirtMROMDevice { rom }
+  }
+}
+
+impl Device for VirtMROMDevice {
+  fn name(&self) -> &'static str {
+    "Virt_MROM"
+  }
+
+  fn vendor_id(&self) -> u16 {
+    0x0000
+  }
+
+  fn device_id(&self) -> u16 {
+    0x0000
+  }
+
+  fn init(&self) -> Result<Vec<(VirtAddr, VirtAddr)>, ()> {
+    Ok(vec![(VirtAddr(VIRT_MROM_BASE), VirtAddr(VIRT_MROM_END))])
+  }
+
+  fn destroy(&self) -> Result<(), ()> {
+    Ok(())
+  }
+
+  fn dma_read(&self, addr: VirtAddr) -> Option<&Memory> {
+    Some(&self.rom)
+  }
+
+  fn dma_write(&self, addr: VirtAddr) -> Option<&mut Memory> {
+    None
+  }
+
+  fn mmio_read(&self, addr: VirtAddr) -> Option<u8> {
+    None
+  }
+
+  fn mmio_write(&self, addr: VirtAddr, val: u8) -> Result<(), ()> {
+    Err(())
+  }
+
+  fn is_interrupting(&self) -> bool {
+    false
+  }
+}
