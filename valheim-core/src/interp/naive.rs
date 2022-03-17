@@ -19,8 +19,7 @@ impl RV64Interpreter for NaiveInterpreter {
       Either::Left(untyped) => (false, untyped.repr()),
       Either::Right(compressed) => (true, compressed.repr() as u32),
     };
-    println!("pc = {:#010x}, instr = {:#010x}, RVC = {}, decoded = {:?}", pc.0, repr, is_compressed, decoded);
-    if cpu.read_pc().0 == 0x00000000 { return Err(Exception::ValheimEbreak); }
+    cpu.previous_instr = repr as u64;
     cpu.execute(pc, decoded, is_compressed)
   }
 }

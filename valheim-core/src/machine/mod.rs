@@ -5,8 +5,9 @@ use crate::cpu::trap::Trap;
 use crate::device::ns16550a::Uart16550a;
 use crate::interp::naive::NaiveInterpreter;
 use crate::interp::RV64Interpreter;
+use crate::isa::data::Fin;
 use crate::isa::rv64::CSRAddr;
-use crate::isa::typed::Imm32;
+use crate::isa::typed::{Imm32, Reg};
 use crate::memory::{CanIO, VirtAddr};
 
 const RV64_PC_RESET: u64 = 0x80000000;
@@ -35,6 +36,7 @@ impl Machine {
 
   pub fn run(&mut self) {
     self.cpu.write_pc(VirtAddr(RV64_PC_RESET));
+    self.cpu.write_reg(Reg::X(Fin::new(11)), 0x1020);
     loop {
       let cont = self.run_next();
       match cont {

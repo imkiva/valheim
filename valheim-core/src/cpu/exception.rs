@@ -8,6 +8,7 @@ pub enum Exception {
   LoadAccessFault(VirtAddr),
   StoreAccessFault(VirtAddr),
   LoadAddressMisaligned(VirtAddr),
+  StoreAddressMisaligned(VirtAddr),
   // TODO: remove this hack
   ValheimEbreak,
 }

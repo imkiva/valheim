@@ -192,11 +192,66 @@ impl RV64Cpu {
       }
       RV32(REM(_, _, _)) => todo!(),
       RV32(REMU(_, _, _)) => todo!(),
+      RV64(MULW(_, _, _)) => todo!(),
+      RV64(DIVW(_, _, _)) => todo!(),
+      RV64(DIVUW(_, _, _)) => todo!(),
+      RV64(REMW(_, _, _)) => todo!(),
+      RV64(REMUW(_, _, _)) => todo!(),
+
       // the valheim trap
       RV32(EBREAK) => return Err(Exception::ValheimEbreak),
 
-      RV32(LR_W(_, _, _, _)) => todo!(),
-      RV32(SC_W(_, _, _, _, _)) => todo!(),
+      RV32(LR_W(rd, rs1, _, _)) => {
+        let addr = rs1.read(self);
+        if addr % 4 != 0 {
+          return Err(Exception::LoadAddressMisaligned(VirtAddr(addr)));
+        }
+        let addr = VirtAddr(addr);
+        let val = self.read_mem::<u32>(addr)?;
+        rd.write(self, val as i32 as i64 as u64);
+        self.reserved.push(addr);
+      }
+      RV32(SC_W(rd, rs1, rs2, _, _)) => {
+        let addr = rs1.read(self);
+        if addr % 4 != 0 {
+          return Err(Exception::StoreAddressMisaligned(VirtAddr(addr)));
+        }
+        let addr = VirtAddr(addr);
+        if self.reserved.contains(&addr) {
+          // "Regardless of success or failure, executing an SC.W instruction
+          // invalidates any reservation held by this hart. "
+          self.reserved.retain(|&x| x != addr);
+          self.write_mem::<u32>(addr, rs2.read(self) as u32)?;
+          rd.write(self, 0);
+        } else {
+          self.reserved.retain(|&x| x != addr);
+          rd.write(self, 1);
+        };
+      }
+      RV64(LR_D(rd, rs1, _, _)) => {
+        let addr = rs1.read(self);
+        if addr % 8 != 0 {
+          return Err(Exception::LoadAddressMisaligned(VirtAddr(addr)));
+        }
+        let val = self.read_mem::<u64>(VirtAddr(addr))?;
+        rd.write(self, val);
+        self.reserved.push(VirtAddr(addr));
+      },
+      RV64(SC_D(rd, rs1, rs2, _, _)) => {
+        let addr = rs1.read(self);
+        if addr % 8 != 0 {
+          return Err(Exception::StoreAddressMisaligned(VirtAddr(addr)));
+        }
+        let addr = VirtAddr(addr);
+        if self.reserved.contains(&addr) {
+          self.reserved.retain(|&x| x != addr);
+          self.write_mem::<u64>(addr, rs2.read(self))?;
+          rd.write(self, 0);
+        } else {
+          self.reserved.retain(|&x| x != addr);
+          rd.write(self, 1);
+        }
+      }
       RV32(AMOSWAP_W(rd, rs1, rs2, _, _)) => {
         let addr = rs1.read(self);
         if addr % 4 != 0 {
@@ -214,6 +269,41 @@ impl RV64Cpu {
       RV32(AMOMAX_W(_, _, _, _, _)) => todo!(),
       RV32(AMOMINU_W(_, _, _, _, _)) => todo!(),
       RV32(AMOMAXU_W(_, _, _, _, _)) => todo!(),
+      RV64(AMOSWAP_D(_, _, _, _, _)) => todo!(),
+      RV64(AMOADD_D(rd, rs1, rs2, _, _)) => {
+        let addr = rs1.read(self);
+        if addr % 8 != 0 {
+          return Err(Exception::LoadAddressMisaligned(VirtAddr(addr)));
+        }
+        let val = self.read_mem::<u64>(VirtAddr(addr))?;
+        self.write_mem::<u64>(VirtAddr(addr), val.wrapping_add(rs2.read(self)))?;
+        rd.write(self, val);
+      }
+      RV64(AMOXOR_D(_, _, _, _, _)) => todo!(),
+      RV64(AMOAND_D(_, _, _, _, _)) => todo!(),
+      RV64(AMOOR_D(_, _, _, _, _)) => todo!(),
+      RV64(AMOMIN_D(_, _, _, _, _)) => todo!(),
+      RV64(AMOMAX_D(_, _, _, _, _)) => todo!(),
+      RV64(AMOMINU_D(_, _, _, _, _)) => todo!(),
+      RV64(AMOMAXU_D(_, _, _, _, _)) => todo!(),
+
+      RV64(CSRRW(rd, rs1, csr)) => {
+        let old = self.csrs.read(csr);
+        self.csrs.write(csr, rs1.read(self));
+        rd.write(self, old);
+        // TODO: update page table when csr is SATP
+      }
+      RV64(CSRRS(rd, rs1, csr)) => {
+        let old = self.csrs.read(csr);
+        self.csrs.write(csr, old | rs1.read(self));
+        rd.write(self, old);
+        // TODO: update page table when csr is SATP
+      }
+      RV64(CSRRC(_, _, _)) => todo!("csr"),
+      RV64(CSRRWI(_, _, _)) => todo!("csr"),
+      RV64(CSRRSI(_, _, _)) => todo!("csr"),
+      RV64(CSRRCI(_, _, _)) => todo!("csr"),
+
       RV32(FLW(_, _, _)) => todo!(),
       RV32(FSW(_, _, _)) => todo!(),
       RV32(FMADD_S(_, _, _, _, _)) => todo!(),
@@ -266,47 +356,6 @@ impl RV64Cpu {
       RV32(FCVT_WU_D(_, _, _)) => todo!(),
       RV32(FCVT_D_W(_, _, _)) => todo!(),
       RV32(FCVT_D_WU(_, _, _)) => todo!(),
-
-      RV64(CSRRW(rd, rs1, csr)) => {
-        let old = self.csrs.read(csr);
-        self.csrs.write(csr, rs1.read(self));
-        rd.write(self, old);
-        // TODO: update page table when csr is SATP
-      }
-      RV64(CSRRS(rd, rs1, csr)) => {
-        let old = self.csrs.read(csr);
-        self.csrs.write(csr, old | rs1.read(self));
-        rd.write(self, old);
-        // TODO: update page table when csr is SATP
-      }
-      RV64(CSRRC(_, _, _)) => todo!("csr"),
-      RV64(CSRRWI(_, _, _)) => todo!("csr"),
-      RV64(CSRRSI(_, _, _)) => todo!("csr"),
-      RV64(CSRRCI(_, _, _)) => todo!("csr"),
-      RV64(MULW(_, _, _)) => todo!(),
-      RV64(DIVW(_, _, _)) => todo!(),
-      RV64(DIVUW(_, _, _)) => todo!(),
-      RV64(REMW(_, _, _)) => todo!(),
-      RV64(REMUW(_, _, _)) => todo!(),
-      RV64(LR_D(_, _, _, _)) => todo!(),
-      RV64(SC_D(_, _, _, _, _)) => todo!(),
-      RV64(AMOSWAP_D(_, _, _, _, _)) => todo!(),
-      RV64(AMOADD_D(rd, rs1, rs2, _, _)) => {
-        let addr = rs1.read(self);
-        if addr % 8 != 0 {
-          return Err(Exception::LoadAddressMisaligned(VirtAddr(addr)));
-        }
-        let val = self.read_mem::<u64>(VirtAddr(addr))?;
-        self.write_mem::<u64>(VirtAddr(addr), val.wrapping_add(rs2.read(self)))?;
-        rd.write(self, val);
-      }
-      RV64(AMOXOR_D(_, _, _, _, _)) => todo!(),
-      RV64(AMOAND_D(_, _, _, _, _)) => todo!(),
-      RV64(AMOOR_D(_, _, _, _, _)) => todo!(),
-      RV64(AMOMIN_D(_, _, _, _, _)) => todo!(),
-      RV64(AMOMAX_D(_, _, _, _, _)) => todo!(),
-      RV64(AMOMINU_D(_, _, _, _, _)) => todo!(),
-      RV64(AMOMAXU_D(_, _, _, _, _)) => todo!(),
       RV64(FCVT_L_S(_, _, _)) => todo!(),
       RV64(FCVT_LU_S(_, _, _)) => todo!(),
       RV64(FCVT_S_L(_, _, _)) => todo!(),

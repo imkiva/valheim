@@ -19,7 +19,10 @@ pub struct RV64Cpu {
   pub csrs: csr::CSRRegs,
   pub mode: PrivilegeMode,
   pub bus: bus::Bus,
+  /// used by LR/SC
+  pub reserved: Vec<VirtAddr>,
   pub journal: Journal,
+  pub previous_instr: u64,
 }
 
 #[derive(Debug, PartialEq, PartialOrd, Eq, Copy, Clone)]
@@ -37,8 +40,9 @@ impl RV64Cpu {
       regs,
       csrs,
       mode: PrivilegeMode::Machine,
-      bus: bus::Bus::new(0, memory_size)
+      bus: bus::Bus::new(memory_size)
         .expect("Failed to create Bus"),
+      reserved: Vec::new(),
       journal: Journal {
         init_regs: regs,
         init_mem_base: VirtAddr(0),
@@ -47,6 +51,7 @@ impl RV64Cpu {
         max_recent_traces: if trace.is_some() { 1024 } else { 0 },
         trace_file: trace,
       },
+      previous_instr: 0,
     }
   }
 
