@@ -193,7 +193,15 @@ impl RV64Cpu {
 
       RV32(LR_W(_, _, _, _)) => todo!(),
       RV32(SC_W(_, _, _, _, _)) => todo!(),
-      RV32(AMOSWAP_W(_, _, _, _, _)) => todo!(),
+      RV32(AMOSWAP_W(rd, rs1, rs2, _, _)) => {
+        let addr = rs1.read(self);
+        if addr % 4 != 0 {
+          return Err(Exception::LoadAddressMisaligned);
+        }
+        let val = self.read_mem::<u32>(VirtAddr(addr))?;
+        self.write_mem::<u32>(VirtAddr(addr), rs2.read(self) as u32)?;
+        rd.write(self, val as i32 as i64 as u64)
+      }
       RV32(AMOADD_W(_, _, _, _, _)) => todo!(),
       RV32(AMOXOR_W(_, _, _, _, _)) => todo!(),
       RV32(AMOAND_W(_, _, _, _, _)) => todo!(),
