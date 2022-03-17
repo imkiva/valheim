@@ -150,13 +150,20 @@ impl RV64Cpu {
       RV32(EBREAK) => return Err(Exception::ValheimEbreak),
 
       // TODO: RV32AFD
-      RV32(_) => todo!("rv32afd"),
+      RV32(_) => panic!("Unimplemented: {:?}", instr),
 
       RV64(FENCE_I(_, _, _)) => (),
-      RV64(CSRRW(_, _, _)) => todo!("csr"),
+      RV64(CSRRW(rd, rs1, csr)) => {
+        let old = self.csrs.read(csr);
+        self.csrs.write(csr, rs1.read(self));
+        rd.write(self, old);
+        // TODO: update page table when csr is SATP
+      },
       RV64(CSRRS(rd, rs1, csr)) => {
-        // TODO: real csr handler
-        if csr.value() == 0xf14 { rd.write(self, 0); }
+        let old = self.csrs.read(csr);
+        self.csrs.write(csr, old | rs1.read(self));
+        rd.write(self, old);
+        // TODO: update page table when csr is SATP
       },
       RV64(CSRRC(_, _, _)) => todo!("csr"),
       RV64(CSRRWI(_, _, _)) => todo!("csr"),
@@ -164,7 +171,7 @@ impl RV64Cpu {
       RV64(CSRRCI(_, _, _)) => todo!("csr"),
 
       // TODO: RV64MAFD
-      RV64(_) => todo!("rv64mafd"),
+      RV64(_) => panic!("Unimplemented: {:?}", instr),
     };
 
     self.journal.trace(|| match is_compressed {
