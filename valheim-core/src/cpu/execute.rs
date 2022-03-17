@@ -134,8 +134,9 @@ impl RV64Cpu {
       RV64(SRAW(rd, rs1, rs2)) => rd.write(self, ((rs1.read(self) as i32) >> (rs2.read(self) & 0b11111)) as i32 as i64 as u64),
       RV32(OR(rd, rs1, rs2)) => rd.write(self, rs1.read(self) | rs2.read(self)),
       RV32(AND(rd, rs1, rs2)) => rd.write(self, rs1.read(self) & rs2.read(self)),
-      RV32(FENCE(_, _, _, _, _)) => todo!(),
-      RV32(FENCE_TSO) => todo!(),
+      RV32(FENCE(_, _, _, _, _)) => (),
+      RV64(FENCE_I(_, _, _)) => (),
+      RV32(FENCE_TSO) => (),
       RV32(PAUSE) => todo!(),
       RV32(ECALL) => todo!(),
       RV32(MUL(rd, rs1, rs2)) => rd.write(self, (rs1.read(self) as i64).wrapping_mul(rs2.read(self) as i64) as u64),
@@ -231,7 +232,6 @@ impl RV64Cpu {
       RV32(FCVT_D_W(_, _, _)) => todo!(),
       RV32(FCVT_D_WU(_, _, _)) => todo!(),
 
-      RV64(FENCE_I(_, _, _)) => (),
       RV64(CSRRW(rd, rs1, csr)) => {
         let old = self.csrs.read(csr);
         self.csrs.write(csr, rs1.read(self));
