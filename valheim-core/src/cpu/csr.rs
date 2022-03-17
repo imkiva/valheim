@@ -187,8 +187,16 @@ impl CSRRegs {
   }
 
   pub fn read(&self, addr: CSRAddr) -> u64 {
+    self.read_unchecked(addr.value())
+  }
+
+  pub fn write(&mut self, addr: CSRAddr, val: u64) {
+    self.write_unchecked(addr.value(), val);
+  }
+
+  pub fn read_unchecked(&self, addr: u16) -> u64 {
     use CSRMap::*;
-    match addr.value() {
+    match addr {
       SSTATUS => self.csrs[MSTATUS as usize] & SSTATUS_MASK,
       SIE => self.csrs[MIE as usize] & self.csrs[MIDELEG as usize],
       SIP => self.csrs[MIP as usize] & self.csrs[MIDELEG as usize],
@@ -196,9 +204,9 @@ impl CSRRegs {
     }
   }
 
-  pub fn write(&mut self, addr: CSRAddr, val: u64) {
+  pub fn write_unchecked(&mut self, addr: u16, val: u64) {
     use CSRMap::*;
-    match addr.value() {
+    match addr {
       MVENDORID => {}
       MARCHID => {}
       MIMPID => {}
@@ -219,14 +227,22 @@ impl CSRRegs {
     }
   }
 
-  pub fn read_bit(&self, addr: CSRAddr, bit: Fin<64>) -> bool {
-    (self.read(addr) & (1 << bit.value())) != 0
+  pub fn read_bit(&self, addr: CSRAddr, bit: usize) -> bool {
+    self.read_bit_unchecked(addr.value(), bit)
   }
 
-  pub fn write_bit(&mut self, addr: CSRAddr, bit: Fin<64>, val: bool) {
+  pub fn write_bit(&mut self, addr: CSRAddr, bit: usize, val: bool) {
+    self.write_bit_unchecked(addr.value(), bit, val);
+  }
+
+  pub fn read_bit_unchecked(&self, addr: u16, bit: usize) -> bool {
+    (self.read_unchecked(addr) & (1 << bit)) != 0
+  }
+
+  pub fn write_bit_unchecked(&mut self, addr: u16, bit: usize, val: bool) {
     match val {
-      true => self.write(addr, self.read(addr) | 1 << bit.value()),
-      false =>  self.write(addr, self.read(addr) & !(1 << bit.value())),
+      true => self.write_unchecked(addr, self.read_unchecked(addr) | 1 << bit),
+      false =>  self.write_unchecked(addr, self.read_unchecked(addr) & !(1 << bit)),
     }
   }
 }

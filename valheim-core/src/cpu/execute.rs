@@ -1,3 +1,4 @@
+use crate::cpu::csr::CSRMap::FCSR;
 use crate::cpu::data::Either;
 use crate::cpu::exception::Exception;
 use crate::cpu::RV64Cpu;
@@ -161,8 +162,30 @@ impl RV64Cpu {
         // unsigned * unsigned
         rd.write(self, val)
       }
-      RV32(DIV(_, _, _)) => todo!(),
-      RV32(DIVU(_, _, _)) => todo!(),
+      RV32(DIV(rd, rs1, rs2)) => {
+        let dividend = rs1.read(self) as i64;
+        let divisor = rs2.read(self) as i64;
+        let val = if divisor == 0 {
+          self.csrs.write_bit_unchecked(FCSR, 3, true);
+          u64::MAX
+        } else if dividend == i64::MIN && divisor == -1 {
+          dividend as u64
+        } else {
+          dividend.wrapping_div(divisor) as u64
+        };
+        rd.write(self, val);
+      }
+      RV32(DIVU(rd, rs1, rs2)) => {
+        let dividend = rs1.read(self);
+        let divisor = rs2.read(self);
+        let val = if divisor == 0 {
+          self.csrs.write_bit_unchecked(FCSR, 3, true);
+          u64::MAX
+        } else {
+          dividend.wrapping_div(divisor)
+        };
+        rd.write(self, val);
+      }
       RV32(REM(_, _, _)) => todo!(),
       RV32(REMU(_, _, _)) => todo!(),
       // the valheim trap
