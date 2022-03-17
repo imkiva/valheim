@@ -1,3 +1,4 @@
+use std::fmt::{Debug, Formatter};
 use crate::isa::data::{Fin, workaround};
 use crate::isa::rv32::RV32Instr;
 use crate::isa::rv64::RV64Instr;
@@ -63,7 +64,7 @@ pub enum RoundingMode {
 
 /// This is used to represent lazily-decoded immediate value,
 /// which is written as `imm[HIGH_BIT:LOW_BIT]` in the risc-v specification.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub struct Imm32<const HIGH_BIT: usize, const LOW_BIT: usize>(pub u32);
 
 impl<const HIGH_BIT: usize, const LOW_BIT: usize> Imm32<HIGH_BIT, LOW_BIT> {
@@ -84,6 +85,12 @@ impl<const HIGH_BIT: usize, const LOW_BIT: usize> Imm32<HIGH_BIT, LOW_BIT> {
 
   pub fn decode_sext(self) -> i32 {
     sign_extend32(self.decode(), self.valid_bits())
+  }
+}
+
+impl<const HIGH_BIT: usize, const LOW_BIT: usize> Debug for Imm32<HIGH_BIT, LOW_BIT> {
+  fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    write!(f, "Imm({}, sext = {})", self.decode(), self.decode_sext())
   }
 }
 

@@ -34,9 +34,9 @@ impl Debug for PhysAddr {
 
 #[derive(Debug)]
 pub struct Memory {
-  memory_base: VirtAddr,
-  memory_size: usize,
-  memory: MmapMut,
+  pub memory_base: VirtAddr,
+  pub memory_size: usize,
+  pub memory: MmapMut,
 }
 
 impl Memory {
@@ -73,6 +73,7 @@ impl Memory {
 
   pub fn get_mut<T: CanIO>(&mut self, virt: VirtAddr) -> Option<&mut T> {
     let phys = self.to_phys(virt)?;
+    if cfg!(debug_assertions) { println!("[Valheim] [Memory]: going to write at = {:#x}", phys.0 as u64); }
     unsafe {
       // CanIO trait guarantees that the transmute is safe
       let ptr = std::mem::transmute::<*const u8, *mut T>(phys.0);
@@ -82,6 +83,7 @@ impl Memory {
 
   pub fn get<T: CanIO>(&self, virt: VirtAddr) -> Option<&T> {
     let phys = self.to_phys(virt)?;
+    if cfg!(debug_assertions) { println!("[Valheim] [Memory]: going to read  at = {:#x}", phys.0 as u64); }
     unsafe {
       // CanIO trait guarantees that the transmute is safe
       let ptr = std::mem::transmute::<*const u8, *const T>(phys.0);
