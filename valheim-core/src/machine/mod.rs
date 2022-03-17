@@ -29,21 +29,29 @@ impl Machine {
   pub fn run(&mut self) {
     self.cpu.write_pc(VirtAddr(RV64_PC_RESET));
     loop {
-      // TODO: check interrupts
-      // TODO: update devices
-      let trap = match self.interpreter.interp(&mut self.cpu) {
-        Ok(_) => None,
-        Err(Exception::ValheimEbreak) => Some(Trap::ValheimEbreak),
-        // TODO: handle exceptions
-        Err(_) => None,
-      };
-      // TODO: traps
-      match trap {
-        Some(Trap::ValheimEbreak) => break,
-        None => (),
+      let cont = self.run_next();
+      match cont {
+        true => (),
+        false => break,
       }
     }
     self.halt();
+  }
+
+  pub fn run_next(&mut self) -> bool {
+    // TODO: check interrupts
+    // TODO: update devices
+    let trap = match self.interpreter.interp(&mut self.cpu) {
+      Ok(_) => None,
+      Err(Exception::ValheimEbreak) => Some(Trap::ValheimEbreak),
+      // TODO: handle exceptions
+      Err(_) => None,
+    };
+    // TODO: traps
+    match trap {
+      Some(Trap::ValheimEbreak) => false,
+      None => true,
+    }
   }
 
   pub fn halt(&mut self) {
