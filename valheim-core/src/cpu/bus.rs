@@ -7,7 +7,13 @@ use crate::memory::{CanIO, Memory, VirtAddr};
 
 const RV64_MEMORY_BASE: u64 = 0x80000000;
 
+const VIRT_MROM_BASE: u64 = 0x1000;
+const VIRT_MROM_END : u64 = VIRT_MROM_BASE + 0xf000;
+
 /// System Bus, which handles DRAM access and memory-mapped IO.
+/// https://github.com/qemu/qemu/blob/master/hw/riscv/virt.c
+/// Builtin IO maps:
+/// - 0x1000 - 0x1000 + 0xf000 : Virt_MROM, like device trees
 pub struct Bus {
   pub mem: Memory,
   pub devices: Vec<Arc<dyn Device>>,
@@ -35,7 +41,7 @@ impl Bus {
     })
   }
 
-  pub unsafe fn add_device(&mut self, mut device: Arc<dyn Device>) -> Result<(), ()> {
+  pub unsafe fn add_device(&mut self, device: Arc<dyn Device>) -> Result<(), ()> {
     let ranges =  device.init()?;
     let idx = self.devices.len();
     self.devices.push(device);
@@ -108,3 +114,5 @@ impl Bus {
     self.mem.load(mem, offset);
   }
 }
+
+
