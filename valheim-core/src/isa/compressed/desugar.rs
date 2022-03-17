@@ -77,7 +77,7 @@ fn decode_untyped(untyped: Bytecode16) -> Option<Instr> {
       // C.LW
       0b010 => {
         let cl = untyped.cl();
-        let rd = Rd(gp_3(cl.rs1()));
+        let rd = Rd(gp_3(cl.rd()));
         let rs1 = Rs1(gp_3(cl.rs1()));
         // offset[5:3|2|6] = isnt[12:10|6|5]
         let offset = ((inst << 1) & 0x40) // imm[6]
