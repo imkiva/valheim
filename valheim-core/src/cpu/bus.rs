@@ -65,6 +65,10 @@ impl Bus {
   }
 
   pub fn read<T: CanIO>(&self, addr: VirtAddr) -> Result<T, Exception> {
+    // fast-path for builtin memory
+    if addr.0 >= RV64_MEMORY_BASE && addr.0 < RV64_MEMORY_BASE + self.mem.memory_size as u64 {
+      return self.mem.read(addr).ok_or(Exception::StoreAccessFault(addr));
+    }
     match self.select_device_for_read(addr) {
       // CanIO trait guarantees that the transmute is safe
       Some(dev) => match std::mem::size_of::<T>() {
@@ -74,11 +78,15 @@ impl Bus {
         8 => Ok(unsafe { *std::mem::transmute::<*const u64, *const T>(&dev.read64(addr).ok_or(Exception::StoreAccessFault(addr))? as *const u64) }),
         _ => Err(Exception::LoadAccessFault(addr)),
       }
-      None => self.mem.read(addr).ok_or(Exception::StoreAccessFault(addr)),
+      None => Err(Exception::StoreAccessFault(addr)),
     }
   }
 
   pub fn write<T: CanIO>(&mut self, addr: VirtAddr, val: T) -> Result<(), Exception> {
+    // fast-path for builtin memory
+    if addr.0 >= RV64_MEMORY_BASE && addr.0 < RV64_MEMORY_BASE + self.mem.memory_size as u64 {
+      return self.mem.write(addr, val).ok_or(Exception::StoreAccessFault(addr));
+    }
     match self.select_device_for_write(addr) {
       // CanIO trait guarantees that the transmute is safe
       Some(dev) => match std::mem::size_of::<T>() {
@@ -88,7 +96,7 @@ impl Bus {
         8 => unsafe { dev.write64(addr, *std::mem::transmute::<*const T, *const u64>(&val as *const T)) }.map_err(|_| Exception::StoreAccessFault(addr)),
         _ => Err(Exception::StoreAccessFault(addr)),
       }
-      None => self.mem.write(addr, val).ok_or(Exception::StoreAccessFault(addr)),
+      None => Err(Exception::StoreAccessFault(addr)),
     }
   }
 

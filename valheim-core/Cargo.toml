@@ -9,5 +9,5 @@ memmap2 = "0.5.3"
 derive_more = "0.99.0"
 
 [features]
-default = ["trace"]
+default = []
 trace = []
