@@ -1,4 +1,3 @@
-use crate::isa::data::Fin;
 use crate::isa::rv64::CSRAddr;
 
 pub const MXLEN: usize = 64;
