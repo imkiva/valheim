@@ -366,6 +366,15 @@ impl RV64Cpu {
       RV64(FCVT_D_L(_, _, _)) => todo!(),
       RV64(FCVT_D_LU(_, _, _)) => todo!(),
       RV64(FMV_D_X(_, _)) => todo!(),
+
+      // Privileged
+      RV64(SRET) => todo!(),
+      RV64(MRET) => todo!(),
+      RV64(WFI) => todo!(),
+      RV64(SFENCE_VMA(_, _)) => (),
+      RV64(SINVAL_VMA(_, _)) => todo!(),
+      RV64(SFENCE_W_INVAL) => todo!(),
+      RV64(SFENCE_INVAL_IR) => todo!(),
     };
 
     self.journal.trace(|| match is_compressed {
