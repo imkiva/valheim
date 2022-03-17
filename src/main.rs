@@ -1,10 +1,11 @@
-mod repl;
-
 use std::fs::File;
 use std::io::Read;
+
 use clap::Parser;
+
 use valheim_core::machine::Machine;
 
+mod repl;
 
 #[derive(clap::Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
@@ -30,8 +31,7 @@ fn main() {
     bios_bytes
   });
 
-  let memory_size = 4 * 1024 * 1024 * 1024; // 4GiB
-  let mut machine = Machine::new(memory_size, args.trace);
+  let mut machine = Machine::new(args.trace);
   match bios_bytes {
     Some(bios_bytes) => {
       machine.load(0x80000000, bios_bytes.as_slice());

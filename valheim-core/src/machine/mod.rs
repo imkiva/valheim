@@ -22,8 +22,8 @@ macro_rules! csr {
 }
 
 impl Machine {
-  pub fn new(memory_size: usize, trace: Option<String>) -> Machine {
-    let mut cpu = RV64Cpu::new(memory_size, trace);
+  pub fn new(trace: Option<String>) -> Machine {
+    let mut cpu = RV64Cpu::new(trace);
     unsafe {
       cpu.bus.add_device(Arc::new(Uart16550a::new()))
         .expect("Cannot install UART device")

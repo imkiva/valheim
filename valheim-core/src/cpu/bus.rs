@@ -5,20 +5,32 @@ use crate::cpu::exception::Exception;
 use crate::device::Device;
 use crate::memory::{CanIO, Memory, VirtAddr};
 
-const RV64_MEMORY_BASE: u64 = 0x80000000;
+pub const RV64_MEMORY_BASE: u64 = 0x80000000;
+pub const RV64_MEMORY_SIZE: u64 = 4 * 1024 * 1024 * 1024;
+pub const RV64_MEMORY_END: u64 = RV64_MEMORY_BASE + RV64_MEMORY_SIZE;
 
 const VIRT_MROM_BASE: u64 = 0x1000;
 const VIRT_MROM_SIZE: u64 = 0xf000;
 const VIRT_MROM_END: u64 = VIRT_MROM_BASE + VIRT_MROM_SIZE;
 
+const CLINT_BASE: u64 = 0x2000000;
+const CLINT_SIZE: u64 = 0x10000;
+const CLINT_END: u64 = CLINT_BASE + CLINT_SIZE;
+
 /// System Bus, which handles DRAM access and memory-mapped IO.
 /// https://github.com/qemu/qemu/blob/master/hw/riscv/virt.c
 /// Builtin IO maps:
-/// - 0x1000 - 0x1000 + 0xf000 : Virt_MROM, like device trees
+/// - 0x1000      - 0x1000 + 0xf000       ==== Virt_MROM, like device trees
+/// - 0x0x2000000 - 0x2000000 + 0x10000   ==== CLINT
 pub struct Bus {
   pub mem: Memory,
   pub devices: Vec<Arc<dyn Device>>,
   pub io_map: BTreeMap<(VirtAddr, VirtAddr), usize>,
+
+  // Builtin IO devices
+  // TODO: replace with a real device
+  pub virt_mrom: Memory,
+  pub clint: Memory,
 }
 
 impl Debug for Bus {
@@ -33,17 +45,14 @@ impl Debug for Bus {
 }
 
 impl Bus {
-  pub fn new(memory_size: usize) -> Result<Bus, std::io::Error> {
-    let mem = Memory::new(RV64_MEMORY_BASE, memory_size)?;
-    let mut bus = Bus {
-      mem,
+  pub fn new() -> Result<Bus, std::io::Error> {
+    let bus = Bus {
+      mem: Memory::new(RV64_MEMORY_BASE, RV64_MEMORY_SIZE as usize)?,
       devices: Vec::with_capacity(8),
       io_map: BTreeMap::new(),
+      virt_mrom: Memory::new(VIRT_MROM_BASE, VIRT_MROM_SIZE as usize)?,
+      clint: Memory::new(CLINT_BASE, CLINT_SIZE as usize)?,
     };
-    unsafe {
-      bus.add_device(Arc::new(VirtMROMDevice::new()))
-        .expect("Failed to add VirtMROM device");
-    }
     Ok(bus)
   }
 
@@ -65,38 +74,44 @@ impl Bus {
   }
 
   pub fn read<T: CanIO>(&self, addr: VirtAddr) -> Result<T, Exception> {
-    // fast-path for builtin memory
-    if addr.0 >= RV64_MEMORY_BASE && addr.0 < RV64_MEMORY_BASE + self.mem.memory_size as u64 {
-      return self.mem.read(addr).ok_or(Exception::StoreAccessFault(addr));
-    }
-    match self.select_device_for_read(addr) {
-      // CanIO trait guarantees that the transmute is safe
-      Some(dev) => match std::mem::size_of::<T>() {
-        1 => Ok(unsafe { *std::mem::transmute::<*const u8, *const T>(&dev.read(addr).ok_or(Exception::StoreAccessFault(addr))? as *const u8) }),
-        2 => Ok(unsafe { *std::mem::transmute::<*const u16, *const T>(&dev.read16(addr).ok_or(Exception::StoreAccessFault(addr))? as *const u16) }),
-        4 => Ok(unsafe { *std::mem::transmute::<*const u32, *const T>(&dev.read32(addr).ok_or(Exception::StoreAccessFault(addr))? as *const u32) }),
-        8 => Ok(unsafe { *std::mem::transmute::<*const u64, *const T>(&dev.read64(addr).ok_or(Exception::StoreAccessFault(addr))? as *const u64) }),
-        _ => Err(Exception::LoadAccessFault(addr)),
-      }
-      None => Err(Exception::StoreAccessFault(addr)),
+    // fast-path for builtin io devices
+    match addr.0 {
+      RV64_MEMORY_BASE..=RV64_MEMORY_END => self.mem.read(addr).ok_or(Exception::LoadAccessFault(addr)),
+      VIRT_MROM_BASE..=VIRT_MROM_END => self.virt_mrom.read(addr).ok_or(Exception::LoadAccessFault(addr)),
+      CLINT_BASE..=CLINT_END => self.clint.read(addr).ok_or(Exception::LoadAccessFault(addr)),
+
+      _ => match self.select_device_for_read(addr) {
+        // CanIO trait guarantees that the transmute is safe
+        Some(dev) => match std::mem::size_of::<T>() {
+          1 => Ok(unsafe { *std::mem::transmute::<*const u8, *const T>(&dev.read(addr).ok_or(Exception::StoreAccessFault(addr))? as *const u8) }),
+          2 => Ok(unsafe { *std::mem::transmute::<*const u16, *const T>(&dev.read16(addr).ok_or(Exception::StoreAccessFault(addr))? as *const u16) }),
+          4 => Ok(unsafe { *std::mem::transmute::<*const u32, *const T>(&dev.read32(addr).ok_or(Exception::StoreAccessFault(addr))? as *const u32) }),
+          8 => Ok(unsafe { *std::mem::transmute::<*const u64, *const T>(&dev.read64(addr).ok_or(Exception::StoreAccessFault(addr))? as *const u64) }),
+          _ => Err(Exception::LoadAccessFault(addr)),
+        }
+        None => Err(Exception::StoreAccessFault(addr)),
+      },
     }
   }
 
   pub fn write<T: CanIO>(&mut self, addr: VirtAddr, val: T) -> Result<(), Exception> {
-    // fast-path for builtin memory
-    if addr.0 >= RV64_MEMORY_BASE && addr.0 < RV64_MEMORY_BASE + self.mem.memory_size as u64 {
-      return self.mem.write(addr, val).ok_or(Exception::StoreAccessFault(addr));
-    }
-    match self.select_device_for_write(addr) {
-      // CanIO trait guarantees that the transmute is safe
-      Some(dev) => match std::mem::size_of::<T>() {
-        1 => unsafe { dev.write(addr, *std::mem::transmute::<*const T, *const u8>(&val as *const T)) }.map_err(|_| Exception::StoreAccessFault(addr)),
-        2 => unsafe { dev.write16(addr, *std::mem::transmute::<*const T, *const u16>(&val as *const T)) }.map_err(|_| Exception::StoreAccessFault(addr)),
-        4 => unsafe { dev.write32(addr, *std::mem::transmute::<*const T, *const u32>(&val as *const T)) }.map_err(|_| Exception::StoreAccessFault(addr)),
-        8 => unsafe { dev.write64(addr, *std::mem::transmute::<*const T, *const u64>(&val as *const T)) }.map_err(|_| Exception::StoreAccessFault(addr)),
-        _ => Err(Exception::StoreAccessFault(addr)),
-      }
-      None => Err(Exception::StoreAccessFault(addr)),
+    // fast-path for builtin io devices
+    match addr.0 {
+      RV64_MEMORY_BASE..=RV64_MEMORY_END => self.mem.write(addr, val).ok_or(Exception::StoreAccessFault(addr)),
+      VIRT_MROM_BASE..=VIRT_MROM_END => self.virt_mrom.write(addr, val).ok_or(Exception::StoreAccessFault(addr)),
+      CLINT_BASE..=CLINT_END => self.clint.write(addr, val).ok_or(Exception::StoreAccessFault(addr)),
+
+      _ => match self.select_device_for_write(addr) {
+        // CanIO trait guarantees that the transmute is safe
+        Some(dev) => match std::mem::size_of::<T>() {
+          1 => unsafe { dev.write(addr, *std::mem::transmute::<*const T, *const u8>(&val as *const T)) }.map_err(|_| Exception::StoreAccessFault(addr)),
+          2 => unsafe { dev.write16(addr, *std::mem::transmute::<*const T, *const u16>(&val as *const T)) }.map_err(|_| Exception::StoreAccessFault(addr)),
+          4 => unsafe { dev.write32(addr, *std::mem::transmute::<*const T, *const u32>(&val as *const T)) }.map_err(|_| Exception::StoreAccessFault(addr)),
+          8 => unsafe { dev.write64(addr, *std::mem::transmute::<*const T, *const u64>(&val as *const T)) }.map_err(|_| Exception::StoreAccessFault(addr)),
+          _ => Err(Exception::StoreAccessFault(addr)),
+        }
+        None => Err(Exception::StoreAccessFault(addr)),
+      },
     }
   }
 
@@ -126,60 +141,5 @@ impl Bus {
 
   pub fn load<T: CanIO>(&mut self, mem: &[T], offset: usize) {
     self.mem.load(mem, offset);
-  }
-}
-
-struct VirtMROMDevice {
-  pub rom: Memory,
-}
-
-impl VirtMROMDevice {
-  pub fn new() -> Self {
-    let mut rom = Memory::new(VIRT_MROM_BASE, VIRT_MROM_SIZE as usize)
-      .expect("Failed to create VirtMROM memory");
-    // TODO: how to make a device tree?
-    VirtMROMDevice { rom }
-  }
-}
-
-impl Device for VirtMROMDevice {
-  fn name(&self) -> &'static str {
-    "Virt_MROM"
-  }
-
-  fn vendor_id(&self) -> u16 {
-    0x0000
-  }
-
-  fn device_id(&self) -> u16 {
-    0x0000
-  }
-
-  fn init(&self) -> Result<Vec<(VirtAddr, VirtAddr)>, ()> {
-    Ok(vec![(VirtAddr(VIRT_MROM_BASE), VirtAddr(VIRT_MROM_END))])
-  }
-
-  fn destroy(&self) -> Result<(), ()> {
-    Ok(())
-  }
-
-  fn dma_read(&self, addr: VirtAddr) -> Option<&Memory> {
-    Some(&self.rom)
-  }
-
-  fn dma_write(&self, addr: VirtAddr) -> Option<&mut Memory> {
-    None
-  }
-
-  fn mmio_read(&self, addr: VirtAddr) -> Option<u8> {
-    None
-  }
-
-  fn mmio_write(&self, addr: VirtAddr, val: u8) -> Result<(), ()> {
-    Err(())
-  }
-
-  fn is_interrupting(&self) -> bool {
-    false
   }
 }

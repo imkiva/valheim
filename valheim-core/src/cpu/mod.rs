@@ -1,5 +1,6 @@
 use std::fmt::Debug;
 use std::cell::RefCell;
+use crate::cpu::bus::{RV64_MEMORY_BASE, RV64_MEMORY_SIZE};
 use crate::cpu::exception::Exception;
 use crate::debug::trace::{Journal, MemTrace, RegTrace, Trace};
 use crate::isa::typed::Reg;
@@ -33,20 +34,19 @@ pub enum PrivilegeMode {
 }
 
 impl RV64Cpu {
-  pub fn new(memory_size: usize, trace: Option<String>) -> RV64Cpu {
+  pub fn new(trace: Option<String>) -> RV64Cpu {
     let regs = regs::Regs::new();
     let csrs = csr::CSRRegs::new();
     RV64Cpu {
       regs,
       csrs,
       mode: PrivilegeMode::Machine,
-      bus: bus::Bus::new(memory_size)
-        .expect("Failed to create Bus"),
+      bus: bus::Bus::new().expect("Failed to create Bus"),
       reserved: Vec::new(),
       journal: Journal {
         init_regs: regs,
-        init_mem_base: VirtAddr(0),
-        init_mem_size: memory_size,
+        init_mem_base: VirtAddr(RV64_MEMORY_BASE),
+        init_mem_size: RV64_MEMORY_SIZE as usize,
         traces: RefCell::new(Vec::with_capacity(1024)),
         max_recent_traces: if trace.is_some() { 1024 } else { 0 },
         trace_file: trace,
