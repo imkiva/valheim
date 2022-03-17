@@ -103,9 +103,9 @@ impl RV64Cpu {
       RV32(SLTI(rd, rs1, imm)) => rd.write(self, if (rs1.read(self) as i64) < (imm.decode_sext() as i64) { 1 } else { 0 }),
       RV32(SLTIU(rd, rs1, Imm32(1))) => rd.write(self, if rs1.read(self) == 0 { 1 } else { 0 }),
       RV32(SLTIU(rd, rs1, imm)) => rd.write(self, if rs1.read(self) < (imm.decode_sext() as u64) { 1 } else { 0 }),
-      RV32(XORI(rd, rs1, imm)) => rd.write(self, rs1.read(self) ^ imm.decode() as u64),
-      RV32(ORI(rd, rs1, imm)) => rd.write(self, rs1.read(self) | imm.decode() as u64),
-      RV32(ANDI(rd, rs1, imm)) => rd.write(self, rs1.read(self) & imm.decode() as u64),
+      RV32(XORI(rd, rs1, imm)) => rd.write(self, rs1.read(self) ^ (imm.decode_sext() as u64)),
+      RV32(ORI(rd, rs1, imm)) => rd.write(self, rs1.read(self) | (imm.decode_sext() as u64)),
+      RV32(ANDI(rd, rs1, imm)) => rd.write(self, rs1.read(self) & (imm.decode_sext() as u64)),
 
       // RV32's SLLI, SRLI, SRAI was not used when decoding, so they never executes
       // but their implementation should be same.
@@ -149,8 +149,69 @@ impl RV64Cpu {
       // the valheim trap
       RV32(EBREAK) => return Err(Exception::ValheimEbreak),
 
-      // TODO: RV32AFD
-      RV32(_) => panic!("Unimplemented: {:?}", instr),
+      RV32(LR_W(_, _, _, _)) => todo!(),
+      RV32(SC_W(_, _, _, _, _)) => todo!(),
+      RV32(AMOSWAP_W(_, _, _, _, _)) => todo!(),
+      RV32(AMOADD_W(_, _, _, _, _)) => todo!(),
+      RV32(AMOXOR_W(_, _, _, _, _)) => todo!(),
+      RV32(AMOAND_W(_, _, _, _, _)) => todo!(),
+      RV32(AMOOR_W(_, _, _, _, _)) => todo!(),
+      RV32(AMOMIN_W(_, _, _, _, _)) => todo!(),
+      RV32(AMOMAX_W(_, _, _, _, _)) => todo!(),
+      RV32(AMOMINU_W(_, _, _, _, _)) => todo!(),
+      RV32(AMOMAXU_W(_, _, _, _, _)) => todo!(),
+      RV32(FLW(_, _, _)) => todo!(),
+      RV32(FSW(_, _, _)) => todo!(),
+      RV32(FMADD_S(_, _, _, _, _)) => todo!(),
+      RV32(FMSUB_S(_, _, _, _, _)) => todo!(),
+      RV32(FNMSUB_S(_, _, _, _, _)) => todo!(),
+      RV32(FNMADD_S(_, _, _, _, _)) => todo!(),
+      RV32(FADD_S(_, _, _, _)) => todo!(),
+      RV32(FSUB_S(_, _, _, _)) => todo!(),
+      RV32(FMUL_S(_, _, _, _)) => todo!(),
+      RV32(FDIV_S(_, _, _, _)) => todo!(),
+      RV32(FSQRT_S(_, _, _)) => todo!(),
+      RV32(FSGNJ_S(_, _, _)) => todo!(),
+      RV32(FSGNJN_S(_, _, _)) => todo!(),
+      RV32(FSGNJX_S(_, _, _)) => todo!(),
+      RV32(FMIN_S(_, _, _)) => todo!(),
+      RV32(FMAX_S(_, _, _)) => todo!(),
+      RV32(FCVT_W_S(_, _, _)) => todo!(),
+      RV32(FCVT_WU_S(_, _, _)) => todo!(),
+      RV32(FMV_X_W(_, _)) => todo!(),
+      RV32(FEQ_S(_, _, _)) => todo!(),
+      RV32(FLT_S(_, _, _)) => todo!(),
+      RV32(FLE_S(_, _, _)) => todo!(),
+      RV32(FCLASS_S(_, _)) => todo!(),
+      RV32(FCVT_S_W(_, _, _)) => todo!(),
+      RV32(FCVT_S_WU(_, _, _)) => todo!(),
+      RV32(FMV_W_X(_, _)) => todo!(),
+      RV32(FLD(_, _, _)) => todo!(),
+      RV32(FSD(_, _, _)) => todo!(),
+      RV32(FMADD_D(_, _, _, _, _)) => todo!(),
+      RV32(FMSUB_D(_, _, _, _, _)) => todo!(),
+      RV32(FNMSUB_D(_, _, _, _, _)) => todo!(),
+      RV32(FNMADD_D(_, _, _, _, _)) => todo!(),
+      RV32(FADD_D(_, _, _, _)) => todo!(),
+      RV32(FSUB_D(_, _, _, _)) => todo!(),
+      RV32(FMUL_D(_, _, _, _)) => todo!(),
+      RV32(FDIV_D(_, _, _, _)) => todo!(),
+      RV32(FSQRT_D(_, _, _)) => todo!(),
+      RV32(FSGNJ_D(_, _, _)) => todo!(),
+      RV32(FSGNJN_D(_, _, _)) => todo!(),
+      RV32(FSGNJX_D(_, _, _)) => todo!(),
+      RV32(FMIN_D(_, _, _)) => todo!(),
+      RV32(FMAX_D(_, _, _)) => todo!(),
+      RV32(FCVT_S_D(_, _, _)) => todo!(),
+      RV32(FCVT_D_S(_, _, _)) => todo!(),
+      RV32(FEQ_D(_, _, _)) => todo!(),
+      RV32(FLT_D(_, _, _)) => todo!(),
+      RV32(FLE_D(_, _, _)) => todo!(),
+      RV32(FCLASS_D(_, _)) => todo!(),
+      RV32(FCVT_W_D(_, _, _)) => todo!(),
+      RV32(FCVT_WU_D(_, _, _)) => todo!(),
+      RV32(FCVT_D_W(_, _, _)) => todo!(),
+      RV32(FCVT_D_WU(_, _, _)) => todo!(),
 
       RV64(FENCE_I(_, _, _)) => (),
       RV64(CSRRW(rd, rs1, csr)) => {
@@ -169,9 +230,40 @@ impl RV64Cpu {
       RV64(CSRRWI(_, _, _)) => todo!("csr"),
       RV64(CSRRSI(_, _, _)) => todo!("csr"),
       RV64(CSRRCI(_, _, _)) => todo!("csr"),
-
-      // TODO: RV64MAFD
-      RV64(_) => panic!("Unimplemented: {:?}", instr),
+      RV64(MULW(_, _, _)) => todo!(),
+      RV64(DIVW(_, _, _)) => todo!(),
+      RV64(DIVUW(_, _, _)) => todo!(),
+      RV64(REMW(_, _, _)) => todo!(),
+      RV64(REMUW(_, _, _)) => todo!(),
+      RV64(LR_D(_, _, _, _)) => todo!(),
+      RV64(SC_D(_, _, _, _, _)) => todo!(),
+      RV64(AMOSWAP_D(_, _, _, _, _)) => todo!(),
+      RV64(AMOADD_D(rd, rs1, rs2, _, _)) => {
+        let addr = rs1.read(self);
+        if addr % 8 != 0 {
+          return Err(Exception::LoadAddressMisaligned);
+        }
+        let val = self.read_mem::<u64>(VirtAddr(addr))?;
+        self.write_mem::<u64>(VirtAddr(addr), val.wrapping_add(rs2.read(self)))?;
+        rd.write(self, val);
+      }
+      RV64(AMOXOR_D(_, _, _, _, _)) => todo!(),
+      RV64(AMOAND_D(_, _, _, _, _)) => todo!(),
+      RV64(AMOOR_D(_, _, _, _, _)) => todo!(),
+      RV64(AMOMIN_D(_, _, _, _, _)) => todo!(),
+      RV64(AMOMAX_D(_, _, _, _, _)) => todo!(),
+      RV64(AMOMINU_D(_, _, _, _, _)) => todo!(),
+      RV64(AMOMAXU_D(_, _, _, _, _)) => todo!(),
+      RV64(FCVT_L_S(_, _, _)) => todo!(),
+      RV64(FCVT_LU_S(_, _, _)) => todo!(),
+      RV64(FCVT_S_L(_, _, _)) => todo!(),
+      RV64(FCVT_S_LU(_, _, _)) => todo!(),
+      RV64(FCVT_L_D(_, _, _)) => todo!(),
+      RV64(FCVT_LU_D(_, _, _)) => todo!(),
+      RV64(FMV_X_D(_, _)) => todo!(),
+      RV64(FCVT_D_L(_, _, _)) => todo!(),
+      RV64(FCVT_D_LU(_, _, _)) => todo!(),
+      RV64(FMV_D_X(_, _)) => todo!(),
     };
 
     self.journal.trace(|| match is_compressed {

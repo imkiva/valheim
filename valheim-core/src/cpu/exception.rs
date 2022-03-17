@@ -7,6 +7,7 @@ pub enum Exception {
   IllegalInstruction(VirtAddr, Bytecode, Bytecode16),
   LoadAccessFault,
   StoreAccessFault,
+  LoadAddressMisaligned,
   // TODO: remove this hack
   ValheimEbreak,
 }
