@@ -1,6 +1,7 @@
 use crate::memory::{Memory, VirtAddr};
 
 pub mod ns16550a;
+pub mod clint;
 
 pub trait Device {
   fn name(&self) -> &'static str;

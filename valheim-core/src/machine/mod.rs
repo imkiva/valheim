@@ -49,7 +49,7 @@ impl Machine {
 
   pub fn run_next(&mut self) -> bool {
     // TODO: check interrupts
-    // TODO: update devices
+    self.cpu.bus.clint.tick(&mut self.cpu.csrs);
     let trap = match self.interpreter.interp(&mut self.cpu) {
       Ok(_) => None,
       Err(Exception::ValheimEbreak) => Some(Trap::ValheimEbreak),
@@ -81,10 +81,7 @@ impl Machine {
     println!("    mcause:  {:<#18x}    medeleg: {:<#18x}    mideleg: {:<#18x}", csr!(self, MCAUSE), csr!(self, MEDELEG), csr!(self, MIDELEG));
     println!("  Supervisor Level CSR register:");
     println!("    sstatus: {:<#18x}    stvec:   {:<#18x}    sepc:    {:<#18x}", csr!(self, SSTATUS), csr!(self, STVEC), csr!(self, SEPC));
-    println!("    scause:  {:<#18x}    sedeleg: {:<#18x}    sideleg: {:<#18x}", csr!(self, SCAUSE), csr!(self, SEDELEG), csr!(self, SIDELEG));
-    println!("  User Level CSR register:");
-    println!("    ustatus: {:<#18x}    utvec:   {:<#18x}    uepc:    {:<#18x}", csr!(self, USTATUS), csr!(self, UTVEC), csr!(self, UEPC));
-    println!("    ucause:  {:<#18x}", csr!(self, UCAUSE));
+    println!("    scause:  {:<#18x}", csr!(self, SCAUSE));
     println!("=======================================");
   }
 

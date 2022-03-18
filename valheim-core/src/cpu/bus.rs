@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 use crate::cpu::exception::Exception;
+use crate::device::clint::Clint;
 use crate::device::Device;
 use crate::memory::{CanIO, Memory, VirtAddr};
 
@@ -9,13 +10,13 @@ pub const RV64_MEMORY_BASE: u64 = 0x80000000;
 pub const RV64_MEMORY_SIZE: u64 = 4 * 1024 * 1024 * 1024;
 pub const RV64_MEMORY_END: u64 = RV64_MEMORY_BASE + RV64_MEMORY_SIZE;
 
-const VIRT_MROM_BASE: u64 = 0x1000;
-const VIRT_MROM_SIZE: u64 = 0xf000;
-const VIRT_MROM_END: u64 = VIRT_MROM_BASE + VIRT_MROM_SIZE;
+pub const VIRT_MROM_BASE: u64 = 0x1000;
+pub const VIRT_MROM_SIZE: u64 = 0xf000;
+pub const VIRT_MROM_END: u64 = VIRT_MROM_BASE + VIRT_MROM_SIZE;
 
-const CLINT_BASE: u64 = 0x2000000;
-const CLINT_SIZE: u64 = 0x10000;
-const CLINT_END: u64 = CLINT_BASE + CLINT_SIZE;
+pub const CLINT_BASE: u64 = 0x2000000;
+pub const CLINT_SIZE: u64 = 0x10000;
+pub const CLINT_END: u64 = CLINT_BASE + CLINT_SIZE;
 
 /// System Bus, which handles DRAM access and memory-mapped IO.
 /// https://github.com/qemu/qemu/blob/master/hw/riscv/virt.c
@@ -30,7 +31,7 @@ pub struct Bus {
   // Builtin IO devices
   // TODO: replace with a real device
   pub virt_mrom: Memory,
-  pub clint: Memory,
+  pub clint: Clint,
 }
 
 impl Debug for Bus {
@@ -51,7 +52,7 @@ impl Bus {
       devices: Vec::with_capacity(8),
       io_map: BTreeMap::new(),
       virt_mrom: Memory::new(VIRT_MROM_BASE, VIRT_MROM_SIZE as usize)?,
-      clint: Memory::new(CLINT_BASE, CLINT_SIZE as usize)?,
+      clint: Clint::new(),
     };
     Ok(bus)
   }
@@ -67,9 +68,9 @@ impl Bus {
   }
 
   pub fn halt(&mut self) {
-    self.devices.iter().for_each(|dev| match unsafe { dev.destroy() } {
+    self.devices.iter().for_each(|dev| match dev.destroy() {
       Ok(_) => (),
-      Err(_) => eprintln!("Error destroying device: {}", { unsafe { (*dev).name() } }),
+      Err(_) => eprintln!("Error destroying device: {}", (*dev).name()),
     });
   }
 
@@ -78,7 +79,7 @@ impl Bus {
     match addr.0 {
       RV64_MEMORY_BASE..=RV64_MEMORY_END => self.mem.read(addr).ok_or(Exception::LoadAccessFault(addr)),
       VIRT_MROM_BASE..=VIRT_MROM_END => self.virt_mrom.read(addr).ok_or(Exception::LoadAccessFault(addr)),
-      CLINT_BASE..=CLINT_END => self.clint.read(addr).ok_or(Exception::LoadAccessFault(addr)),
+      CLINT_BASE..=CLINT_END => self.clint.read::<T>(addr),
 
       _ => match self.select_device_for_read(addr) {
         // CanIO trait guarantees that the transmute is safe
@@ -99,7 +100,7 @@ impl Bus {
     match addr.0 {
       RV64_MEMORY_BASE..=RV64_MEMORY_END => self.mem.write(addr, val).ok_or(Exception::StoreAccessFault(addr)),
       VIRT_MROM_BASE..=VIRT_MROM_END => self.virt_mrom.write(addr, val).ok_or(Exception::StoreAccessFault(addr)),
-      CLINT_BASE..=CLINT_END => self.clint.write(addr, val).ok_or(Exception::StoreAccessFault(addr)),
+      CLINT_BASE..=CLINT_END => self.clint.write(addr, val),
 
       _ => match self.select_device_for_write(addr) {
         // CanIO trait guarantees that the transmute is safe

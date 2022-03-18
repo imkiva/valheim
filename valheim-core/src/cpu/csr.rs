@@ -17,23 +17,7 @@ pub const VALHEIM_MISA: u64 = (2 << 62) // MXL[1:0]=2 (XLEN is 64)
 #[allow(non_snake_case)]
 #[allow(non_upper_case_globals)]
 pub mod CSRMap {
-  //////////////////////////////
-  // User-level CSR addresses //
-  //////////////////////////////
-  // User trap setup.
-  /// User status register.
-  pub const USTATUS: u16 = 0x000;
-  /// User trap handler base address.
-  pub const UTVEC: u16 = 0x005;
-
-  // User trap handling.
-  /// User exception program counter.
-  pub const UEPC: u16 = 0x041;
-  /// User trap cause.
-  pub const UCAUSE: u16 = 0x042;
-  /// User bad address or instruction.
-  #[allow(dead_code)]
-  pub const UTVAL: u16 = 0x043;
+  // Unprivileged CSR addresses
 
   // User floating-point CSRs.
   /// Flating-point accrued exceptions.
@@ -44,23 +28,29 @@ pub mod CSRMap {
   pub const FCSR: u16 = 0x003;
 
   // User Counter/Timers.
+  /// Cycle counter for RDCYCLE instruction.
+  pub const CYCLE: u16 = 0xc00;
   /// Timer for RDTIME instruction.
   pub const TIME: u16 = 0xc01;
 
-  /////////////////////////////////////
-  // Supervisor-level CSR addresses //
-  ////////////////////////////////////
+  // Floating-point divide-by-zero
+  pub const FCSR_DZ_MASK: u64 = 1 << 3;
+
+  // Supervisor-level CSR addresses
+
   // Supervisor trap setup.
   /// Supervisor status register.
   pub const SSTATUS: u16 = 0x100;
-  /// Supervisor exception delegation register.
-  pub const SEDELEG: u16 = 0x102;
-  /// Supervisor interrupt delegation register.
-  pub const SIDELEG: u16 = 0x103;
   /// Supervisor interrupt-enable register.
   pub const SIE: u16 = 0x104;
   /// Supervisor trap handler base address.
   pub const STVEC: u16 = 0x105;
+  /// Supervisor counter enable
+  pub const SCOUNTEREN: u16 = 0x106;
+
+  // Supervisor configuration.
+  /// Supervisor environment configuration register.
+  pub const SENVCFG: u16 = 0x10a;
 
   // Supervisor trap handling.
   /// Scratch register for supervisor trap handlers.
@@ -75,8 +65,12 @@ pub mod CSRMap {
   pub const SIP: u16 = 0x144;
 
   // Supervisor protection and translation.
+
   /// Supervisor address translation and protection.
   pub const SATP: u16 = 0x180;
+
+  // Debug/Trace registers
+  pub const SCONTEXT: u16 = 0x5a8;
 
   // SSTATUS fields.
   pub const SSTATUS_SIE: u64 = 0x2;
@@ -110,10 +104,10 @@ pub mod CSRMap {
     | SSTATUS_UXL
     | SSTATUS_SD;
 
-  /////////////////////////////////
-  // Machine-level CSR addresses //
-  /////////////////////////////////
+  // Machine-level CSR addresses
+
   // Machine information registers.
+
   /// Vendor ID.
   pub const MVENDORID: u16 = 0xf11;
   /// Architecture ID.
@@ -124,6 +118,7 @@ pub mod CSRMap {
   pub const MHARTID: u16 = 0xf14;
 
   // Machine trap setup.
+
   /// Machine status register.
   pub const MSTATUS: u16 = 0x300;
   /// ISA and extensions.
@@ -150,26 +145,52 @@ pub mod CSRMap {
   pub const MTVAL: u16 = 0x343;
   /// Machine interrupt pending.
   pub const MIP: u16 = 0x344;
+  /// Machine trap instruction (transformed)
+  pub const MTINST: u16 = 0x34a;
+  /// Machine bad guest physical address.
+  pub const MTVAL2: u16 = 0x34b;
+
+  // Machine configuration.
+
+  /// Machine environment configuration register.
+  pub const MENVCFG: u16 = 0x30a;
+  /// Machine secure configuration register.
+  pub const MSECCFG: u16 = 0x747;
 
   // Machine memory protection.
-  /// Physical memory protection configuration.
+
+  /// Physical memory protection configuration. includes PMPCFG0, 2, 4, 6, ... 14 for RV64
   pub const PMPCFG0: u16 = 0x3a0;
-  /// Physical memory protection address register.
+  /// Physical memory protection address register. from PMPADDR1 to PMPADDR63
   pub const PMPADDR0: u16 = 0x3b0;
 
-  // MIP fields.
+  // Standard portion of mip
   /// Supervisor software interrupt.
-  pub const SSIP_BIT: u64 = 1 << 1;
+  pub const SSIP_MASK: u64 = 1 << 1;
   /// Machine software interrupt.
-  pub const MSIP_BIT: u64 = 1 << 3;
+  pub const MSIP_MASK: u64 = 1 << 3;
   /// Supervisor timer interrupt.
-  pub const STIP_BIT: u64 = 1 << 5;
+  pub const STIP_MASK: u64 = 1 << 5;
   /// Machine timer interrupt.
-  pub const MTIP_BIT: u64 = 1 << 7;
+  pub const MTIP_MASK: u64 = 1 << 7;
   /// Supervisor external interrupt.
-  pub const SEIP_BIT: u64 = 1 << 9;
+  pub const SEIP_MASK: u64 = 1 << 9;
   /// Machine external interrupt.
-  pub const MEIP_BIT: u64 = 1 << 11;
+  pub const MEIP_MASK: u64 = 1 << 11;
+
+  // Standard portion of mie
+  /// Supervisor software interrupt.
+  pub const SSIE_MASK: u64 = 1 << 1;
+  /// Machine software interrupt.
+  pub const MSIE_MASK: u64 = 1 << 3;
+  /// Supervisor timer interrupt.
+  pub const STIE_MASK: u64 = 1 << 5;
+  /// Machine timer interrupt.
+  pub const MTIE_MASK: u64 = 1 << 7;
+  /// Supervisor external interrupt.
+  pub const SEIE_MASK: u64 = 1 << 9;
+  /// Machine external interrupt.
+  pub const MEIE_MASK: u64 = 1 << 11;
 }
 
 /// The state to contains all the CSRs.
@@ -219,29 +240,10 @@ impl CSRRegs {
           | (val & self.csrs[MIDELEG as usize]);
       }
       SIP => {
-        let mask = SSIP_BIT & self.csrs[MIDELEG as usize];
+        let mask = SSIP_MASK & self.csrs[MIDELEG as usize];
         self.csrs[MIP as usize] = (self.csrs[MIP as usize] & !mask) | (val & mask);
       }
       addr => self.csrs[addr as usize] = val,
-    }
-  }
-
-  pub fn read_bit(&self, addr: CSRAddr, bit: usize) -> bool {
-    self.read_bit_unchecked(addr.value(), bit)
-  }
-
-  pub fn write_bit(&mut self, addr: CSRAddr, bit: usize, val: bool) {
-    self.write_bit_unchecked(addr.value(), bit, val);
-  }
-
-  pub fn read_bit_unchecked(&self, addr: u16, bit: usize) -> bool {
-    (self.read_unchecked(addr) & (1 << bit)) != 0
-  }
-
-  pub fn write_bit_unchecked(&mut self, addr: u16, bit: usize, val: bool) {
-    match val {
-      true => self.write_unchecked(addr, self.read_unchecked(addr) | 1 << bit),
-      false =>  self.write_unchecked(addr, self.read_unchecked(addr) & !(1 << bit)),
     }
   }
 }

@@ -1,4 +1,4 @@
-use crate::cpu::csr::CSRMap::FCSR;
+use crate::cpu::csr::CSRMap::{FCSR, FCSR_DZ_MASK};
 use crate::cpu::data::Either;
 use crate::cpu::exception::Exception;
 use crate::cpu::RV64Cpu;
@@ -170,7 +170,7 @@ impl RV64Cpu {
         let dividend = rs1.read(self) as i64;
         let divisor = rs2.read(self) as i64;
         let val = if divisor == 0 {
-          self.csrs.write_bit_unchecked(FCSR, 3, true);
+          self.csrs.write_unchecked(FCSR, self.csrs.read_unchecked(FCSR) | FCSR_DZ_MASK);
           u64::MAX
         } else if dividend == i64::MIN && divisor == -1 {
           dividend as u64
@@ -183,7 +183,7 @@ impl RV64Cpu {
         let dividend = rs1.read(self);
         let divisor = rs2.read(self);
         let val = if divisor == 0 {
-          self.csrs.write_bit_unchecked(FCSR, 3, true);
+          self.csrs.write_unchecked(FCSR, self.csrs.read_unchecked(FCSR) | FCSR_DZ_MASK);
           u64::MAX
         } else {
           dividend.wrapping_div(divisor)
