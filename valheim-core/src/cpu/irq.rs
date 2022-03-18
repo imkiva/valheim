@@ -72,18 +72,17 @@ impl RV64Cpu {
 
     // In our implementation, external devices is only UART, currently. We may support
     // VirtIO disks, which is also a external devices.
-    match self.bus.devices.iter().find(|dev| dev.is_interrupting()) {
-      Some(dev) => {
-        let _irq_id = ((dev.vendor_id() as u32) << 16) | (dev.device_id() as u32);
-        // TODO: tell PLIC that we have an external irq
+    for dev in self.bus.devices.iter() {
+      if let Some(irq_id) = dev.is_interrupting() {
+        // tell PLIC that we have an external irq
+        self.bus.plic.update_pending(irq_id);
         // 3.1.9 Machine Interrupt Registers (mip and mie)
         // SEIP is writable in mip, and may be written by M-mode software to
         // indicate to S-mode that an external interrupt is pending. Additionally,
         // the platform-level interrupt controller may generate supervisor-level external interrupts.
         self.csrs.write_unchecked(MIP, self.csrs.read_unchecked(MIP) | SEIP_MASK);
+        break;
       }
-      // No external device is interrupting
-      None => (),
     }
 
     // 3.1.9 Machine Interrupt Registers (mip and mie)

@@ -4,6 +4,7 @@ use std::sync::Arc;
 use crate::cpu::irq::Exception;
 use crate::device::clint::Clint;
 use crate::device::Device;
+use crate::device::plic::Plic;
 use crate::memory::{CanIO, Memory, VirtAddr};
 
 pub const RV64_MEMORY_BASE: u64 = 0x80000000;
@@ -17,6 +18,10 @@ pub const VIRT_MROM_END: u64 = VIRT_MROM_BASE + VIRT_MROM_SIZE;
 pub const CLINT_BASE: u64 = 0x2000000;
 pub const CLINT_SIZE: u64 = 0x10000;
 pub const CLINT_END: u64 = CLINT_BASE + CLINT_SIZE;
+
+pub const PLIC_BASE: u64 = 0xc00_0000;
+pub const PLIC_SIZE: u64 = 0x208000;
+pub const PLIC_END: u64 = PLIC_BASE + PLIC_SIZE;
 
 /// System Bus, which handles DRAM access and memory-mapped IO.
 /// https://github.com/qemu/qemu/blob/master/hw/riscv/virt.c
@@ -32,6 +37,7 @@ pub struct Bus {
   // TODO: replace with a real device
   pub virt_mrom: Memory,
   pub clint: Clint,
+  pub plic: Plic,
 }
 
 impl Debug for Bus {
@@ -53,6 +59,7 @@ impl Bus {
       io_map: BTreeMap::new(),
       virt_mrom: Memory::new(VIRT_MROM_BASE, VIRT_MROM_SIZE as usize)?,
       clint: Clint::new(),
+      plic: Plic::new(),
     };
     Ok(bus)
   }
@@ -80,6 +87,11 @@ impl Bus {
       RV64_MEMORY_BASE..=RV64_MEMORY_END => self.mem.read(addr).ok_or(Exception::LoadAccessFault(addr)),
       VIRT_MROM_BASE..=VIRT_MROM_END => self.virt_mrom.read(addr).ok_or(Exception::LoadAccessFault(addr)),
       CLINT_BASE..=CLINT_END => self.clint.read::<T>(addr),
+      PLIC_BASE..=PLIC_END => {
+        assert_eq!(std::mem::size_of::<T>(), 4);
+        let val = self.plic.read(addr)?;
+        Ok(unsafe { *std::mem::transmute::<*const u32, *const T>(&val as *const u32) })
+      },
 
       _ => match self.select_device_for_read(addr) {
         // CanIO trait guarantees that the transmute is safe
@@ -101,6 +113,11 @@ impl Bus {
       RV64_MEMORY_BASE..=RV64_MEMORY_END => self.mem.write(addr, val).ok_or(Exception::StoreAccessFault(addr)),
       VIRT_MROM_BASE..=VIRT_MROM_END => self.virt_mrom.write(addr, val).ok_or(Exception::StoreAccessFault(addr)),
       CLINT_BASE..=CLINT_END => self.clint.write(addr, val),
+      PLIC_BASE..=PLIC_END => {
+        assert_eq!(std::mem::size_of::<T>(), 4);
+        let val = unsafe { *std::mem::transmute::<*const T, *const u32>(&val as *const T) };
+        self.plic.write(addr, val)
+      },
 
       _ => match self.select_device_for_write(addr) {
         // CanIO trait guarantees that the transmute is safe

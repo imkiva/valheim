@@ -152,7 +152,11 @@ impl Device for Uart16550a {
     Ok(())
   }
 
-  fn is_interrupting(&self) -> bool {
-    self.interrupting.swap(false, Ordering::Acquire)
+  fn is_interrupting(&self) -> Option<u64> {
+    let irq = self.interrupting.swap(false, Ordering::Acquire);
+    match irq {
+      true => Some(UART_IRQ),
+      false => None,
+    }
   }
 }

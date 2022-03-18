@@ -2,6 +2,7 @@ use crate::memory::{Memory, VirtAddr};
 
 pub mod ns16550a;
 pub mod clint;
+pub mod plic;
 
 pub trait Device {
   fn name(&self) -> &'static str;
@@ -13,7 +14,7 @@ pub trait Device {
   fn dma_write(&self, addr: VirtAddr) -> Option<&mut Memory>;
   fn mmio_read(&self, addr: VirtAddr) -> Option<u8>;
   fn mmio_write(&self, addr: VirtAddr, val: u8) -> Result<(), ()>;
-  fn is_interrupting(&self) -> bool;
+  fn is_interrupting(&self) -> Option<u64>;
 
   fn read(&self, addr: VirtAddr) -> Option<u8> {
     match self.dma_read(addr) {
