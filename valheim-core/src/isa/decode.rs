@@ -209,8 +209,8 @@ fn decode_untyped(untyped: Bytecode) -> Option<Instr> {
       // The `shamt` field in RV64: 6 bits
       0b001 => r_shamt64!(rv64, SLLI, untyped, gp),
       0b101 => match untyped.r_shamt64().funct6() as u8 {
-        0b0000000 => r_shamt64!(rv64, SRLI, untyped, gp),
-        0b0100000 => r_shamt64!(rv64, SRAI, untyped, gp),
+        0b000000 => r_shamt64!(rv64, SRLI, untyped, gp),
+        0b010000 => r_shamt64!(rv64, SRAI, untyped, gp),
         _ => return None,
       }
       _ => return None,

@@ -59,11 +59,12 @@ impl Machine {
       // TODO: stop treating breakpoint as good trap
       Err(Exception::Breakpoint) => false,
       Err(ex) => {
+        println!("[Valheim] Exception raised: {:?}", ex);
         // note: double/triple-fault can be handled by the M-mode program.
         // see: https://github.com/riscv/riscv-isa-manual/issues/3#issuecomment-278495907
         let _ = ex.handle(&mut self.cpu);
         true
-      },
+      }
     }
   }
 
@@ -76,6 +77,7 @@ impl Machine {
   pub fn show_status(&self) {
     println!("=======================================");
     println!("General purpose registers:");
+    println!("  pc: {:x}", self.cpu.read_pc().0);
     for i in 0..31 {
       println!("  x{:<2}: {:<#18x}    f{:<2}: {:}", i, self.cpu.regs.x[i], i, self.cpu.regs.f[i]);
     }

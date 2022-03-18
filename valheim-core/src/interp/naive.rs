@@ -19,6 +19,7 @@ impl RV64Interpreter for NaiveInterpreter {
       Either::Left(untyped) => (false, untyped.repr()),
       Either::Right(compressed) => (true, compressed.repr() as u32),
     };
+    // println!("pc = {:x}, RVC = {}, instr = {:?}", pc.0, is_compressed, decoded);
     cpu.previous_instr = repr as u64;
     cpu.execute(pc, decoded, is_compressed)
   }
