@@ -1,5 +1,5 @@
 use crate::cpu::data::Either;
-use crate::cpu::exception::Exception;
+use crate::cpu::irq::Exception;
 use crate::cpu::RV64Cpu;
 use crate::interp::RV64Interpreter;
 

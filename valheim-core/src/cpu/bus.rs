@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
-use crate::cpu::exception::Exception;
+use crate::cpu::irq::Exception;
 use crate::device::clint::Clint;
 use crate::device::Device;
 use crate::memory::{CanIO, Memory, VirtAddr};

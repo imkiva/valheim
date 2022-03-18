@@ -4,7 +4,8 @@ use crate::isa::compressed::untyped::Bytecode16;
 use crate::isa::untyped::Bytecode;
 use crate::memory::VirtAddr;
 
-enum IRQ {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IRQ {
   /// Machine external IRQ
   MEI,
   /// Machine software IRQ
