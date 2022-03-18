@@ -1,7 +1,7 @@
-use crate::cpu::csr::CSRMap::{FCSR, FCSR_DZ_MASK};
+use crate::cpu::csr::CSRMap::{FCSR, FCSR_DZ_MASK, MEPC, MSTATUS};
 use crate::cpu::data::Either;
 use crate::cpu::irq::Exception;
-use crate::cpu::RV64Cpu;
+use crate::cpu::{PrivilegeMode, RV64Cpu};
 use crate::debug::trace::{InstrTrace, Trace};
 use crate::isa::compressed::untyped::Bytecode16;
 use crate::isa::rv32::RV32Instr;
@@ -369,7 +369,30 @@ impl RV64Cpu {
 
       // Privileged
       RV64(SRET) => panic!("not implemented at PC = {:?}", pc),
-      RV64(MRET) => panic!("not implemented at PC = {:?}", pc),
+      RV64(MRET) => {
+        let mepc = self.csrs.read_unchecked(MEPC);
+        let mpie = self.csrs.read_bit(MSTATUS, 7);
+        let mpp0 = self.csrs.read_bit(MSTATUS, 11);
+        let mpp1 = self.csrs.read_bit(MSTATUS, 12);
+        let mpp = match (mpp1, mpp0) {
+          (false, false) => PrivilegeMode::User,
+          (false, true) => PrivilegeMode::Supervisor,
+          (true, true) => PrivilegeMode::Machine,
+          _ => panic!("invalid privilege mode in MPP (mstatus[11:12]) = {}{}", mpp1 as i32, mpp0 as i32),
+        };
+
+        // set pc to MEPC
+        next_pc = VirtAddr(mepc);
+        // set cpu privilege mode to MPP
+        self.mode = mpp;
+        // set MIE = MPIE
+        self.csrs.write_bit(MSTATUS, 3, mpie);
+        // set MPIE to 1
+        self.csrs.write_bit(MSTATUS, 7, true);
+        // set MPP to User if User is supported, otherwise to Machine
+        self.csrs.write_bit(MSTATUS, 11, false);
+        self.csrs.write_bit(MSTATUS, 12, false);
+      },
       RV64(WFI) => panic!("not implemented at PC = {:?}", pc),
       RV64(SFENCE_VMA(_, _)) => (),
       RV64(SINVAL_VMA(_, _)) => panic!("not implemented at PC = {:?}", pc),
