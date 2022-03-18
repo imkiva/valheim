@@ -1,18 +1,17 @@
 use std::fmt::Debug;
 use std::cell::RefCell;
 use crate::cpu::bus::{RV64_MEMORY_BASE, RV64_MEMORY_SIZE};
-use crate::cpu::exception::Exception;
+use crate::cpu::irq::Exception;
 use crate::debug::trace::{Journal, MemTrace, RegTrace, Trace};
 use crate::isa::typed::Reg;
 use crate::memory::{CanIO, VirtAddr};
 
 pub mod regs;
 pub mod execute;
-pub mod exception;
 pub mod bus;
 pub mod csr;
 pub mod data;
-pub mod trap;
+pub mod irq;
 
 #[derive(Debug)]
 pub struct RV64Cpu {

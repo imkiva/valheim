@@ -1,7 +1,7 @@
 use std::sync::Arc;
-use crate::cpu::exception::Exception;
+use crate::cpu::irq::Exception;
 use crate::cpu::RV64Cpu;
-use crate::cpu::trap::Trap;
+use crate::cpu::irq::Trap;
 use crate::device::ns16550a::Uart16550a;
 use crate::interp::naive::NaiveInterpreter;
 use crate::interp::RV64Interpreter;
@@ -48,14 +48,20 @@ impl Machine {
   }
 
   pub fn run_next(&mut self) -> bool {
-    // TODO: check interrupts
     self.cpu.bus.clint.tick(&mut self.cpu.csrs);
+
+    if let Some(irq) = self.cpu.pending_interrupt() {
+      // TODO: can IRQ fail to handle?
+      let _ = irq.handle(&mut self.cpu);
+    }
+
     let trap = match self.interpreter.interp(&mut self.cpu) {
       Ok(_) => None,
       Err(Exception::ValheimEbreak) => Some(Trap::ValheimEbreak),
       // TODO: handle exceptions
       Err(ex) => panic!("Handle exception {:?}", ex),
     };
+
     // TODO: traps
     match trap {
       Some(Trap::ValheimEbreak) => false,

@@ -217,7 +217,15 @@ impl CSRRegs {
   pub fn read_unchecked(&self, addr: u16) -> u64 {
     use CSRMap::*;
     match addr {
+      // 4.1.1 Supervisor Status Register (sstatus)
+      // The sstatus register is a subset of the mstatus register.
+      // In a straightforward implementation, reading or writing any field in sstatus
+      // is equivalent to reading or writing the homonymous field in mstatus.
       SSTATUS => self.csrs[MSTATUS as usize] & SSTATUS_MASK,
+      // 4.1.3 Supervisor Interrupt Registers (sip and sie)
+      // The sip and sie registers are subsets of the mip and mie registers.
+      // Reading any implemented field, or writing any writable field, of sip/sie
+      // effects a read or write of the homonymous field of mip/mie.
       SIE => self.csrs[MIE as usize] & self.csrs[MIDELEG as usize],
       SIP => self.csrs[MIP as usize] & self.csrs[MIDELEG as usize],
       addr => self.csrs[addr as usize],
@@ -231,10 +239,18 @@ impl CSRRegs {
       MARCHID => {}
       MIMPID => {}
       MHARTID => {}
+      // 4.1.1 Supervisor Status Register (sstatus)
+      // The sstatus register is a subset of the mstatus register.
+      // In a straightforward implementation, reading or writing any field in sstatus
+      // is equivalent to reading or writing the homonymous field in mstatus.
       SSTATUS => {
         self.csrs[MSTATUS as usize] =
           (self.csrs[MSTATUS as usize] & !SSTATUS_MASK) | (val & SSTATUS_MASK);
       }
+      // 4.1.3 Supervisor Interrupt Registers (sip and sie)
+      // The sip and sie registers are subsets of the mip and mie registers.
+      // Reading any implemented field, or writing any writable field, of sip/sie
+      // effects a read or write of the homonymous field of mip/mie.
       SIE => {
         self.csrs[MIE as usize] = (self.csrs[MIE as usize] & !self.csrs[MIDELEG as usize])
           | (val & self.csrs[MIDELEG as usize]);
@@ -245,5 +261,13 @@ impl CSRRegs {
       }
       addr => self.csrs[addr as usize] = val,
     }
+  }
+
+  pub fn is_machine_irq_enabled_globally(&self) -> bool {
+    self.read_unchecked(CSRMap::MSTATUS) & 0b1000 != 0
+  }
+
+  pub fn is_supervisor_irq_enabled_globally(&self) -> bool {
+    self.read_unchecked(CSRMap::SSTATUS) & 0b10 != 0
   }
 }

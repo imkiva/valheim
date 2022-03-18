@@ -3,7 +3,7 @@
 
 use crate::cpu::bus::CLINT_BASE;
 use crate::cpu::csr::{CSRMap, CSRRegs};
-use crate::cpu::exception::Exception;
+use crate::cpu::irq::Exception;
 use crate::cpu::csr::CSRMap::{*};
 use crate::memory::{CanIO, VirtAddr};
 
@@ -52,13 +52,10 @@ impl Clint {
     // A machine timer interrupt becomes pending whenever mtime contains a value greater than or
     // equal to mtimecmp, treating the values as unsigned integers. The interrupt remains posted
     // until mtimecmp becomes greater than mtime (typically as a result of writing mtimecmp).
+    // The interrupt will only be taken if interrupts are enabled the MTIE bit is set in the mie register.
 
-    // TODO: check whether we should take the interrupt, according to:
-    // The interrupt will only be taken if
-    // - interrupts are enabled
-    // - the MTIE bit is set in the mie register.
-
-    // let mtie = (csrs.read_unchecked(MIE) & MTIE_MASK) != 0;
+    // note: just set the pending bit, the CPU will check whether the interrupt should be taken
+    // together with the enable bit.
 
     if (self.msip & 1) != 0 {
       csrs.write_unchecked(MIP, csrs.read_unchecked(MIP) | MSIP_MASK);
