@@ -21,6 +21,8 @@ pub struct RV64Cpu {
   pub bus: bus::Bus,
   /// used by LR/SC
   pub reserved: Vec<VirtAddr>,
+  /// used by wfi instruction
+  pub wfi: bool,
   pub journal: Journal,
   pub previous_instr: u64,
 }

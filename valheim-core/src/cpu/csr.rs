@@ -123,9 +123,9 @@ pub mod CSRMap {
   pub const MSTATUS: u16 = 0x300;
   /// ISA and extensions.
   pub const MISA: u16 = 0x301;
-  /// Machine exception delefation register.
+  /// Machine exception delegate register.
   pub const MEDELEG: u16 = 0x302;
-  /// Machine interrupt delefation register.
+  /// Machine interrupt delegate register.
   pub const MIDELEG: u16 = 0x303;
   /// Machine interrupt-enable register.
   pub const MIE: u16 = 0x304;
@@ -263,11 +263,22 @@ impl CSRRegs {
     }
   }
 
+  pub fn write_bit(&mut self, addr: u16, bit: usize, val: bool) {
+    match val {
+      true => self.write_unchecked(addr, self.read_unchecked(addr) | 1 << bit),
+      false => self.write_unchecked(addr, self.read_unchecked(addr) & !(1 << bit)),
+    }
+  }
+
+  pub fn read_bit(&self, addr: u16, bit: usize) -> bool {
+    (self.read_unchecked(addr) & (1 << bit)) != 0
+  }
+
   pub fn is_machine_irq_enabled_globally(&self) -> bool {
-    self.read_unchecked(CSRMap::MSTATUS) & 0b1000 != 0
+    self.read_bit(CSRMap::MSTATUS, 3)
   }
 
   pub fn is_supervisor_irq_enabled_globally(&self) -> bool {
-    self.read_unchecked(CSRMap::SSTATUS) & 0b10 != 0
+    self.read_bit(CSRMap::SSTATUS, 1)
   }
 }
