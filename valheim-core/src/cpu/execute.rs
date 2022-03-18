@@ -190,13 +190,80 @@ impl RV64Cpu {
         };
         rd.write(self, val);
       }
-      RV32(REM(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(REMU(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV64(MULW(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV64(DIVW(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV64(DIVUW(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV64(REMW(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV64(REMUW(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
+      RV32(REM(rd, rs1, rs2)) => {
+        let dividend = rs1.read(self) as i64;
+        let divisor = rs2.read(self) as i64;
+        let val = if divisor == 0 {
+          dividend as u64
+        } else if dividend == i64::MIN && divisor == -1 {
+          0
+        } else {
+          dividend.wrapping_rem(divisor) as u64
+        };
+        rd.write(self, val);
+      }
+      RV32(REMU(rd, rs1, rs2)) => {
+        let dividend = rs1.read(self);
+        let divisor = rs2.read(self);
+        let val = if divisor == 0 {
+          dividend
+        } else {
+          dividend.wrapping_rem(divisor)
+        };
+        rd.write(self, val);
+      }
+      RV64(MULW(rd, rs1, rs2)) => {
+        let lhs = rs1.read(self) as i32;
+        let rhs = rs2.read(self) as i32;
+        let val = lhs.wrapping_mul(rhs);
+        rd.write(self, val as i64 as u64);
+      }
+      RV64(DIVW(rd, rs1, rs2)) => {
+        let dividend = rs1.read(self) as i32;
+        let divisor = rs2.read(self) as i32;
+        let val = if divisor == 0 {
+          self.csrs.write_unchecked(FCSR, self.csrs.read_unchecked(FCSR) | FCSR_DZ_MASK);
+          u64::MAX
+        } else if dividend == i32::MIN && divisor == -1 {
+          dividend as i64 as u64
+        } else {
+          dividend.wrapping_div(divisor) as i64 as u64
+        };
+        rd.write(self, val);
+      }
+      RV64(DIVUW(rd, rs1, rs2)) => {
+        let dividend = rs1.read(self) as u32;
+        let divisor = rs2.read(self) as u32;
+        let val = if divisor == 0 {
+          self.csrs.write_unchecked(FCSR, self.csrs.read_unchecked(FCSR) | FCSR_DZ_MASK);
+          u64::MAX
+        } else {
+          dividend.wrapping_div(divisor) as i32 as i64 as u64
+        };
+        rd.write(self, val);
+      }
+      RV64(REMW(rd, rs1, rs2)) => {
+        let dividend = rs1.read(self) as i32;
+        let divisor = rs2.read(self) as i32;
+        let val = if divisor == 0 {
+          dividend as i64 as u64
+        } else if dividend == i32::MIN && divisor == -1 {
+          0
+        } else {
+          dividend.wrapping_rem(divisor) as i64 as u64
+        };
+        rd.write(self, val);
+      }
+      RV64(REMUW(rd, rs1, rs2)) => {
+        let dividend = rs1.read(self) as u32;
+        let divisor = rs2.read(self) as u32;
+        let val = if divisor == 0 {
+          dividend as i32 as i64 as u64
+        } else {
+          dividend.wrapping_rem(divisor) as i32 as i64 as u64
+        };
+        rd.write(self, val);
+      }
 
       // the valheim trap
       RV32(EBREAK) => return Err(Exception::Breakpoint),
