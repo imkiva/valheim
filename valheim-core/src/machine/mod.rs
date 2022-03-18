@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use crate::cpu::irq::Exception;
 use crate::cpu::RV64Cpu;
-use crate::cpu::irq::Trap;
 use crate::device::ns16550a::Uart16550a;
 use crate::interp::naive::NaiveInterpreter;
 use crate::interp::RV64Interpreter;
@@ -55,17 +54,16 @@ impl Machine {
       let _ = irq.handle(&mut self.cpu);
     }
 
-    let trap = match self.interpreter.interp(&mut self.cpu) {
-      Ok(_) => None,
-      Err(Exception::ValheimEbreak) => Some(Trap::ValheimEbreak),
-      // TODO: handle exceptions
-      Err(ex) => panic!("Handle exception {:?}", ex),
-    };
-
-    // TODO: traps
-    match trap {
-      Some(Trap::ValheimEbreak) => false,
-      None => true,
+    match self.interpreter.interp(&mut self.cpu) {
+      Ok(_) => true,
+      // TODO: stop treating breakpoint as good trap
+      Err(Exception::Breakpoint) => false,
+      Err(ex) => {
+        // note: double/triple-fault can be handled by the M-mode program.
+        // see: https://github.com/riscv/riscv-isa-manual/issues/3#issuecomment-278495907
+        let _ = ex.handle(&mut self.cpu);
+        true
+      },
     }
   }
 

@@ -44,6 +44,7 @@ impl RV64Cpu {
       mode: PrivilegeMode::Machine,
       bus: bus::Bus::new().expect("Failed to create Bus"),
       reserved: Vec::new(),
+      wfi: false,
       journal: Journal {
         init_regs: regs,
         init_mem_base: VirtAddr(RV64_MEMORY_BASE),

@@ -1,5 +1,5 @@
 use crate::cpu::{PrivilegeMode, RV64Cpu};
-use crate::cpu::csr::CSRMap::{MCAUSE, MEIP_MASK, MEPC, MIDELEG, MIE, MIP, MSIP_MASK, MSTATUS, MTIP_MASK, MTVAL, MTVEC, SCAUSE, SEIP_MASK, SEPC, SIE, SIP, SSIP_MASK, SSTATUS, STIP_MASK, STVAL, STVEC};
+use crate::cpu::csr::CSRMap::{MCAUSE, MEDELEG, MEIP_MASK, MEPC, MIDELEG, MIE, MIP, MSIP_MASK, MSTATUS, MTIP_MASK, MTVAL, MTVEC, SCAUSE, SEIP_MASK, SEPC, SIE, SIP, SSIP_MASK, SSTATUS, STIP_MASK, STVAL, STVEC};
 use crate::isa::compressed::untyped::Bytecode16;
 use crate::isa::untyped::Bytecode;
 use crate::memory::VirtAddr;
@@ -27,14 +27,7 @@ pub enum Exception {
   StoreAccessFault(VirtAddr),
   LoadAddressMisaligned(VirtAddr),
   StoreAddressMisaligned(VirtAddr),
-  // TODO: remove this hack
-  ValheimEbreak,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Trap {
-  // TODO: remove this hack
-  ValheimEbreak,
+  Breakpoint,
 }
 
 impl RV64Cpu {
@@ -141,7 +134,7 @@ impl RV64Cpu {
 
 impl IRQ {
   /// Just the corresponding bit in MIP register
-  fn cause(&self) -> u64 {
+  fn mcause(&self) -> u64 {
     match self {
       IRQ::SSI => 1,
       IRQ::MSI => 3,
@@ -153,134 +146,163 @@ impl IRQ {
   }
 
   pub fn handle(&self, cpu: &mut RV64Cpu) -> Result<(), ()> {
-    // clear the wait-for-interrupt flag
-    cpu.wfi = false;
+    trap_entry(self.mcause(), 0, true, cpu)
+  }
+}
 
-    let previous_pc = cpu.regs.pc.0;
-    let previous_mode = cpu.mode;
-    let cause = self.cause();
+impl Exception {
+  pub fn mcause_mtval(&self) -> (u64, u64) {
+    match self {
+      Exception::IllegalInstruction(_, b, _) => (2, b.repr() as u64),
+      Exception::Breakpoint => (3, 0),
+      Exception::LoadAddressMisaligned(addr) => (4, addr.0),
+      Exception::LoadAccessFault(addr) => (5, addr.0),
+      Exception::StoreAddressMisaligned(addr) => (6, addr.0),
+      Exception::StoreAccessFault(addr) => (7, addr.0),
+    }
+  }
 
-    // 3.1.9 Machine Interrupt Registers (mip and mie)
-    // An interrupt i will trap to M-mode (causing the privilege mode to change to M-mode) if all of the following are true:
-    // (a) either the current privilege mode is M and the MIE bit in the mstatus register is set,
-    //     or the current privilege mode has less privilege than M-mode;
-    // (b) bit i is set in both mip and mie;
-    // (c) if register mideleg exists, bit i is not set in mideleg.
+  pub fn handle(&self, cpu: &mut RV64Cpu) -> Result<(), ()> {
+    let (mcause, mtval) = self.mcause_mtval();
+    trap_entry(mcause, mtval, false, cpu)
+  }
+}
 
-    // 4.1.3 Supervisor Interrupt Registers (sip and sie)
-    // An interrupt i will trap to S-mode if both of the following are true:
-    // (a) either the current privilege mode is S and the SIE bit in the sstatus register is set,
-    //     or the current privilege mode has less privilege than S-mode;
-    // (b) bit i is set in both sip and sie.
+pub fn trap_entry(mcause: u64, mtval: u64, is_interrupt: bool, cpu: &mut RV64Cpu) -> Result<(), ()> {
+  // clear the wait-for-interrupt flag
+  if is_interrupt { cpu.wfi = false; }
 
-    // note: wo don't need to check the following, since we have
-    // already checked it in `RV64Cpu::pending_interrupt`:
-    // (a) the MIE bit in mstatus, or the SIE bit in sstatus
-    // (b) the bit i in (mip & mie) or (sip & sie)
+  let previous_pc = cpu.regs.pc.0;
+  let previous_mode = cpu.mode;
 
-    // we only need to check: (c) bit i is not set in mideleg.
-    let machine_mode = previous_mode <= PrivilegeMode::Machine
-      && ((cpu.csrs.read_unchecked(MIDELEG) >> cause) & 1) == 0;
+  // 3.1.9 Machine Interrupt Registers (mip and mie)
+  // An interrupt i will trap to M-mode (causing the privilege mode to change to M-mode) if all of the following are true:
+  // (a) either the current privilege mode is M and the MIE bit in the mstatus register is set,
+  //     or the current privilege mode has less privilege than M-mode;
+  // (b) bit i is set in both mip and mie;
+  // (c) if register mideleg exists, bit i is not set in mideleg/medeleg.
 
-    match machine_mode {
-      true => {
-        // enter machine mode
-        cpu.mode = PrivilegeMode::Machine;
+  // 4.1.3 Supervisor Interrupt Registers (sip and sie)
+  // An interrupt i will trap to S-mode if both of the following are true:
+  // (a) either the current privilege mode is S and the SIE bit in the sstatus register is set,
+  //     or the current privilege mode has less privilege than S-mode;
+  // (b) bit i is set in both sip and sie.
 
-        // find the trap-vector offset according to the mode saved in mtvec[1:0]
-        // 3.1.7 Machine Trap-Vector Base-Address Register (mtvec)
-        // When MODE=Direct, all traps into machine mode cause the pc to be set to the address in the BASE field.
-        // When MODE=Vectored, all synchronous exceptions into machine mode cause the pc to be set to the address in the BASE field,
-        // whereas interrupts cause the pc to be set to the address in the BASE field plus four times the interrupt cause number.
-        // For example, a machine-mode timer interrupt (see Table 3.6 on page 39) causes the pc to be set to BASE+0x1c.
-        let mode = cpu.csrs.read_unchecked(MTVEC) & 0b11;
-        let trap_offset = match mode {
-          0 => 0,         // direct mode
-          1 => 4 * cause, // vectored mode, here we are handling interrupts
-          _ => panic!("invalid machine trap-vector address mode in mtvec[1:0]: {}", mode),
-        };
+  // note: wo don't need to check the following, since we have
+  // already checked it in `RV64Cpu::pending_interrupt`:
+  // (a) the MIE bit in mstatus, or the SIE bit in sstatus
+  // (b) the bit i in (mip & mie) or (sip & sie)
 
-        cpu.regs.pc.0 = ((cpu.csrs.read_unchecked(MTVEC) & !(0b11)) + trap_offset) as u64;
+  // we only need to check: (c) bit i is not set in mideleg/medeleg.
+  let not_delegated = match is_interrupt {
+    true => ((cpu.csrs.read_unchecked(MIDELEG) >> mcause) & 1) == 0,
+    false => ((cpu.csrs.read_unchecked(MEDELEG) >> mcause) & 1) == 0,
+  };
 
-        // 3.1.14 Machine Exception Program Counter (mepc)
-        // When a trap is taken into M-mode, mepc is written with the virtual address of the instruction
-        // that was interrupted or that encountered the exception. Otherwise, mepc is never written
-        // by the implementation, though it may be explicitly written by software.
-        // The low bit of mepc (mepc[0]) is always zero.
-        cpu.csrs.write_unchecked(MEPC, previous_pc & !1);
+  let trap_to_machine = previous_mode <= PrivilegeMode::Machine && not_delegated;
 
-        // 3.1.15 Machine Cause Register (mcause)
-        // When a trap is taken into M-mode, mcause is written with a code indicating the event
-        // that caused the trap. Otherwise, mcause is never written by the implementation,
-        // though it may be explicitly written by software.
-        // The Interrupt bit (mcause[63]) in the mcause register is set if the trap was caused by an interrupt.
-        // The Exception Code field(mcause[0:62]) contains a code identifying the last exception or interrupt.
-        cpu.csrs.write_unchecked(MCAUSE, 1 << 63 | cause);
+  match trap_to_machine {
+    true => {
+      // enter machine mode
+      cpu.mode = PrivilegeMode::Machine;
 
-        // 3.1.16 Machine Trap Value Register (mtval)
-        // When a trap is taken into M-mode, mtval is either set to zero or written with exception-specific information
-        // to assist software in handling the trap. Otherwise, mtval is never written by the implementation,
-        // though it may be explicitly written by software.
-        cpu.csrs.write_unchecked(MTVAL, 0);
+      // find the trap-vector offset according to the mode saved in mtvec[1:0]
+      // 3.1.7 Machine Trap-Vector Base-Address Register (mtvec)
+      // When MODE=Direct, all traps into machine mode cause the pc to be set to the address in the BASE field.
+      // When MODE=Vectored, all synchronous exceptions into machine mode cause the pc to be set to the address in the BASE field,
+      // whereas interrupts cause the pc to be set to the address in the BASE field plus four times the interrupt cause number.
+      // For example, a machine-mode timer interrupt (see Table 3.6 on page 39) causes the pc to be set to BASE+0x1c.
+      let mode = cpu.csrs.read_unchecked(MTVEC) & 0b11;
+      let offset = match (is_interrupt, mode) {
+        (false, _) => 0,        // exceptions all cause the pc to the BASE field
+        (true, 0) => 0,         // direct mode
+        (true, 1) => 4 * mcause, // vectored mode, here we are handling interrupts
+        _ => panic!("invalid machine trap-vector address mode in mtvec[1:0]: {}", mode),
+      };
 
-        // set MPIE to MIE
-        let mie = cpu.csrs.is_machine_irq_enabled_globally();
-        cpu.csrs.write_bit(MSTATUS, 7, mie);
-        // set MIE to 0 to disable interrupts
-        cpu.csrs.write_bit(MSTATUS, 3, false);
+      cpu.regs.pc.0 = ((cpu.csrs.read_unchecked(MTVEC) & !(0b11)) + offset) as u64;
 
-        // set MPP to previous privileged mode
-        match previous_mode {
-          PrivilegeMode::User => {
-            // mstatus[12:11] = 0b00
-            cpu.csrs.write_bit(MSTATUS, 11, false);
-            cpu.csrs.write_bit(MSTATUS, 12, false);
-          },
-          PrivilegeMode::Supervisor => {
-            // mstatus[12:11] = 0b01
-            cpu.csrs.write_bit(MSTATUS, 11, true);
-            cpu.csrs.write_bit(MSTATUS, 12, false);
-          }
-          PrivilegeMode::Machine => {
-            // mstatus[12:11] = 0b11
-            cpu.csrs.write_bit(MSTATUS, 11, true);
-            cpu.csrs.write_bit(MSTATUS, 12, true);
-          }
+      // 3.1.14 Machine Exception Program Counter (mepc)
+      // When a trap is taken into M-mode, mepc is written with the virtual address of the instruction
+      // that was interrupted or that encountered the exception. Otherwise, mepc is never written
+      // by the implementation, though it may be explicitly written by software.
+      // The low bit of mepc (mepc[0]) is always zero.
+      cpu.csrs.write_unchecked(MEPC, previous_pc & !1);
+
+      // 3.1.15 Machine Cause Register (mcause)
+      // When a trap is taken into M-mode, mcause is written with a code indicating the event
+      // that caused the trap. Otherwise, mcause is never written by the implementation,
+      // though it may be explicitly written by software.
+      // The Interrupt bit (mcause[63]) in the mcause register is set if the trap was caused by an interrupt.
+      // The Exception Code field(mcause[0:62]) contains a code identifying the last exception or interrupt.
+      let interrupt_bit = is_interrupt as u64;
+      cpu.csrs.write_unchecked(MCAUSE, interrupt_bit << 63 | mcause);
+
+      // 3.1.16 Machine Trap Value Register (mtval)
+      // When a trap is taken into M-mode, mtval is either set to zero or written with exception-specific information
+      // to assist software in handling the trap. Otherwise, mtval is never written by the implementation,
+      // though it may be explicitly written by software.
+      cpu.csrs.write_unchecked(MTVAL, mtval);
+
+      // set MPIE to MIE
+      let mie = cpu.csrs.is_machine_irq_enabled_globally();
+      cpu.csrs.write_bit(MSTATUS, 7, mie);
+      // set MIE to 0 to disable interrupts
+      cpu.csrs.write_bit(MSTATUS, 3, false);
+
+      // set MPP to previous privileged mode
+      match previous_mode {
+        PrivilegeMode::User => {
+          // mstatus[12:11] = 0b00
+          cpu.csrs.write_bit(MSTATUS, 11, false);
+          cpu.csrs.write_bit(MSTATUS, 12, false);
         }
-
-        Ok(())
+        PrivilegeMode::Supervisor => {
+          // mstatus[12:11] = 0b01
+          cpu.csrs.write_bit(MSTATUS, 11, true);
+          cpu.csrs.write_bit(MSTATUS, 12, false);
+        }
+        PrivilegeMode::Machine => {
+          // mstatus[12:11] = 0b11
+          cpu.csrs.write_bit(MSTATUS, 11, true);
+          cpu.csrs.write_bit(MSTATUS, 12, true);
+        }
       }
 
-      false => {
-        // Comments omitted since there's only register differences
-        cpu.mode = PrivilegeMode::Supervisor;
-        let mode = cpu.csrs.read_unchecked(STVEC) & 0b11;
-        let offset = match mode {
-          0 => 0,         // direct mode
-          1 => 4 * cause, // vectored mode, here we are handling interrupts
-          _ => panic!("invalid supervisor trap-vector address mode in stvec[1:0]: {}", mode),
-        };
+      Ok(())
+    }
 
-        cpu.regs.pc.0 = ((cpu.csrs.read_unchecked(STVEC) & (!0b11)) + offset) as u64;
-        cpu.csrs.write_unchecked(SEPC, previous_pc & !1);
-        cpu.csrs.write_unchecked(SCAUSE, 1 << 63 | cause);
-        cpu.csrs.write_unchecked(STVAL, 0);
+    false => {
+      // Comments omitted since there's only register differences
+      cpu.mode = PrivilegeMode::Supervisor;
+      let mode = cpu.csrs.read_unchecked(STVEC) & 0b11;
+      let offset = match (is_interrupt, mode) {
+        (false, _) => 0,        // exceptions all cause the pc to the BASE field
+        (true, 0) => 0,         // direct mode
+        (true, 1) => 4 * mcause, // vectored mode, here we are handling interrupts
+        _ => panic!("invalid machine trap-vector address mode in stvec[1:0]: {}", mode),
+      };
 
-        // set SPIE to SIE
-        let sie = cpu.csrs.is_supervisor_irq_enabled_globally();
-        cpu.csrs.write_bit(SSTATUS, 5, sie);
-        // set SIE to 0 to disable interrupts
-        cpu.csrs.write_bit(SSTATUS, 1, false);
+      cpu.regs.pc.0 = ((cpu.csrs.read_unchecked(STVEC) & (!0b11)) + offset) as u64;
+      cpu.csrs.write_unchecked(SEPC, previous_pc & !1);
+      let interrupt_bit = is_interrupt as u64;
+      cpu.csrs.write_unchecked(SCAUSE, interrupt_bit << 63 | mcause);
+      cpu.csrs.write_unchecked(STVAL, mtval);
 
-        // set SPP to previous privileged mode
-        match previous_mode {
-          PrivilegeMode::User => cpu.csrs.write_bit(SSTATUS, 8, false),
-          PrivilegeMode::Supervisor => cpu.csrs.write_bit(SSTATUS, 8, true),
-          PrivilegeMode::Machine => panic!("Machine interrupts cannot be handled in supervisor mode"),
-        }
+      // set SPIE to SIE
+      let sie = cpu.csrs.is_supervisor_irq_enabled_globally();
+      cpu.csrs.write_bit(SSTATUS, 5, sie);
+      // set SIE to 0 to disable interrupts
+      cpu.csrs.write_bit(SSTATUS, 1, false);
 
-        Ok(())
+      // set SPP to previous privileged mode
+      match previous_mode {
+        PrivilegeMode::User => cpu.csrs.write_bit(SSTATUS, 8, false),
+        PrivilegeMode::Supervisor => cpu.csrs.write_bit(SSTATUS, 8, true),
+        PrivilegeMode::Machine => panic!("Machine interrupts cannot be handled in supervisor mode"),
       }
+
+      Ok(())
     }
   }
 }

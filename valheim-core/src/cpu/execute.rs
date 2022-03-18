@@ -199,7 +199,7 @@ impl RV64Cpu {
       RV64(REMUW(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
 
       // the valheim trap
-      RV32(EBREAK) => return Err(Exception::ValheimEbreak),
+      RV32(EBREAK) => return Err(Exception::Breakpoint),
 
       RV32(LR_W(rd, rs1, _, _)) => {
         let addr = rs1.read(self);
