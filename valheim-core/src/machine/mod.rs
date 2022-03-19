@@ -51,7 +51,6 @@ impl Machine {
 
     if let Some(irq) = self.cpu.pending_interrupt() {
       // TODO: can IRQ fail to handle?
-      println!("[Valheim] Interrupt raised: {:?}", irq);
       let _ = irq.handle(&mut self.cpu);
     }
 
@@ -60,7 +59,7 @@ impl Machine {
       // TODO: stop treating breakpoint as good trap
       Err(Exception::Breakpoint) => false,
       Err(ex) => {
-        println!("[Valheim] Exception raised: {:?}", ex);
+        // TODO: add watchdog to prevent kernels that do not handle double fault?
         // note: double/triple-fault can be handled by the M-mode program.
         // see: https://github.com/riscv/riscv-isa-manual/issues/3#issuecomment-278495907
         let _ = ex.handle(&mut self.cpu);
@@ -77,6 +76,7 @@ impl Machine {
 
   pub fn show_status(&self) {
     println!("=======================================");
+    println!("Privileged mode: {:?}", self.cpu.mode);
     println!("General purpose registers:");
     println!("  pc: {:x}", self.cpu.read_pc().0);
     for i in 0..31 {
