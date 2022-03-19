@@ -92,9 +92,9 @@ impl Bus {
   pub fn read<T: CanIO>(&self, addr: VirtAddr) -> Result<T, Exception> {
     // fast-path for builtin io devices
     match addr.0 {
-      RV64_MEMORY_BASE..=RV64_MEMORY_END => self.mem.read(addr).ok_or(Exception::LoadAccessFault(addr)),
-      VIRT_MROM_BASE..=VIRT_MROM_END => self.virt_mrom.read(addr).ok_or(Exception::LoadAccessFault(addr)),
-      CLINT_BASE..=CLINT_END => self.clint.read::<T>(addr),
+      RV64_MEMORY_BASE..=RV64_MEMORY_END => self.mem.read::<T>(addr).ok_or(Exception::LoadAccessFault(addr)),
+      VIRT_MROM_BASE..=VIRT_MROM_END => self.virt_mrom.read::<T>(addr).ok_or(Exception::LoadAccessFault(addr)),
+      CLINT_BASE..=CLINT_END => Ok(Bus::safe_reinterpret_as_T(self.clint.read::<T>(addr)?)),
       PLIC_BASE..=PLIC_END => {
         assert_eq!(std::mem::size_of::<T>(), 4);
         let val = self.plic.read(addr)?;
@@ -102,12 +102,11 @@ impl Bus {
       },
 
       _ => match self.select_device_for_read(addr) {
-        // CanIO trait guarantees that the transmute is safe
         Some(dev) => match std::mem::size_of::<T>() {
-          1 => Ok(unsafe { *std::mem::transmute::<*const u8, *const T>(&dev.read(addr).ok_or(Exception::StoreAccessFault(addr))? as *const u8) }),
-          2 => Ok(unsafe { *std::mem::transmute::<*const u16, *const T>(&dev.read16(addr).ok_or(Exception::StoreAccessFault(addr))? as *const u16) }),
-          4 => Ok(unsafe { *std::mem::transmute::<*const u32, *const T>(&dev.read32(addr).ok_or(Exception::StoreAccessFault(addr))? as *const u32) }),
-          8 => Ok(unsafe { *std::mem::transmute::<*const u64, *const T>(&dev.read64(addr).ok_or(Exception::StoreAccessFault(addr))? as *const u64) }),
+          1 => Ok(Bus::safe_reinterpret_as_T(dev.read(addr).ok_or(Exception::LoadAccessFault(addr))? as u64)),
+          2 => Ok(Bus::safe_reinterpret_as_T(dev.read16(addr).ok_or(Exception::LoadAccessFault(addr))? as u64)),
+          4 => Ok(Bus::safe_reinterpret_as_T(dev.read32(addr).ok_or(Exception::LoadAccessFault(addr))? as u64)),
+          8 => Ok(Bus::safe_reinterpret_as_T(dev.read64(addr).ok_or(Exception::LoadAccessFault(addr))? as u64)),
           _ => Err(Exception::LoadAccessFault(addr)),
         }
         None => Err(Exception::StoreAccessFault(addr)),
@@ -118,9 +117,9 @@ impl Bus {
   pub fn write<T: CanIO>(&mut self, addr: VirtAddr, val: T) -> Result<(), Exception> {
     // fast-path for builtin io devices
     match addr.0 {
-      RV64_MEMORY_BASE..=RV64_MEMORY_END => self.mem.write(addr, val).ok_or(Exception::StoreAccessFault(addr)),
-      VIRT_MROM_BASE..=VIRT_MROM_END => self.virt_mrom.write(addr, val).ok_or(Exception::StoreAccessFault(addr)),
-      CLINT_BASE..=CLINT_END => self.clint.write(addr, val),
+      RV64_MEMORY_BASE..=RV64_MEMORY_END => self.mem.write::<T>(addr, val).ok_or(Exception::StoreAccessFault(addr)),
+      VIRT_MROM_BASE..=VIRT_MROM_END => self.virt_mrom.write::<T>(addr, val).ok_or(Exception::StoreAccessFault(addr)),
+      CLINT_BASE..=CLINT_END => self.clint.write::<T>(addr, Bus::safe_reinterpret_as_u64(val)),
       PLIC_BASE..=PLIC_END => {
         assert_eq!(std::mem::size_of::<T>(), 4);
         let val = unsafe { *std::mem::transmute::<*const T, *const u32>(&val as *const T) };
@@ -128,16 +127,33 @@ impl Bus {
       },
 
       _ => match self.select_device_for_write(addr) {
-        // CanIO trait guarantees that the transmute is safe
         Some(dev) => match std::mem::size_of::<T>() {
-          1 => unsafe { dev.write(addr, *std::mem::transmute::<*const T, *const u8>(&val as *const T)) }.map_err(|_| Exception::StoreAccessFault(addr)),
-          2 => unsafe { dev.write16(addr, *std::mem::transmute::<*const T, *const u16>(&val as *const T)) }.map_err(|_| Exception::StoreAccessFault(addr)),
-          4 => unsafe { dev.write32(addr, *std::mem::transmute::<*const T, *const u32>(&val as *const T)) }.map_err(|_| Exception::StoreAccessFault(addr)),
-          8 => unsafe { dev.write64(addr, *std::mem::transmute::<*const T, *const u64>(&val as *const T)) }.map_err(|_| Exception::StoreAccessFault(addr)),
+          1 => dev.write(addr, Bus::safe_reinterpret_as_u64(val) as u8).map_err(|_| Exception::StoreAccessFault(addr)),
+          2 => dev.write16(addr, Bus::safe_reinterpret_as_u64(val) as u16).map_err(|_| Exception::StoreAccessFault(addr)),
+          4 => dev.write32(addr, Bus::safe_reinterpret_as_u64(val) as u32).map_err(|_| Exception::StoreAccessFault(addr)),
+          8 => dev.write64(addr, Bus::safe_reinterpret_as_u64(val) as u64).map_err(|_| Exception::StoreAccessFault(addr)),
           _ => Err(Exception::StoreAccessFault(addr)),
         }
         None => Err(Exception::StoreAccessFault(addr)),
       },
+    }
+  }
+
+  #[allow(non_snake_case)]
+  fn safe_reinterpret_as_T<T: CanIO>(val: u64) -> T {
+    // CanIO trait guarantees that the transmute is safe
+    debug_assert!(std::mem::size_of::<T>() <= std::mem::size_of::<u64>());
+    unsafe { *std::mem::transmute::<*const u64, *const T>(&val as *const u64) }
+  }
+
+  fn safe_reinterpret_as_u64<T: CanIO>(val: T) -> u64 {
+    // CanIO trait guarantees that the transmute is safe
+    match std::mem::size_of::<T>() {
+      1 => (unsafe { *std::mem::transmute::<*const T, *const u8>(&val as *const T) }) as u64,
+      2 => (unsafe { *std::mem::transmute::<*const T, *const u16>(&val as *const T) }) as u64,
+      4 => (unsafe { *std::mem::transmute::<*const T, *const u32>(&val as *const T) }) as u64,
+      8 => (unsafe { *std::mem::transmute::<*const T, *const u64>(&val as *const T) }),
+      _ => panic!("Invalid size for CanIO trait"),
     }
   }
 

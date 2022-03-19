@@ -11,8 +11,6 @@ impl CanIO for i8 {}
 impl CanIO for i16 {}
 impl CanIO for i32 {}
 impl CanIO for i64 {}
-impl CanIO for f32 {}
-impl CanIO for f64 {}
 
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Add, Sub, AddAssign, SubAssign)]
 pub struct VirtAddr(pub u64);

@@ -70,7 +70,7 @@ impl Clint {
     }
   }
 
-  pub fn read<T: CanIO>(&self, addr: VirtAddr) -> Result<T, Exception> {
+  pub fn read<T: CanIO>(&self, addr: VirtAddr) -> Result<u64, Exception> {
     let (val, offset) = match addr.0 {
       MSIP..=MSIP_END => (self.msip as u64, addr.0 - MSIP),
       MTIMECMP..=MTIMECMP_END => (self.mtimecmp, addr.0 - MTIMECMP),
@@ -85,16 +85,10 @@ impl Clint {
       8 => val,
       _ => return Err(Exception::LoadAccessFault(addr)),
     };
-    match std::mem::size_of::<T>() {
-      1 => Ok(unsafe { *std::mem::transmute::<*const u8, *const T>(&(val as u8) as *const u8) }),
-      2 => Ok(unsafe { *std::mem::transmute::<*const u16, *const T>(&(val as u16) as *const u16) }),
-      4 => Ok(unsafe { *std::mem::transmute::<*const u32, *const T>(&(val as u32) as *const u32) }),
-      8 => Ok(unsafe { *std::mem::transmute::<*const u64, *const T>(&(val as u64) as *const u64) }),
-      _ => return Err(Exception::LoadAccessFault(addr)),
-    }
+    Ok(val)
   }
 
-  pub fn write<T: CanIO>(&mut self, addr: VirtAddr, value: T) -> Result<(), Exception> {
+  pub fn write<T: CanIO>(&mut self, addr: VirtAddr, value: u64) -> Result<(), Exception> {
     let (mut old, offset) = match addr.0 {
       MSIP..=MSIP_END => (self.msip as u64, addr.0 - MSIP),
       MTIMECMP..=MTIMECMP_END => (self.mtimecmp, addr.0 - MTIMECMP),
@@ -102,13 +96,6 @@ impl Clint {
       _ => return Err(Exception::StoreAccessFault(addr)),
     };
 
-    let value = match std::mem::size_of::<T>() {
-      1 => (unsafe { *std::mem::transmute::<*const T, *const u8>(&value as *const T) }) as u64,
-      2 => (unsafe { *std::mem::transmute::<*const T, *const u16>(&value as *const T) }) as u64,
-      4 => (unsafe { *std::mem::transmute::<*const T, *const u32>(&value as *const T) }) as u64,
-      8 => (unsafe { *std::mem::transmute::<*const T, *const u64>(&value as *const T) }) as u64,
-      _ => return Err(Exception::LoadAccessFault(addr)),
-    };
     // Calculate the new value of the target register based on `size` and `offset`.
     match std::mem::size_of::<T>() {
       1 => {

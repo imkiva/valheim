@@ -59,14 +59,14 @@ impl RV64Cpu {
 
   #[inline(always)]
   pub fn read_mem<T: CanIO + Debug>(&self, addr: VirtAddr) -> Result<T, Exception> {
-    let val = self.bus.read(addr);
+    let val = self.bus.read::<T>(addr);
     self.journal.trace(|| Trace::Mem(MemTrace::Read(addr, std::mem::size_of::<T>(), format!("{:?}", val))));
     val
   }
 
   #[inline(always)]
   pub fn write_mem<T: CanIO + Debug>(&mut self, addr: VirtAddr, val: T) -> Result<(), Exception> {
-    let res = self.bus.write(addr, val);
+    let res = self.bus.write::<T>(addr, val);
     self.journal.trace(|| Trace::Mem(MemTrace::Write(addr, std::mem::size_of::<T>(), format!("{:?}", val))));
     res
   }
