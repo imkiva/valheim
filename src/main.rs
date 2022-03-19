@@ -14,6 +14,8 @@ struct Args {
   pub kernel: String,
   #[clap(short, long)]
   pub bios: Option<String>,
+  #[clap(short, long)]
+  pub disk: Option<String>,
   #[clap(long)]
   pub trace: Option<String>,
 }
@@ -25,10 +27,17 @@ fn main() {
   kernel.read_to_end(&mut kernel_bytes).expect("Failed to read kernel");
 
   let bios_bytes = args.bios.map(|bios| {
-    let mut bios = File::open(&bios).expect("Failed to open bios");
-    let mut bios_bytes = vec![];
-    bios.read_to_end(&mut bios_bytes).expect("Failed to read kernel");
-    bios_bytes
+    let mut file = File::open(&bios).expect("Failed to open bios");
+    let mut bytes = vec![];
+    file.read_to_end(&mut bytes).expect("Failed to read kernel");
+    bytes
+  });
+
+  let disk_bytes = args.disk.map(|bios| {
+    let mut file = File::open(&bios).expect("Failed to open disk");
+    let mut bytes = vec![];
+    file.read_to_end(&mut bytes).expect("Failed to read disk");
+    bytes
   });
 
   let mut machine = Machine::new(args.trace);
@@ -41,5 +50,12 @@ fn main() {
       machine.load(0x80000000, kernel_bytes.as_slice());
     }
   }
+  match disk_bytes {
+    Some(disk_bytes) => {
+      machine.cpu.bus.virtio.initialize(disk_bytes);
+    }
+    None => {}
+  }
+
   machine.run();
 }
