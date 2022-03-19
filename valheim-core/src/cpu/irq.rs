@@ -31,6 +31,9 @@ pub enum Exception {
   InstructionPageFault(VirtAddr),
   LoadPageFault(VirtAddr),
   StorePageFault(VirtAddr),
+  UserEcall,
+  SupervisorEcall,
+  MachineEcall,
   Breakpoint,
 }
 
@@ -184,6 +187,9 @@ impl Exception {
       Exception::InstructionPageFault(addr) => (12, addr.0),
       Exception::LoadPageFault(addr) => (13, addr.0),
       Exception::StorePageFault(addr) => (15, addr.0),
+      Exception::UserEcall => (8, 0),
+      Exception::SupervisorEcall => (9, 0),
+      Exception::MachineEcall => (11, 0),
     }
   }
 

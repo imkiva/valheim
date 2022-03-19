@@ -1,4 +1,4 @@
-use crate::cpu::csr::CSRMap::{FCSR, FCSR_DZ_MASK, MEPC, MSTATUS, SEPC, SSTATUS};
+use crate::cpu::csr::CSRMap::{FCSR, FCSR_DZ_MASK, MEPC, MSTATUS, SATP, SEPC, SSTATUS};
 use crate::cpu::data::Either;
 use crate::cpu::irq::Exception;
 use crate::cpu::{PrivilegeMode, RV64Cpu};
@@ -143,7 +143,11 @@ impl RV64Cpu {
       RV64(FENCE_I(_, _, _)) => (),
       RV32(FENCE_TSO) => (),
       RV32(PAUSE) => panic!("not implemented at PC = {:?}", pc),
-      RV32(ECALL) => panic!("not implemented at PC = {:?}", pc),
+      RV32(ECALL) => return match self.mode {
+        PrivilegeMode::User => Err(Exception::UserEcall),
+        PrivilegeMode::Supervisor => Err(Exception::SupervisorEcall),
+        PrivilegeMode::Machine => Err(Exception::MachineEcall),
+      },
       RV32(MUL(rd, rs1, rs2)) => rd.write(self, (rs1.read(self) as i64).wrapping_mul(rs2.read(self) as i64) as u64),
       RV32(MULH(rd, rs1, rs2)) => {
         let rs1 = rs1.read(self) as i64 as i128;
@@ -358,13 +362,17 @@ impl RV64Cpu {
         let old = self.csrs.read(csr);
         self.csrs.write(csr, rs1.read(self));
         rd.write(self, old);
-        // TODO: update page table when csr is SATP
+        if csr.value() == SATP {
+          self.sync_pagetable();
+        }
       }
       RV64(CSRRS(rd, rs1, csr)) => {
         let old = self.csrs.read(csr);
         self.csrs.write(csr, old | rs1.read(self));
         rd.write(self, old);
-        // TODO: update page table when csr is SATP
+        if csr.value() == SATP {
+          self.sync_pagetable();
+        }
       }
       RV64(CSRRC(_, _, _)) => todo!("csr"),
       RV64(CSRRWI(_, _, _)) => todo!("csr"),
