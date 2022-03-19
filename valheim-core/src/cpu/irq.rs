@@ -28,6 +28,9 @@ pub enum Exception {
   StoreAccessFault(VirtAddr),
   LoadAddressMisaligned(VirtAddr),
   StoreAddressMisaligned(VirtAddr),
+  InstructionPageFault(VirtAddr),
+  LoadPageFault(VirtAddr),
+  StorePageFault(VirtAddr),
   Breakpoint,
 }
 
@@ -178,6 +181,9 @@ impl Exception {
       Exception::LoadAccessFault(addr) => (5, addr.0),
       Exception::StoreAddressMisaligned(addr) => (6, addr.0),
       Exception::StoreAccessFault(addr) => (7, addr.0),
+      Exception::InstructionPageFault(addr) => (12, addr.0),
+      Exception::LoadPageFault(addr) => (13, addr.0),
+      Exception::StorePageFault(addr) => (15, addr.0),
     }
   }
 

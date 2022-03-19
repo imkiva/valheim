@@ -2,6 +2,7 @@ use std::fmt::Debug;
 use std::cell::RefCell;
 use crate::cpu::bus::{RV64_MEMORY_BASE, RV64_MEMORY_SIZE};
 use crate::cpu::irq::Exception;
+use crate::cpu::mmu::VMMode;
 use crate::debug::trace::{Journal, MemTrace, RegTrace, Trace};
 use crate::isa::typed::Reg;
 use crate::memory::{CanIO, VirtAddr};
@@ -12,6 +13,7 @@ pub mod bus;
 pub mod csr;
 pub mod data;
 pub mod irq;
+pub mod mmu;
 
 #[derive(Debug)]
 pub struct RV64Cpu {
@@ -23,6 +25,12 @@ pub struct RV64Cpu {
   pub reserved: Vec<VirtAddr>,
   /// used by wfi instruction
   pub wfi: bool,
+  /// Virtual memory translation mode
+  pub vmmode: VMMode,
+  /// physical page number used in virtual memory translation
+  pub vmppn: u64,
+
+  // used for debugging
   pub journal: Journal,
   pub previous_instr: u64,
 }
@@ -45,6 +53,8 @@ impl RV64Cpu {
       bus: bus::Bus::new().expect("Failed to create Bus"),
       reserved: Vec::new(),
       wfi: false,
+      vmppn: 0,
+      vmmode: VMMode::MBARE,
       journal: Journal {
         init_regs: regs,
         init_mem_base: VirtAddr(RV64_MEMORY_BASE),
@@ -55,20 +65,6 @@ impl RV64Cpu {
       },
       previous_instr: 0,
     }
-  }
-
-  #[inline(always)]
-  pub fn read_mem<T: CanIO + Debug>(&self, addr: VirtAddr) -> Result<T, Exception> {
-    let val = self.bus.read::<T>(addr);
-    self.journal.trace(|| Trace::Mem(MemTrace::Read(addr, std::mem::size_of::<T>(), format!("{:?}", val))));
-    val
-  }
-
-  #[inline(always)]
-  pub fn write_mem<T: CanIO + Debug>(&mut self, addr: VirtAddr, val: T) -> Result<(), Exception> {
-    let res = self.bus.write::<T>(addr, val);
-    self.journal.trace(|| Trace::Mem(MemTrace::Write(addr, std::mem::size_of::<T>(), format!("{:?}", val))));
-    res
   }
 
   #[inline(always)]

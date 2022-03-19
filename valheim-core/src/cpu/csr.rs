@@ -1,4 +1,5 @@
 use crate::cpu::csr::CSRMap::{MEIP_MASK, MSIP_MASK, MTIP_MASK, SEIP_MASK, SSIP_MASK, STIP_MASK};
+use crate::cpu::mmu::{SATP64_MODE_MASK, SATP64_MODE_SHIFT, VM_V20211203_SV64};
 use crate::isa::rv64::CSRAddr;
 
 pub const MXLEN: usize = 64;
@@ -282,6 +283,17 @@ impl CSRRegs {
       SIP => {
         let mask = SSIP_MASK & self.csrs[MIDELEG as usize];
         self.csrs[MIP as usize] = (self.csrs[MIP as usize] & !mask) | (val & mask);
+      }
+      SATP => {
+        // 4.1.11 Supervisor Address Translation and Protection (satp) Register
+        // Implementations are not required to support all MODE settings, and if satp is written
+        // with an unsupported MODE, the entire write has no effect; no fields in satp are modified.
+        let mode = (val & SATP64_MODE_MASK) >> SATP64_MODE_SHIFT;
+        if mode as u8 != VM_V20211203_SV64 {
+          // SV64 is not supported because spec does not say anything about it.
+          self.csrs[SATP as usize] = val;
+          return;
+        }
       }
       addr => self.csrs[addr as usize] = val,
     }

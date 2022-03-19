@@ -41,8 +41,8 @@ pub enum RegTrace {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MemTrace {
-  Read(VirtAddr, usize, String),
-  Write(VirtAddr, usize, String),
+  Read(VirtAddr, VirtAddr, usize, String),
+  Write(VirtAddr, VirtAddr, usize, String),
 }
 
 impl Journal {

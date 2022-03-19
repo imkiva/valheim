@@ -17,7 +17,7 @@ impl RV64Cpu {
   pub fn fetch(&mut self) -> Result<(VirtAddr, Bytecode, Bytecode16), Exception> {
     let pc = self.read_pc();
     let bytecode: Bytecode = self.read_mem(pc)?;
-    let compressed: Bytecode16 = self.read_mem(pc)?;
+    let compressed: Bytecode16 = Bytecode16 { repr: bytecode.repr() as u16 };
     self.journal.trace(|| Trace::Instr(InstrTrace::Fetched(pc, bytecode, compressed)));
     Ok((pc, bytecode, compressed))
   }
@@ -95,7 +95,7 @@ impl RV64Cpu {
         let addr = rs1.read(self).wrapping_add(offset.decode_sext() as u64);
         let val = rs2.read(self) as u8;
         self.write_mem(VirtAddr(addr), val)?
-      },
+      }
       RV32(SH(rs1, rs2, offset)) => self.write_mem(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)), rs2.read(self) as u16)?,
       RV32(SW(rs1, rs2, offset)) => self.write_mem(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)), rs2.read(self) as u32)?,
       RV64(SD(rs1, rs2, offset)) => self.write_mem(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)), rs2.read(self) as u64)?,
@@ -303,7 +303,7 @@ impl RV64Cpu {
         let val = self.read_mem::<u64>(VirtAddr(addr))?;
         rd.write(self, val);
         self.reserved.push(VirtAddr(addr));
-      },
+      }
       RV64(SC_D(rd, rs1, rs2, _, _)) => {
         let addr = rs1.read(self);
         if addr % 8 != 0 {
@@ -477,9 +477,19 @@ impl RV64Cpu {
         // set MPP to User if User is supported, otherwise to Machine
         self.csrs.write_bit(MSTATUS, 11, false);
         self.csrs.write_bit(MSTATUS, 12, false);
-      },
+      }
       RV64(WFI) => panic!("not implemented at PC = {:?}", pc),
+
+      // 4.1.11 Supervisor Address Translation and Protection (satp) Register
+      // The satp register is considered active when the effective privilege mode is S-mode or U-mode.
+      // Executions of the address-translation algorithm may only begin using a given value of satp when satp is active.
+      // Translations that began while satp was active are not required to complete or terminate
+      // when satp is no longer active, unless an SFENCE.VMA instruction matching the address and
+      // ASID is executed. The SFENCE.VMA instruction must be used to ensure that updates
+      // to the address-translation data structures are observed by subsequent implicit reads
+      // to those structures by a hart.
       RV64(SFENCE_VMA(_, _)) => (),
+
       RV64(SINVAL_VMA(_, _)) => panic!("not implemented at PC = {:?}", pc),
       RV64(SFENCE_W_INVAL) => panic!("not implemented at PC = {:?}", pc),
       RV64(SFENCE_INVAL_IR) => panic!("not implemented at PC = {:?}", pc),
