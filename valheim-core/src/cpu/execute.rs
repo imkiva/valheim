@@ -1,4 +1,4 @@
-use crate::cpu::csr::CSRMap::{FCSR, FCSR_DZ_MASK, MEPC, MSTATUS};
+use crate::cpu::csr::CSRMap::{FCSR, FCSR_DZ_MASK, MEPC, MSTATUS, SEPC, SSTATUS};
 use crate::cpu::data::Either;
 use crate::cpu::irq::Exception;
 use crate::cpu::{PrivilegeMode, RV64Cpu};
@@ -435,7 +435,25 @@ impl RV64Cpu {
       RV64(FMV_D_X(_, _)) => panic!("not implemented at PC = {:?}", pc),
 
       // Privileged
-      RV64(SRET) => panic!("not implemented at PC = {:?}", pc),
+      RV64(SRET) => {
+        let sepc = self.csrs.read_unchecked(SEPC);
+        let spie = self.csrs.read_bit(SSTATUS, 5);
+        let spp = match self.csrs.read_bit(SSTATUS, 8) {
+          false => PrivilegeMode::User,
+          true => PrivilegeMode::Supervisor,
+        };
+
+        // set pc to MEPC
+        next_pc = VirtAddr(sepc);
+        // set cpu privilege mode to MPP
+        self.mode = spp;
+        // set SIE = SPIE
+        self.csrs.write_bit(SSTATUS, 1, spie);
+        // set SPIE to 1
+        self.csrs.write_bit(SSTATUS, 5, true);
+        // set SPP to User if User is supported, otherwise to Machine
+        self.csrs.write_bit(SSTATUS, 8, false);
+      }
       RV64(MRET) => {
         let mepc = self.csrs.read_unchecked(MEPC);
         let mpie = self.csrs.read_bit(MSTATUS, 7);
