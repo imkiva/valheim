@@ -253,6 +253,7 @@ impl CSRRegs {
       MIDELEG => {
         // Some interrupts cannot be delegated to S-mode like Machine Timer Interrupt, etc.
         // https://github.com/qemu/qemu/blob/1d60bb4b14601e38ed17384277aa4c30c57925d3/target/riscv/csr.c#L828
+        // https://github.com/riscv/riscv-isa-manual/issues/7
         let mask = DELEGABLE_INTERRUPTS;
         let mideleg = self.csrs[MIDELEG as usize];
         let mideleg = (mideleg & !mask) | (val & mask);
