@@ -1,3 +1,4 @@
+use crate::cpu::csr::CSRMap::{MEIP_MASK, MSIP_MASK, MTIP_MASK, SEIP_MASK, SSIP_MASK, STIP_MASK};
 use crate::isa::rv64::CSRAddr;
 
 pub const MXLEN: usize = 64;
@@ -13,6 +14,12 @@ pub const VALHEIM_MISA: u64 = (2 << 62) // MXL[1:0]=2 (XLEN is 64)
   | (1 << 3)  // Extensions[3]  (D extension)
   | (1 << 2)  // Extensions[2]  (C extension)
 ;
+
+// WARL (Write Any Read Legal) restrictions on CSRs
+// https://github.com/qemu/qemu/blob/master/target/riscv/csr.c
+const M_MODE_INTERRUPTS: u64 = MSIP_MASK | MTIP_MASK | MEIP_MASK;
+const S_MODE_INTERRUPTS: u64 = SSIP_MASK | STIP_MASK | SEIP_MASK;
+const DELEGABLE_INTERRUPTS: u64 = S_MODE_INTERRUPTS;
 
 #[allow(non_snake_case)]
 #[allow(non_upper_case_globals)]
@@ -226,6 +233,10 @@ impl CSRRegs {
       // The sip and sie registers are subsets of the mip and mie registers.
       // Reading any implemented field, or writing any writable field, of sip/sie
       // effects a read or write of the homonymous field of mip/mie.
+      // 3.1.9 Machine Interrupt Registers (mip and mie)
+      // If an interrupt is delegated to S-mode by setting a bit in the mideleg register,
+      // it becomes visible in the sip register and is maskable using the sie register.
+      // Otherwise, the corresponding bits in sip and sie are read-only zero.
       SIE => self.csrs[MIE as usize] & self.csrs[MIDELEG as usize],
       SIP => self.csrs[MIP as usize] & self.csrs[MIDELEG as usize],
       addr => self.csrs[addr as usize],
@@ -239,6 +250,14 @@ impl CSRRegs {
       MARCHID => {}
       MIMPID => {}
       MHARTID => {}
+      MIDELEG => {
+        // Some interrupts cannot be delegated to S-mode like Machine Timer Interrupt, etc.
+        // https://github.com/qemu/qemu/blob/1d60bb4b14601e38ed17384277aa4c30c57925d3/target/riscv/csr.c#L828
+        let mask = DELEGABLE_INTERRUPTS;
+        let mideleg = self.csrs[MIDELEG as usize];
+        let mideleg = (mideleg & !mask) | (val & mask);
+        self.csrs[MIDELEG as usize] = mideleg;
+      }
       // 4.1.1 Supervisor Status Register (sstatus)
       // The sstatus register is a subset of the mstatus register.
       // In a straightforward implementation, reading or writing any field in sstatus
@@ -251,6 +270,10 @@ impl CSRRegs {
       // The sip and sie registers are subsets of the mip and mie registers.
       // Reading any implemented field, or writing any writable field, of sip/sie
       // effects a read or write of the homonymous field of mip/mie.
+      // 3.1.9 Machine Interrupt Registers (mip and mie)
+      // If an interrupt is delegated to S-mode by setting a bit in the mideleg register,
+      // it becomes visible in the sip register and is maskable using the sie register.
+      // Otherwise, the corresponding bits in sip and sie are read-only zero.
       SIE => {
         self.csrs[MIE as usize] = (self.csrs[MIE as usize] & !self.csrs[MIDELEG as usize])
           | (val & self.csrs[MIDELEG as usize]);
