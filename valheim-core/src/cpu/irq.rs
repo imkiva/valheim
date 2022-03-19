@@ -1,5 +1,6 @@
 use crate::cpu::{PrivilegeMode, RV64Cpu};
 use crate::cpu::csr::CSRMap::{MCAUSE, MEDELEG, MEIP_MASK, MEPC, MIDELEG, MIE, MIP, MSIP_MASK, MSTATUS, MTIP_MASK, MTVAL, MTVEC, SCAUSE, SEIP_MASK, SEPC, SIE, SIP, SSIP_MASK, SSTATUS, STIP_MASK, STVAL, STVEC};
+use crate::device::virtio::Virtio;
 use crate::isa::compressed::untyped::Bytecode16;
 use crate::isa::untyped::Bytecode;
 use crate::memory::VirtAddr;
@@ -72,17 +73,36 @@ impl RV64Cpu {
 
     // In our implementation, external devices is only UART, currently. We may support
     // VirtIO disks, which is also a external devices.
-    for dev in self.bus.devices.iter() {
-      if let Some(irq_id) = dev.is_interrupting() {
-        // tell PLIC that we have an external irq
-        self.bus.plic.update_pending(irq_id);
-        // 3.1.9 Machine Interrupt Registers (mip and mie)
-        // SEIP is writable in mip, and may be written by M-mode software to
-        // indicate to S-mode that an external interrupt is pending. Additionally,
-        // the platform-level interrupt controller may generate supervisor-level external interrupts.
-        self.csrs.write_unchecked(MIP, self.csrs.read_unchecked(MIP) | SEIP_MASK);
-        break;
+
+    // check builtin virtio disk
+    let external_irq = match self.bus.virtio.pending_interrupt() {
+      Some(virtio_irq) => {
+        // TODO: replace with our own DMA implementation
+        // TODO: exception handling
+        Virtio::disk_access(self).expect("failed to access the disk");
+        Some(virtio_irq)
+      },
+      _ => {
+        let mut irq = None;
+        // check other external devices like UART
+        for dev in self.bus.devices.iter() {
+          if let Some(irq_id) = dev.is_interrupting() {
+            irq = Some(irq_id);
+            break;
+          }
+        }
+        irq
       }
+    };
+
+    if let Some(irq_id) = external_irq {
+      // tell PLIC that we have an external irq
+      self.bus.plic.update_pending(irq_id);
+      // 3.1.9 Machine Interrupt Registers (mip and mie)
+      // SEIP is writable in mip, and may be written by M-mode software to
+      // indicate to S-mode that an external interrupt is pending. Additionally,
+      // the platform-level interrupt controller may generate supervisor-level external interrupts.
+      self.csrs.write_unchecked(MIP, self.csrs.read_unchecked(MIP) | SEIP_MASK);
     }
 
     // 3.1.9 Machine Interrupt Registers (mip and mie)

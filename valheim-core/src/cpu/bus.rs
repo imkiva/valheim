@@ -5,6 +5,7 @@ use crate::cpu::irq::Exception;
 use crate::device::clint::Clint;
 use crate::device::Device;
 use crate::device::plic::Plic;
+use crate::device::virtio::Virtio;
 use crate::memory::{CanIO, Memory, VirtAddr};
 
 pub const RV64_MEMORY_BASE: u64 = 0x80000000;
@@ -23,6 +24,11 @@ pub const PLIC_BASE: u64 = 0xc00_0000;
 pub const PLIC_SIZE: u64 = 0x208000;
 pub const PLIC_END: u64 = PLIC_BASE + PLIC_SIZE;
 
+/// The address which virtio starts.
+pub const VIRTIO_BASE: u64 = 0x1000_1000;
+pub const VIRTIO_SIZE: u64 = 0x1000;
+pub const VIRTIO_END: u64 = VIRTIO_BASE + VIRTIO_SIZE;
+
 /// System Bus, which handles DRAM access and memory-mapped IO.
 /// https://github.com/qemu/qemu/blob/master/hw/riscv/virt.c
 /// Builtin IO maps:
@@ -38,6 +44,7 @@ pub struct Bus {
   pub virt_mrom: Memory,
   pub clint: Clint,
   pub plic: Plic,
+  pub virtio: Virtio,
 }
 
 impl Debug for Bus {
@@ -60,6 +67,7 @@ impl Bus {
       virt_mrom: Memory::new(VIRT_MROM_BASE, VIRT_MROM_SIZE as usize)?,
       clint: Clint::new(),
       plic: Plic::new(),
+      virtio: Virtio::new(),
     };
     Ok(bus)
   }
