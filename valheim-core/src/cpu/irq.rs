@@ -330,7 +330,14 @@ pub fn trap_entry(mcause: u64, mtval: u64, is_interrupt: bool, cpu: &mut RV64Cpu
       match previous_mode {
         PrivilegeMode::User => cpu.csrs.write_bit(SSTATUS, 8, false),
         PrivilegeMode::Supervisor => cpu.csrs.write_bit(SSTATUS, 8, true),
-        PrivilegeMode::Machine => panic!("Machine traps cannot be handled in supervisor mode"),
+        PrivilegeMode::Machine => panic!(
+          "Machine trap (int={}, mcause={}, mtval={}, mpp={:?}, mepc={:#x}) cannot be handled in supervisor mode",
+          is_interrupt,
+          interrupt_bit << 63 | mcause,
+          mtval,
+          previous_mode,
+          previous_pc,
+        ),
       }
 
       Ok(())
