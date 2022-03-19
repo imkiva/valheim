@@ -51,6 +51,7 @@ impl Machine {
 
     if let Some(irq) = self.cpu.pending_interrupt() {
       // TODO: can IRQ fail to handle?
+      println!("[Valheim] Interrupt raised: {:?}", irq);
       let _ = irq.handle(&mut self.cpu);
     }
 

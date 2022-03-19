@@ -98,8 +98,9 @@ impl Bus {
       PLIC_BASE..=PLIC_END => {
         assert_eq!(std::mem::size_of::<T>(), 4);
         let val = self.plic.read(addr)?;
-        Ok(unsafe { *std::mem::transmute::<*const u32, *const T>(&val as *const u32) })
+        Ok(Bus::safe_reinterpret_as_T(val as u64))
       },
+      VIRTIO_BASE..=VIRTIO_END => Ok(Bus::safe_reinterpret_as_T(self.virtio.read::<T>(addr)? as u64)),
 
       _ => match self.select_device_for_read(addr) {
         Some(dev) => match std::mem::size_of::<T>() {
@@ -122,9 +123,10 @@ impl Bus {
       CLINT_BASE..=CLINT_END => self.clint.write::<T>(addr, Bus::safe_reinterpret_as_u64(val)),
       PLIC_BASE..=PLIC_END => {
         assert_eq!(std::mem::size_of::<T>(), 4);
-        let val = unsafe { *std::mem::transmute::<*const T, *const u32>(&val as *const T) };
+        let val = Bus::safe_reinterpret_as_u64(val) as u32;
         self.plic.write(addr, val)
       },
+      VIRTIO_BASE..=VIRTIO_END => self.virtio.write::<T>(addr, Bus::safe_reinterpret_as_u64(val) as u32),
 
       _ => match self.select_device_for_write(addr) {
         Some(dev) => match std::mem::size_of::<T>() {
