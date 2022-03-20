@@ -1,8 +1,6 @@
 use crate::cpu::{PrivilegeMode, RV64Cpu};
 use crate::cpu::csr::CSRMap::{MCAUSE, MEDELEG, MEIP_MASK, MEPC, MIDELEG, MIE, MIP, MSIP_MASK, MSTATUS, MTIP_MASK, MTVAL, MTVEC, SCAUSE, SEIP_MASK, SEPC, SIE, SIP, SSIP_MASK, SSTATUS, STIP_MASK, STVAL, STVEC};
 use crate::device::virtio::Virtio;
-use crate::isa::compressed::untyped::Bytecode16;
-use crate::isa::untyped::Bytecode;
 use crate::memory::VirtAddr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

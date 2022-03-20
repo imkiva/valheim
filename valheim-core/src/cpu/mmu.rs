@@ -169,7 +169,6 @@ impl RV64Cpu {
     res
   }
 
-  /// Update the physical page number (PPN) and the addressing mode.
   pub fn sync_pagetable(&mut self) {
     let satp = self.csrs.read_unchecked(SATP);
     let ppn = (satp & SATP64_PPN_MASK) >> SATP64_PPN_SHIFT;
@@ -187,7 +186,6 @@ impl RV64Cpu {
     }
   }
 
-  /// Translate a virtual address to a physical address for the paged virtual-memory system.
   fn translate(&self, addr: VirtAddr, reason: Reason) -> Result<VirtAddr, Exception> {
     if self.vmmode == VMMode::MBARE || self.mode == PrivilegeMode::Machine {
       return Ok(addr);
