@@ -362,22 +362,37 @@ impl RV64Cpu {
         let old = self.csrs.read(csr);
         self.csrs.write(csr, rs1.read(self))?;
         rd.write(self, old);
-        if csr.value() == SATP {
-          self.sync_pagetable();
-        }
+        if csr.value() == SATP { self.sync_pagetable(); }
       }
       RV64(CSRRS(rd, rs1, csr)) => {
         let old = self.csrs.read(csr);
         self.csrs.write(csr, old | rs1.read(self))?;
         rd.write(self, old);
-        if csr.value() == SATP {
-          self.sync_pagetable();
-        }
+        if csr.value() == SATP { self.sync_pagetable(); }
       }
-      RV64(CSRRC(_, _, _)) => todo!("csr"),
-      RV64(CSRRWI(_, _, _)) => todo!("csr"),
-      RV64(CSRRSI(_, _, _)) => todo!("csr"),
-      RV64(CSRRCI(_, _, _)) => todo!("csr"),
+      RV64(CSRRC(rd, rs1, csr)) => {
+        let old = self.csrs.read(csr);
+        self.csrs.write(csr, old & (!rs1.read(self)))?;
+        rd.write(self, old);
+        if csr.value() == SATP { self.sync_pagetable(); }
+      }
+      RV64(CSRRWI(rd, imm, csr)) => {
+        rd.write(self, self.csrs.read(csr));
+        self.csrs.write(csr, imm.value() as u64)?;
+        if csr.value() == SATP { self.sync_pagetable(); }
+      }
+      RV64(CSRRSI(rd, imm, csr)) => {
+        let old = self.csrs.read(csr);
+        self.csrs.write(csr, old | imm.value() as u64)?;
+        rd.write(self, old);
+        if csr.value() == SATP { self.sync_pagetable(); }
+      }
+      RV64(CSRRCI(rd, imm, csr)) => {
+        let old = self.csrs.read(csr);
+        self.csrs.write(csr, old & (!imm.value() as u64))?;
+        rd.write(self, old);
+        if csr.value() == SATP { self.sync_pagetable(); }
+      }
 
       RV32(FLW(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
       RV32(FSW(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
