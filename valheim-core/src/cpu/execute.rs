@@ -332,7 +332,15 @@ impl RV64Cpu {
         self.write_mem::<u32>(VirtAddr(addr), rs2.read(self) as u32)?;
         rd.write(self, val as i32 as i64 as u64)
       }
-      RV32(AMOADD_W(_, _, _, _, _)) => panic!("not implemented at PC = {:?}", pc),
+      RV32(AMOADD_W(rd, rs1, rs2, _, _)) => {
+        let addr = VirtAddr(rs1.read(self));
+        if addr.0 % 4 != 0 {
+          return Err(Exception::LoadAddressMisaligned(addr));
+        }
+        let val = self.read_mem::<u32>(addr)?;
+        self.write_mem::<u32>(addr, val.wrapping_add(rs2.read(self) as u32))?;
+        rd.write(self, val as i32 as i64 as u64)
+      }
       RV32(AMOXOR_W(_, _, _, _, _)) => panic!("not implemented at PC = {:?}", pc),
       RV32(AMOAND_W(_, _, _, _, _)) => panic!("not implemented at PC = {:?}", pc),
       RV32(AMOOR_W(_, _, _, _, _)) => panic!("not implemented at PC = {:?}", pc),
@@ -501,7 +509,7 @@ impl RV64Cpu {
         let _ = self.csrs.write_bit(MSTATUS, 11, false);
         let _ = self.csrs.write_bit(MSTATUS, 12, false);
       }
-      RV64(WFI) => panic!("not implemented at PC = {:?}", pc),
+      RV64(WFI) => self.wfi = true,
 
       // 4.1.11 Supervisor Address Translation and Protection (satp) Register
       // The satp register is considered active when the effective privilege mode is S-mode or U-mode.

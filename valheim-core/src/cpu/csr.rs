@@ -207,7 +207,6 @@ pub mod CSRMap {
   pub const MEIE_MASK: u64 = 1 << 11;
 }
 
-/// The state to contains all the CSRs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CSRRegs {
   pub csrs: [u64; CSR_MAX],
