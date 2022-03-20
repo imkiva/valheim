@@ -206,6 +206,11 @@ pub fn trap_entry(mcause: u64, mtval: u64, is_interrupt: bool, cpu: &mut RV64Cpu
   let previous_pc = cpu.regs.pc.0;
   let previous_mode = cpu.mode;
 
+  // 3.1.8 Machine Trap Delegation Registers (medeleg and mideleg)
+  // In systems with S-mode, the medeleg and mideleg registers must exist,
+  // and setting a bit in medeleg or mideleg will delegate the corresponding trap,
+  // when occurring in S-mode or U-mode, to the S-mode trap handler.
+
   // 3.1.9 Machine Interrupt Registers (mip and mie)
   // An interrupt i will trap to M-mode (causing the privilege mode to change to M-mode) if all of the following are true:
   // (a) either the current privilege mode is M and the MIE bit in the mstatus register is set,
@@ -225,12 +230,16 @@ pub fn trap_entry(mcause: u64, mtval: u64, is_interrupt: bool, cpu: &mut RV64Cpu
   // (b) the bit i in (mip & mie) or (sip & sie)
 
   // we only need to check: (c) bit i is not set in mideleg/medeleg.
+  // note: according to 3.1.8, only interrupts/exceptions that occurred
+  // not in M-mode can be delegated.
+
+  let occurred_in_machine = previous_mode == PrivilegeMode::Machine;
   let not_delegated = match is_interrupt {
     true => ((cpu.csrs.read_unchecked(MIDELEG) >> mcause) & 1) == 0,
     false => ((cpu.csrs.read_unchecked(MEDELEG) >> mcause) & 1) == 0,
   };
 
-  let trap_to_machine = previous_mode <= PrivilegeMode::Machine && not_delegated;
+  let trap_to_machine = occurred_in_machine || (previous_mode <= PrivilegeMode::Machine && not_delegated);
 
   match trap_to_machine {
     true => {
