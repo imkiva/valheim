@@ -21,3 +21,12 @@ cargo run --release -- --kernel xv6/kernel.bin --disk xv6/fs.img
 ```
 
 ![xv6-booting](./pictures/xv6-booting.png)
+
+#### Running [RustSBI-QEMU with its test kernel](https://github.com/rustsbi/rustsbi-qemu)
+With the following command:
+```shell
+cargo run --release -- --kernel tests/test-kernel.bin --bios tests/rustsbi-qemu.bin
+```
+
+![rustsbi-booting](./pictures/rustsbi-booting.jpg)
+
