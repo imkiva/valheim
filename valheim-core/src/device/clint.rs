@@ -58,15 +58,15 @@ impl Clint {
     // together with the enable bit.
 
     if (self.msip & 1) != 0 {
-      csrs.write_unchecked(MIP, csrs.read_unchecked(MIP) | MSIP_MASK);
+      let _ = csrs.write_unchecked(MIP, csrs.read_unchecked(MIP) | MSIP_MASK);
     }
 
     if self.mtime >= self.mtimecmp {
       // take the interrupt
-      csrs.write_unchecked(MIP, csrs.read_unchecked(MIP) | MTIP_MASK);
+      let _ = csrs.write_unchecked(MIP, csrs.read_unchecked(MIP) | MTIP_MASK);
     } else {
       // clear the interrupt
-      csrs.write_unchecked(MIP, csrs.read_unchecked(MIP) & !MTIP_MASK);
+      let _ = csrs.write_unchecked(MIP, csrs.read_unchecked(MIP) & !MTIP_MASK);
     }
   }
 

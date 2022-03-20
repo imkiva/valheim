@@ -32,7 +32,7 @@ impl RV64Cpu {
         Instr::try_from(untyped).map(|instr| {
           self.journal.trace(|| Trace::Instr(InstrTrace::Decoded(pc, untyped, instr)));
           (Either::Left(untyped), instr)
-        }).ok_or(Exception::IllegalInstruction(pc, untyped, compressed))
+        }).ok_or(Exception::IllegalInstruction)
       }
     }
   }
@@ -174,7 +174,7 @@ impl RV64Cpu {
         let dividend = rs1.read(self) as i64;
         let divisor = rs2.read(self) as i64;
         let val = if divisor == 0 {
-          self.csrs.write_unchecked(FCSR, self.csrs.read_unchecked(FCSR) | FCSR_DZ_MASK);
+          let _ = self.csrs.write_unchecked(FCSR, self.csrs.read_unchecked(FCSR) | FCSR_DZ_MASK);
           u64::MAX
         } else if dividend == i64::MIN && divisor == -1 {
           dividend as u64
@@ -187,7 +187,7 @@ impl RV64Cpu {
         let dividend = rs1.read(self);
         let divisor = rs2.read(self);
         let val = if divisor == 0 {
-          self.csrs.write_unchecked(FCSR, self.csrs.read_unchecked(FCSR) | FCSR_DZ_MASK);
+          let _ = self.csrs.write_unchecked(FCSR, self.csrs.read_unchecked(FCSR) | FCSR_DZ_MASK);
           u64::MAX
         } else {
           dividend.wrapping_div(divisor)
@@ -226,7 +226,7 @@ impl RV64Cpu {
         let dividend = rs1.read(self) as i32;
         let divisor = rs2.read(self) as i32;
         let val = if divisor == 0 {
-          self.csrs.write_unchecked(FCSR, self.csrs.read_unchecked(FCSR) | FCSR_DZ_MASK);
+          let _ = self.csrs.write_unchecked(FCSR, self.csrs.read_unchecked(FCSR) | FCSR_DZ_MASK);
           u64::MAX
         } else if dividend == i32::MIN && divisor == -1 {
           dividend as i64 as u64
@@ -239,7 +239,7 @@ impl RV64Cpu {
         let dividend = rs1.read(self) as u32;
         let divisor = rs2.read(self) as u32;
         let val = if divisor == 0 {
-          self.csrs.write_unchecked(FCSR, self.csrs.read_unchecked(FCSR) | FCSR_DZ_MASK);
+          let _ = self.csrs.write_unchecked(FCSR, self.csrs.read_unchecked(FCSR) | FCSR_DZ_MASK);
           u64::MAX
         } else {
           dividend.wrapping_div(divisor) as i32 as i64 as u64
@@ -360,7 +360,7 @@ impl RV64Cpu {
 
       RV64(CSRRW(rd, rs1, csr)) => {
         let old = self.csrs.read(csr);
-        self.csrs.write(csr, rs1.read(self));
+        self.csrs.write(csr, rs1.read(self))?;
         rd.write(self, old);
         if csr.value() == SATP {
           self.sync_pagetable();
@@ -368,7 +368,7 @@ impl RV64Cpu {
       }
       RV64(CSRRS(rd, rs1, csr)) => {
         let old = self.csrs.read(csr);
-        self.csrs.write(csr, old | rs1.read(self));
+        self.csrs.write(csr, old | rs1.read(self))?;
         rd.write(self, old);
         if csr.value() == SATP {
           self.sync_pagetable();
@@ -456,11 +456,11 @@ impl RV64Cpu {
         // set cpu privilege mode to MPP
         self.mode = spp;
         // set SIE = SPIE
-        self.csrs.write_bit(SSTATUS, 1, spie);
+        let _ = self.csrs.write_bit(SSTATUS, 1, spie);
         // set SPIE to 1
-        self.csrs.write_bit(SSTATUS, 5, true);
+        let _ = self.csrs.write_bit(SSTATUS, 5, true);
         // set SPP to User if User is supported, otherwise to Machine
-        self.csrs.write_bit(SSTATUS, 8, false);
+        let _ = self.csrs.write_bit(SSTATUS, 8, false);
       }
       RV64(MRET) => {
         let mepc = self.csrs.read_unchecked(MEPC);
@@ -479,12 +479,12 @@ impl RV64Cpu {
         // set cpu privilege mode to MPP
         self.mode = mpp;
         // set MIE = MPIE
-        self.csrs.write_bit(MSTATUS, 3, mpie);
+        let _ = self.csrs.write_bit(MSTATUS, 3, mpie);
         // set MPIE to 1
-        self.csrs.write_bit(MSTATUS, 7, true);
+        let _ = self.csrs.write_bit(MSTATUS, 7, true);
         // set MPP to User if User is supported, otherwise to Machine
-        self.csrs.write_bit(MSTATUS, 11, false);
-        self.csrs.write_bit(MSTATUS, 12, false);
+        let _ = self.csrs.write_bit(MSTATUS, 11, false);
+        let _ = self.csrs.write_bit(MSTATUS, 12, false);
       }
       RV64(WFI) => panic!("not implemented at PC = {:?}", pc),
 

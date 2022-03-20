@@ -23,7 +23,7 @@ pub enum IRQ {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Exception {
-  IllegalInstruction(VirtAddr, Bytecode, Bytecode16),
+  IllegalInstruction,
   LoadAccessFault(VirtAddr),
   StoreAccessFault(VirtAddr),
   LoadAddressMisaligned(VirtAddr),
@@ -87,7 +87,7 @@ impl RV64Cpu {
         // TODO: exception handling
         Virtio::disk_access(self).expect("failed to access the disk");
         Some(virtio_irq)
-      },
+      }
       _ => {
         let mut irq = None;
         // check other external devices like UART
@@ -108,7 +108,7 @@ impl RV64Cpu {
       // SEIP is writable in mip, and may be written by M-mode software to
       // indicate to S-mode that an external interrupt is pending. Additionally,
       // the platform-level interrupt controller may generate supervisor-level external interrupts.
-      self.csrs.write_unchecked(MIP, self.csrs.read_unchecked(MIP) | SEIP_MASK);
+      let _ = self.csrs.write_unchecked(MIP, self.csrs.read_unchecked(MIP) | SEIP_MASK);
     }
 
     // 3.1.9 Machine Interrupt Registers (mip and mie)
@@ -124,32 +124,32 @@ impl RV64Cpu {
     }
 
     if (mip & MEIP_MASK) != 0 {
-      self.csrs.write_unchecked(MIP, self.csrs.read_unchecked(MIP) & !MEIP_MASK);
+      let _ = self.csrs.write_unchecked(MIP, self.csrs.read_unchecked(MIP) & !MEIP_MASK);
       return Some(IRQ::MEI);
     }
 
     if (mip & MSIP_MASK) != 0 {
-      self.csrs.write_unchecked(MIP, self.csrs.read_unchecked(MIP) & !MSIP_MASK);
+      let _ = self.csrs.write_unchecked(MIP, self.csrs.read_unchecked(MIP) & !MSIP_MASK);
       return Some(IRQ::MSI);
     }
 
     if (mip & MTIP_MASK) != 0 {
-      self.csrs.write_unchecked(MIP, self.csrs.read_unchecked(MIP) & !MTIP_MASK);
+      let _ = self.csrs.write_unchecked(MIP, self.csrs.read_unchecked(MIP) & !MTIP_MASK);
       return Some(IRQ::MTI);
     }
 
     if (mip & SEIP_MASK) != 0 {
-      self.csrs.write_unchecked(MIP, self.csrs.read_unchecked(MIP) & !SEIP_MASK);
+      let _ = self.csrs.write_unchecked(MIP, self.csrs.read_unchecked(MIP) & !SEIP_MASK);
       return Some(IRQ::SEI);
     }
 
     if (mip & SSIP_MASK) != 0 {
-      self.csrs.write_unchecked(MIP, self.csrs.read_unchecked(MIP) & !SSIP_MASK);
+      let _ = self.csrs.write_unchecked(MIP, self.csrs.read_unchecked(MIP) & !SSIP_MASK);
       return Some(IRQ::SSI);
     }
 
     if (mip & STIP_MASK) != 0 {
-      self.csrs.write_unchecked(MIP, self.csrs.read_unchecked(MIP) & !STIP_MASK);
+      let _ = self.csrs.write_unchecked(MIP, self.csrs.read_unchecked(MIP) & !STIP_MASK);
       return Some(IRQ::STI);
     }
 
@@ -176,9 +176,9 @@ impl IRQ {
 }
 
 impl Exception {
-  pub fn mcause_mtval(&self) -> (u64, u64) {
+  pub fn mcause_mtval(&self, cpu: &RV64Cpu) -> (u64, u64) {
     match self {
-      Exception::IllegalInstruction(_, b, _) => (2, b.repr() as u64),
+      Exception::IllegalInstruction => (2, cpu.previous_instr),
       Exception::Breakpoint => (3, 0),
       Exception::LoadAddressMisaligned(addr) => (4, addr.0),
       Exception::LoadAccessFault(addr) => (5, addr.0),
@@ -194,7 +194,7 @@ impl Exception {
   }
 
   pub fn handle(&self, cpu: &mut RV64Cpu) -> Result<(), ()> {
-    let (mcause, mtval) = self.mcause_mtval();
+    let (mcause, mtval) = self.mcause_mtval(cpu);
     trap_entry(mcause, mtval, false, cpu)
   }
 }
@@ -267,7 +267,7 @@ pub fn trap_entry(mcause: u64, mtval: u64, is_interrupt: bool, cpu: &mut RV64Cpu
       // that was interrupted or that encountered the exception. Otherwise, mepc is never written
       // by the implementation, though it may be explicitly written by software.
       // The low bit of mepc (mepc[0]) is always zero.
-      cpu.csrs.write_unchecked(MEPC, previous_pc & !1);
+      let _ = cpu.csrs.write_unchecked(MEPC, previous_pc & !1);
 
       // 3.1.15 Machine Cause Register (mcause)
       // When a trap is taken into M-mode, mcause is written with a code indicating the event
@@ -276,36 +276,36 @@ pub fn trap_entry(mcause: u64, mtval: u64, is_interrupt: bool, cpu: &mut RV64Cpu
       // The Interrupt bit (mcause[63]) in the mcause register is set if the trap was caused by an interrupt.
       // The Exception Code field(mcause[0:62]) contains a code identifying the last exception or interrupt.
       let interrupt_bit = is_interrupt as u64;
-      cpu.csrs.write_unchecked(MCAUSE, interrupt_bit << 63 | mcause);
+      let _ = cpu.csrs.write_unchecked(MCAUSE, interrupt_bit << 63 | mcause);
 
       // 3.1.16 Machine Trap Value Register (mtval)
       // When a trap is taken into M-mode, mtval is either set to zero or written with exception-specific information
       // to assist software in handling the trap. Otherwise, mtval is never written by the implementation,
       // though it may be explicitly written by software.
-      cpu.csrs.write_unchecked(MTVAL, mtval);
+      let _ = cpu.csrs.write_unchecked(MTVAL, mtval);
 
       // set MPIE to MIE
       let mie = cpu.csrs.is_machine_irq_enabled_globally();
-      cpu.csrs.write_bit(MSTATUS, 7, mie);
+      let _ = cpu.csrs.write_bit(MSTATUS, 7, mie);
       // set MIE to 0 to disable interrupts
-      cpu.csrs.write_bit(MSTATUS, 3, false);
+      let _ = cpu.csrs.write_bit(MSTATUS, 3, false);
 
       // set MPP to previous privileged mode
       match previous_mode {
         PrivilegeMode::User => {
           // mstatus[12:11] = 0b00
-          cpu.csrs.write_bit(MSTATUS, 11, false);
-          cpu.csrs.write_bit(MSTATUS, 12, false);
+          let _ = cpu.csrs.write_bit(MSTATUS, 11, false);
+          let _ = cpu.csrs.write_bit(MSTATUS, 12, false);
         }
         PrivilegeMode::Supervisor => {
           // mstatus[12:11] = 0b01
-          cpu.csrs.write_bit(MSTATUS, 11, true);
-          cpu.csrs.write_bit(MSTATUS, 12, false);
+          let _ = cpu.csrs.write_bit(MSTATUS, 11, true);
+          let _ = cpu.csrs.write_bit(MSTATUS, 12, false);
         }
         PrivilegeMode::Machine => {
           // mstatus[12:11] = 0b11
-          cpu.csrs.write_bit(MSTATUS, 11, true);
-          cpu.csrs.write_bit(MSTATUS, 12, true);
+          let _ = cpu.csrs.write_bit(MSTATUS, 11, true);
+          let _ = cpu.csrs.write_bit(MSTATUS, 12, true);
         }
       }
 
@@ -324,19 +324,19 @@ pub fn trap_entry(mcause: u64, mtval: u64, is_interrupt: bool, cpu: &mut RV64Cpu
       };
 
       cpu.regs.pc.0 = ((cpu.csrs.read_unchecked(STVEC) & (!0b11)) + offset) as u64;
-      cpu.csrs.write_unchecked(SEPC, previous_pc & !1);
+      let _ = cpu.csrs.write_unchecked(SEPC, previous_pc & !1);
       let interrupt_bit = is_interrupt as u64;
-      cpu.csrs.write_unchecked(SCAUSE, interrupt_bit << 63 | mcause);
-      cpu.csrs.write_unchecked(STVAL, mtval);
+      let _ = cpu.csrs.write_unchecked(SCAUSE, interrupt_bit << 63 | mcause);
+      let _ = cpu.csrs.write_unchecked(STVAL, mtval);
 
       // set SPIE to SIE
       let sie = cpu.csrs.is_supervisor_irq_enabled_globally();
-      cpu.csrs.write_bit(SSTATUS, 5, sie);
+      let _ = cpu.csrs.write_bit(SSTATUS, 5, sie);
       // set SIE to 0 to disable interrupts
-      cpu.csrs.write_bit(SSTATUS, 1, false);
+      let _ = cpu.csrs.write_bit(SSTATUS, 1, false);
 
       // set SPP to previous privileged mode
-      match previous_mode {
+      let _ = match previous_mode {
         PrivilegeMode::User => cpu.csrs.write_bit(SSTATUS, 8, false),
         PrivilegeMode::Supervisor => cpu.csrs.write_bit(SSTATUS, 8, true),
         PrivilegeMode::Machine => panic!(
@@ -347,7 +347,7 @@ pub fn trap_entry(mcause: u64, mtval: u64, is_interrupt: bool, cpu: &mut RV64Cpu
           previous_mode,
           previous_pc,
         ),
-      }
+      };
 
       Ok(())
     }

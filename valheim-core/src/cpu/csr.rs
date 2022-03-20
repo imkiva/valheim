@@ -1,4 +1,5 @@
 use crate::cpu::csr::CSRMap::{MEIP_MASK, MSIP_MASK, MTIP_MASK, SEIP_MASK, SSIP_MASK, STIP_MASK};
+use crate::cpu::irq::Exception;
 use crate::cpu::mmu::{SATP64_MODE_MASK, SATP64_MODE_SHIFT, VM_V20211203_SV64};
 use crate::isa::rv64::CSRAddr;
 
@@ -172,6 +173,11 @@ pub mod CSRMap {
   /// Physical memory protection address register. from PMPADDR1 to PMPADDR63
   pub const PMPADDR0: u16 = 0x3b0;
 
+  // Machine Counter/Timers
+
+  /// Machine cycle counter
+  pub const MCYCLE: u16 = 0xb00;
+
   // Standard portion of mip
   /// Supervisor software interrupt.
   pub const SSIP_MASK: u64 = 1 << 1;
@@ -218,8 +224,8 @@ impl CSRRegs {
     self.read_unchecked(addr.value())
   }
 
-  pub fn write(&mut self, addr: CSRAddr, val: u64) {
-    self.write_unchecked(addr.value(), val);
+  pub fn write(&mut self, addr: CSRAddr, val: u64) -> Result<(), Exception> {
+    self.write_unchecked(addr.value(), val)
   }
 
   pub fn read_unchecked(&self, addr: u16) -> u64 {
@@ -244,7 +250,7 @@ impl CSRRegs {
     }
   }
 
-  pub fn write_unchecked(&mut self, addr: u16, val: u64) {
+  pub fn write_unchecked(&mut self, addr: u16, val: u64) -> Result<(), Exception> {
     use CSRMap::*;
     match addr {
       MVENDORID => {}
@@ -260,6 +266,7 @@ impl CSRRegs {
         let mideleg = (mideleg & !mask) | (val & mask);
         self.csrs[MIDELEG as usize] = mideleg;
       }
+      MCYCLE => return Err(Exception::IllegalInstruction),
       // 4.1.1 Supervisor Status Register (sstatus)
       // The sstatus register is a subset of the mstatus register.
       // In a straightforward implementation, reading or writing any field in sstatus
@@ -292,14 +299,14 @@ impl CSRRegs {
         if mode as u8 != VM_V20211203_SV64 {
           // SV64 is not supported because spec does not say anything about it.
           self.csrs[SATP as usize] = val;
-          return;
         }
       }
       addr => self.csrs[addr as usize] = val,
     }
+    Ok(())
   }
 
-  pub fn write_bit(&mut self, addr: u16, bit: usize, val: bool) {
+  pub fn write_bit(&mut self, addr: u16, bit: usize, val: bool) -> Result<(), Exception> {
     match val {
       true => self.write_unchecked(addr, self.read_unchecked(addr) | 1 << bit),
       false => self.write_unchecked(addr, self.read_unchecked(addr) & !(1 << bit)),
