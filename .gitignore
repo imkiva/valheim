@@ -7,3 +7,4 @@ valheim-trace*.txt
 flamegraph.svg
 out.stacks
 out.collapsed
+tests/
