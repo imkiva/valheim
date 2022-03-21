@@ -186,7 +186,7 @@ impl RV64Cpu {
     }
   }
 
-  fn translate(&self, addr: VirtAddr, reason: Reason) -> Result<VirtAddr, Exception> {
+  pub fn translate(&self, addr: VirtAddr, reason: Reason) -> Result<VirtAddr, Exception> {
     if self.vmmode == VMMode::MBARE || self.mode == PrivilegeMode::Machine {
       return Ok(addr);
     }
@@ -287,6 +287,9 @@ impl RV64Cpu {
           eprint!("[Valheim] translate: compare pte failed: {} != {}, returning to step 2\n", compare, pte);
           continue;
         }
+      } else {
+        // note: step 7 checks successfully goto step 8
+        break;
       }
     }
 
