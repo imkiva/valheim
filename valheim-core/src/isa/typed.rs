@@ -46,20 +46,21 @@ pub enum Reg {
 
 /// Floating-point rounding mode
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u8)]
 pub enum RoundingMode {
   /// Round to nearest, ties to even
-  RNE,
+  RNE = 0b000,
   /// Round towards zero
-  RTZ,
+  RTZ = 0b001,
   /// Round towards -infinity
-  RDN,
+  RDN = 0b010,
   /// Round towards +infinity
-  RUP,
+  RUP = 0b011,
   /// Round to nearest, ties to max magnitude
-  RMM,
+  RMM = 0b100,
   /// In instruction's rm field, select dynamic rounding mode;
   /// In Rounding Mode register, reserved.
-  DYN,
+  DYN = 0b111,
 }
 
 /// This is used to represent lazily-decoded immediate value,

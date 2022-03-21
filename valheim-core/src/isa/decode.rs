@@ -1,7 +1,7 @@
 use std::ops::BitOr;
 use crate::isa::rv32::RV32Instr;
 use crate::isa::rv64::RV64Instr;
-use crate::isa::typed::{Imm32, Instr, Rd, Reg, Rs1, Rs2, Rs3, Shamt, AQ, RL};
+use crate::isa::typed::{Imm32, Instr, Rd, Reg, Rs1, Rs2, Rs3, Shamt, AQ, RL, RoundingMode};
 use crate::isa::rv32::{FenceFm, FenceSucc, FencePred};
 use crate::isa::rv64::{CSRAddr, UImm};
 use crate::isa::untyped::Bytecode;
@@ -30,12 +30,86 @@ macro_rules! r {
     $type!($opcode, rd, rs1, rs2)
   }};
 }
+macro_rules! rrm {
+  ($type:ident, $opcode:ident, $untyped:expr, $reg:ident) => {{
+    let r = $untyped.r();
+    let rd = Rd($reg(r.rd()));
+    let rs1 = Rs1($reg(r.rs1()));
+    let rs2 = Rs2($reg(r.rs2()));
+    let rm = r.funct3() as u8;
+    let rm = match rm {
+      const {RoundingMode::RNE as u8} => RoundingMode::RNE,
+      const {RoundingMode::RTZ as u8} => RoundingMode::RTZ,
+      const {RoundingMode::RDN as u8} => RoundingMode::RDN,
+      const {RoundingMode::RUP as u8} => RoundingMode::RUP,
+      const {RoundingMode::RMM as u8} => RoundingMode::RMM,
+      const {RoundingMode::DYN as u8} => RoundingMode::DYN,
+      _ => return None,
+    };
+    $type!($opcode, rd, rs1, rs2, rm)
+  }};
+}
+macro_rules! rrm_no_rs2 {
+  ($type:ident, $opcode:ident, $untyped:expr, $reg:ident) => {{
+    let r = $untyped.r();
+    let rd = Rd($reg(r.rd()));
+    let rs1 = Rs1($reg(r.rs1()));
+    let rm = r.funct3() as u8;
+    let rm = match rm {
+      const {RoundingMode::RNE as u8} => RoundingMode::RNE,
+      const {RoundingMode::RTZ as u8} => RoundingMode::RTZ,
+      const {RoundingMode::RDN as u8} => RoundingMode::RDN,
+      const {RoundingMode::RUP as u8} => RoundingMode::RUP,
+      const {RoundingMode::RMM as u8} => RoundingMode::RMM,
+      const {RoundingMode::DYN as u8} => RoundingMode::DYN,
+      _ => return None,
+    };
+    $type!($opcode, rd, rs1, rm)
+  }};
+}
+macro_rules! rrm_no_rs2_rm {
+  ($type:ident, $opcode:ident, $untyped:expr, $reg:ident) => {{
+    let r = $untyped.r();
+    let rd = Rd($reg(r.rd()));
+    let rs1 = Rs1($reg(r.rs1()));
+    $type!($opcode, rd, rs1)
+  }};
+}
+macro_rules! rrm_no_rm {
+  ($type:ident, $opcode:ident, $untyped:expr, $reg:ident) => {{
+    let r = $untyped.r();
+    let rd = Rd($reg(r.rd()));
+    let rs1 = Rs1($reg(r.rs1()));
+    let rs2 = Rs2($reg(r.rs2()));
+    $type!($opcode, rd, rs1, rs2)
+  }};
+}
 macro_rules! r_no_rd {
   ($type:ident, $opcode:ident, $untyped:expr, $reg:ident) => {{
     let r = $untyped.r();
     let rs1 = Rs1($reg(r.rs1()));
     let rs2 = Rs2($reg(r.rs2()));
     $type!($opcode, rs1, rs2)
+  }};
+}
+macro_rules! r4 {
+  ($type:ident, $opcode:ident, $untyped:expr, $reg:ident) => {{
+    let r4 = $untyped.r4();
+    let rd = Rd($reg(r4.rd()));
+    let rs1 = Rs1($reg(r4.rs1()));
+    let rs2 = Rs2($reg(r4.rs2()));
+    let rs3 = Rs3($reg(r4.rs3()));
+    let rm = r4.funct3() as u8;
+    let rm = match rm {
+      const {RoundingMode::RNE as u8} => RoundingMode::RNE,
+      const {RoundingMode::RTZ as u8} => RoundingMode::RTZ,
+      const {RoundingMode::RDN as u8} => RoundingMode::RDN,
+      const {RoundingMode::RUP as u8} => RoundingMode::RUP,
+      const {RoundingMode::RMM as u8} => RoundingMode::RMM,
+      const {RoundingMode::DYN as u8} => RoundingMode::DYN,
+      _ => return None,
+    };
+    $type!($opcode, rd, rs1, rs2, rs3, rm)
   }};
 }
 macro_rules! i {
@@ -356,6 +430,142 @@ fn decode_untyped(untyped: Bytecode) -> Option<Instr> {
         0b11100 => ra!(rv64, AMOMAXU_D, untyped, gp),
         _ => return None,
       },
+      _ => return None,
+    }
+
+    // RV32/64 FD
+    OpcodeMap::LOAD_FP => match untyped.i().funct3() as u8 {
+      0b010 => i!(rv32, FLW, untyped, fp),
+      0b011 => i!(rv32, FLD, untyped, fp),
+      _ => return None,
+    }
+    OpcodeMap::STORE_FP => match untyped.s().funct3() as u8 {
+      0b010 => s!(rv32, FSW, untyped, fp),
+      0b011 => s!(rv32, FSD, untyped, fp),
+      _ => return None,
+    }
+    OpcodeMap::MADD => match untyped.r4().funct2() as u8 {
+      0b00 => r4!(rv32, FMADD_S, untyped, fp),
+      0b01 => r4!(rv32, FMADD_D, untyped, fp),
+      _ => return None,
+    }
+    OpcodeMap::MSUB => match untyped.r4().funct2() as u8 {
+      0b00 => r4!(rv32, FMSUB_S, untyped, fp),
+      0b01 => r4!(rv32, FMSUB_D, untyped, fp),
+      _ => return None,
+    }
+    OpcodeMap::NMADD => match untyped.r4().funct2() as u8 {
+      0b00 => r4!(rv32, FNMADD_S, untyped, fp),
+      0b01 => r4!(rv32, FNMADD_D, untyped, fp),
+      _ => return None,
+    }
+    OpcodeMap::NMSUB => match untyped.r4().funct2() as u8 {
+      0b00 => r4!(rv32, FNMSUB_S, untyped, fp),
+      0b01 => r4!(rv32, FNMSUB_D, untyped, fp),
+      _ => return None,
+    }
+    OpcodeMap::OP_FP => match untyped.r().funct7() as u8 {
+      0b0000000 => rrm!(rv32, FADD_S, untyped, fp),
+      0b0000001 => rrm!(rv32, FADD_D, untyped, fp),
+      0b0000100 => rrm!(rv32, FSUB_S, untyped, fp),
+      0b0000101 => rrm!(rv32, FSUB_D, untyped, fp),
+      0b0001000 => rrm!(rv32, FMUL_S, untyped, fp),
+      0b0001001 => rrm!(rv32, FMUL_D, untyped, fp),
+      0b0001100 => rrm!(rv32, FDIV_S, untyped, fp),
+      0b0001101 => rrm!(rv32, FDIV_D, untyped, fp),
+      0b0101100 => rrm_no_rs2!(rv32, FSQRT_S, untyped, fp),
+      0b0101101 => rrm_no_rs2!(rv32, FSQRT_D, untyped, fp),
+      0b0010000 => match untyped.r().funct3() as u8 {
+        0b000 => rrm_no_rm!(rv32, FSGNJ_S, untyped, fp),
+        0b001 => rrm_no_rm!(rv32, FSGNJN_S, untyped, fp),
+        0b010 => rrm_no_rm!(rv32, FSGNJX_S, untyped, fp),
+        _ => return None,
+      }
+      0b0010001 => match untyped.r().funct3() as u8 {
+        0b000 => rrm_no_rm!(rv32, FSGNJ_D, untyped, fp),
+        0b001 => rrm_no_rm!(rv32, FSGNJN_D, untyped, fp),
+        0b010 => rrm_no_rm!(rv32, FSGNJX_D, untyped, fp),
+        _ => return None,
+      }
+      0b0010100 => match untyped.r().funct3() as u8 {
+        0b000 => rrm_no_rm!(rv32, FMIN_S, untyped, fp),
+        0b001 => rrm_no_rm!(rv32, FMAX_S, untyped, fp),
+        _ => return None,
+      }
+      0b0010101 => match untyped.r().funct3() as u8 {
+        0b000 => rrm_no_rm!(rv32, FMIN_D, untyped, fp),
+        0b001 => rrm_no_rm!(rv32, FMAX_D, untyped, fp),
+        _ => return None,
+      }
+      0b1100000 => match untyped.r().rs2() as u8 {
+        0b00000 => rrm_no_rs2!(rv32, FCVT_W_S, untyped, fp),
+        0b00001 => rrm_no_rs2!(rv32, FCVT_WU_S, untyped, fp),
+        0b00010 => rrm_no_rs2!(rv64, FCVT_L_S, untyped, fp),
+        0b00011 => rrm_no_rs2!(rv64, FCVT_LU_S, untyped, fp),
+        _ => return None,
+      }
+      0b1110000 => match untyped.r().rs2() as u8 {
+        0b00000 => match untyped.r().funct3() as u8 {
+          0b000 => rrm_no_rs2_rm!(rv32, FMV_X_W, untyped, fp),
+          0b001 => rrm_no_rs2_rm!(rv32, FCLASS_S, untyped, fp),
+          _ => return None,
+        }
+        _ => return None,
+      },
+      0b0100000 => match untyped.r().rs2() as u8 {
+        0b00001 => rrm_no_rs2!(rv32, FCVT_S_D, untyped, fp),
+        _ => return None,
+      },
+      0b0100001 => match untyped.r().rs2() as u8 {
+        0b00000 => rrm_no_rs2!(rv32, FCVT_D_S, untyped, fp),
+        _ => return None,
+      },
+      0b1010000 => match untyped.r().funct3() as u8 {
+        0b010 => rrm_no_rm!(rv32, FEQ_S, untyped, fp),
+        0b001 => rrm_no_rm!(rv32, FLT_S, untyped, fp),
+        0b000 => rrm_no_rm!(rv32, FLE_S, untyped, fp),
+        _ => return None,
+      },
+      0b1010001 => match untyped.r().funct3() as u8 {
+        0b010 => rrm_no_rm!(rv32, FEQ_D, untyped, fp),
+        0b001 => rrm_no_rm!(rv32, FLT_D, untyped, fp),
+        0b000 => rrm_no_rm!(rv32, FLE_D, untyped, fp),
+        _ => return None,
+      },
+      0b1101000 => match untyped.r().rs2() as u8 {
+        0b00000 => rrm_no_rs2!(rv32, FCVT_S_W, untyped, fp),
+        0b00001 => rrm_no_rs2!(rv32, FCVT_S_WU, untyped, fp),
+        0b00010 => rrm_no_rs2!(rv64, FCVT_S_L, untyped, fp),
+        0b00011 => rrm_no_rs2!(rv64, FCVT_S_LU, untyped, fp),
+        _ => return None,
+      }
+      0b1111000 => match (untyped.r().rs2() as u8, untyped.r().funct3() as u8) {
+        (0b00000, 0b000) => rrm_no_rs2_rm!(rv32, FMV_W_X, untyped, fp),
+        _ => return None,
+      },
+      0b1111001 => match (untyped.r().rs2() as u8, untyped.r().funct3() as u8) {
+        (0b00000, 0b000) => rrm_no_rs2_rm!(rv64, FMV_D_X, untyped, fp),
+        _ => return None,
+      },
+      0b1110001 => match (untyped.r().rs2() as u8, untyped.r().funct3() as u8) {
+        (0b00000, 0b000) => rrm_no_rs2_rm!(rv64, FMV_X_D, untyped, fp),
+        (0b00000, 0b001) => rrm_no_rs2_rm!(rv32, FCLASS_D, untyped, fp),
+        _ => return None,
+      },
+      0b1100001 => match untyped.r().rs2() as u8 {
+        0b00000 => rrm_no_rs2!(rv32, FCVT_W_D, untyped, fp),
+        0b00001 => rrm_no_rs2!(rv32, FCVT_WU_D, untyped, fp),
+        0b00010 => rrm_no_rs2!(rv64, FCVT_L_D, untyped, fp),
+        0b00011 => rrm_no_rs2!(rv64, FCVT_LU_D, untyped, fp),
+        _ => return None,
+      }
+      0b1101001 => match untyped.r().rs2() as u8 {
+        0b00000 => rrm_no_rs2!(rv32, FCVT_D_W, untyped, fp),
+        0b00001 => rrm_no_rs2!(rv32, FCVT_D_WU, untyped, fp),
+        0b00010 => rrm_no_rs2!(rv64, FCVT_D_L, untyped, fp),
+        0b00011 => rrm_no_rs2!(rv64, FCVT_D_LU, untyped, fp),
+        _ => return None,
+      }
       _ => return None,
     }
 
