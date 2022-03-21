@@ -336,8 +336,8 @@ fn decode_untyped(untyped: Bytecode16) -> Option<Instr> {
       0b000 if rd_is_0!(untyped) => hint!(),
       0b000 if nzimm_is_0!(untyped) => hint!(),
       0b000 => {
-        let cbi = untyped.cbi();
-        let rd = Rd(gp_3(cbi.rd_or_rs1()));
+        let ci = untyped.ci();
+        let rd = Rd(gp(ci.rd()));
         // shamt[5|4:0] = inst[12|6:2]
         let shamt = ((inst >> 7) & 0x20) | ((inst >> 2) & 0x1f);
         rv64!(SLLI, rd, Rs1(rd.0), Shamt(shamt as u8))
