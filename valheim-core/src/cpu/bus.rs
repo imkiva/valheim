@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt::{Debug, Formatter};
+use std::fs::File;
+use std::io::Read;
 use std::sync::Arc;
 use crate::cpu::irq::Exception;
 use crate::device::clint::Clint;
@@ -60,11 +62,21 @@ impl Debug for Bus {
 
 impl Bus {
   pub fn new() -> Result<Bus, std::io::Error> {
+    let mut dtb = Vec::new();
+    File::open("valheim.dtb")?.read_to_end(&mut dtb)?;
+    let mut rom = vec![0; 32];
+    rom.append(&mut dtb);
+    let align = 0x1000;
+    rom.resize((rom.len() + align - 1) / align * align, 0);
+
+    let mut mrom = Memory::new(VIRT_MROM_BASE, VIRT_MROM_SIZE as usize)?;
+    mrom.load(rom.as_slice(), VIRT_MROM_BASE as usize).unwrap();
+
     let bus = Bus {
       mem: Memory::new(RV64_MEMORY_BASE, RV64_MEMORY_SIZE as usize)?,
       devices: Vec::with_capacity(8),
       io_map: BTreeMap::new(),
-      virt_mrom: Memory::new(VIRT_MROM_BASE, VIRT_MROM_SIZE as usize)?,
+      virt_mrom: mrom,
       clint: Clint::new(),
       plic: Plic::new(),
       virtio: Virtio::new(),
@@ -99,7 +111,7 @@ impl Bus {
         assert_eq!(std::mem::size_of::<T>(), 4);
         let val = self.plic.read(addr)?;
         Ok(Bus::safe_reinterpret_as_T(val as u64))
-      },
+      }
       VIRTIO_BASE..=VIRTIO_END => Ok(Bus::safe_reinterpret_as_T(self.virtio.read::<T>(addr)? as u64)),
 
       _ => match self.select_device_for_read(addr) {
@@ -125,7 +137,7 @@ impl Bus {
         assert_eq!(std::mem::size_of::<T>(), 4);
         let val = Bus::safe_reinterpret_as_u64(val) as u32;
         self.plic.write(addr, val)
-      },
+      }
       VIRTIO_BASE..=VIRTIO_END => self.virtio.write::<T>(addr, Bus::safe_reinterpret_as_u64(val) as u32),
 
       _ => match self.select_device_for_write(addr) {
