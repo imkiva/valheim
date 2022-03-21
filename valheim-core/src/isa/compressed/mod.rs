@@ -1,2 +1,2 @@
 pub mod untyped;
-pub mod desugar;
+pub mod lowering;
