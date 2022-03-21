@@ -11,7 +11,7 @@ use crate::device::virtio::Virtio;
 use crate::memory::{CanIO, Memory, VirtAddr};
 
 pub const RV64_MEMORY_BASE: u64 = 0x80000000;
-pub const RV64_MEMORY_SIZE: u64 = 128 * 1024 * 1024;
+pub const RV64_MEMORY_SIZE: u64 = 4 * 1024 * 1024 * 1024;
 pub const RV64_MEMORY_END: u64 = RV64_MEMORY_BASE + RV64_MEMORY_SIZE;
 
 pub const VIRT_MROM_BASE: u64 = 0x1000;

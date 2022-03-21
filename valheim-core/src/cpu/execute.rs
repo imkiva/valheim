@@ -51,9 +51,11 @@ impl RV64Cpu {
       RV32(ADDI(Rd(Reg::ZERO), Rs1(Reg::ZERO), Imm32(0))) => (),
       RV32(LUI(rd, imm)) => rd.write(self, imm.decode() as i32 as i64 as u64),
       RV32(AUIPC(rd, offset)) => rd.write(self, pc.0.wrapping_add(offset.decode() as i32 as i64 as u64)),
-      RV32(JAL(rd, offset)) => {
+      RV32(JAL(rd, imm)) => {
+        let offset = imm.decode_sext() as u64;
+        let target = pc.0.wrapping_add(offset);
         rd.write(self, next_pc.0);
-        next_pc = VirtAddr(pc.0.wrapping_add(offset.decode_sext() as u64));
+        next_pc = VirtAddr(target);
       }
       RV32(JALR(rd, rs1, imm)) => {
         let offset = imm.decode_sext() as i64;
