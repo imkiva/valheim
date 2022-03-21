@@ -122,7 +122,7 @@ impl Bus {
           8 => Ok(Bus::safe_reinterpret_as_T(dev.read64(addr).ok_or(Exception::LoadAccessFault(addr))? as u64)),
           _ => Err(Exception::LoadAccessFault(addr)),
         }
-        None => Err(Exception::StoreAccessFault(addr)),
+        None => Err(Exception::LoadAccessFault(addr)),
       },
     }
   }
