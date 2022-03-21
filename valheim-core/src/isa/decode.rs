@@ -31,11 +31,11 @@ macro_rules! r {
   }};
 }
 macro_rules! rrm {
-  ($type:ident, $opcode:ident, $untyped:expr, $reg:ident) => {{
+  ($type:ident, $opcode:ident, $untyped:expr, $rd_reg:ident, $rs_reg: ident) => {{
     let r = $untyped.r();
-    let rd = Rd($reg(r.rd()));
-    let rs1 = Rs1($reg(r.rs1()));
-    let rs2 = Rs2($reg(r.rs2()));
+    let rd = Rd($rd_reg(r.rd()));
+    let rs1 = Rs1($rs_reg(r.rs1()));
+    let rs2 = Rs2($rs_reg(r.rs2()));
     let rm = r.funct3() as u8;
     let rm = match rm {
       const {RoundingMode::RNE as u8} => RoundingMode::RNE,
@@ -50,10 +50,10 @@ macro_rules! rrm {
   }};
 }
 macro_rules! rrm_no_rs2 {
-  ($type:ident, $opcode:ident, $untyped:expr, $reg:ident) => {{
+  ($type:ident, $opcode:ident, $untyped:expr, $rd_reg:ident, $rs_reg: ident) => {{
     let r = $untyped.r();
-    let rd = Rd($reg(r.rd()));
-    let rs1 = Rs1($reg(r.rs1()));
+    let rd = Rd($rd_reg(r.rd()));
+    let rs1 = Rs1($rs_reg(r.rs1()));
     let rm = r.funct3() as u8;
     let rm = match rm {
       const {RoundingMode::RNE as u8} => RoundingMode::RNE,
@@ -68,19 +68,19 @@ macro_rules! rrm_no_rs2 {
   }};
 }
 macro_rules! rrm_no_rs2_rm {
-  ($type:ident, $opcode:ident, $untyped:expr, $reg:ident) => {{
+  ($type:ident, $opcode:ident, $untyped:expr, $rd_reg:ident, $rs_reg: ident) => {{
     let r = $untyped.r();
-    let rd = Rd($reg(r.rd()));
-    let rs1 = Rs1($reg(r.rs1()));
+    let rd = Rd($rd_reg(r.rd()));
+    let rs1 = Rs1($rs_reg(r.rs1()));
     $type!($opcode, rd, rs1)
   }};
 }
 macro_rules! rrm_no_rm {
-  ($type:ident, $opcode:ident, $untyped:expr, $reg:ident) => {{
+  ($type:ident, $opcode:ident, $untyped:expr, $rd_reg:ident, $rs_reg: ident) => {{
     let r = $untyped.r();
-    let rd = Rd($reg(r.rd()));
-    let rs1 = Rs1($reg(r.rs1()));
-    let rs2 = Rs2($reg(r.rs2()));
+    let rd = Rd($rd_reg(r.rd()));
+    let rs1 = Rs1($rs_reg(r.rs1()));
+    let rs2 = Rs2($rs_reg(r.rs2()));
     $type!($opcode, rd, rs1, rs2)
   }};
 }
@@ -465,105 +465,105 @@ fn decode_untyped(untyped: Bytecode) -> Option<Instr> {
       _ => return None,
     }
     OpcodeMap::OP_FP => match untyped.r().funct7() as u8 {
-      0b0000000 => rrm!(rv32, FADD_S, untyped, fp),
-      0b0000001 => rrm!(rv32, FADD_D, untyped, fp),
-      0b0000100 => rrm!(rv32, FSUB_S, untyped, fp),
-      0b0000101 => rrm!(rv32, FSUB_D, untyped, fp),
-      0b0001000 => rrm!(rv32, FMUL_S, untyped, fp),
-      0b0001001 => rrm!(rv32, FMUL_D, untyped, fp),
-      0b0001100 => rrm!(rv32, FDIV_S, untyped, fp),
-      0b0001101 => rrm!(rv32, FDIV_D, untyped, fp),
-      0b0101100 => rrm_no_rs2!(rv32, FSQRT_S, untyped, fp),
-      0b0101101 => rrm_no_rs2!(rv32, FSQRT_D, untyped, fp),
+      0b0000000 => rrm!(rv32, FADD_S, untyped, fp, fp),
+      0b0000001 => rrm!(rv32, FADD_D, untyped, fp, fp),
+      0b0000100 => rrm!(rv32, FSUB_S, untyped, fp, fp),
+      0b0000101 => rrm!(rv32, FSUB_D, untyped, fp, fp),
+      0b0001000 => rrm!(rv32, FMUL_S, untyped, fp, fp),
+      0b0001001 => rrm!(rv32, FMUL_D, untyped, fp, fp),
+      0b0001100 => rrm!(rv32, FDIV_S, untyped, fp, fp),
+      0b0001101 => rrm!(rv32, FDIV_D, untyped, fp, fp),
+      0b0101100 => rrm_no_rs2!(rv32, FSQRT_S, untyped, fp, fp),
+      0b0101101 => rrm_no_rs2!(rv32, FSQRT_D, untyped, fp, fp),
       0b0010000 => match untyped.r().funct3() as u8 {
-        0b000 => rrm_no_rm!(rv32, FSGNJ_S, untyped, fp),
-        0b001 => rrm_no_rm!(rv32, FSGNJN_S, untyped, fp),
-        0b010 => rrm_no_rm!(rv32, FSGNJX_S, untyped, fp),
+        0b000 => rrm_no_rm!(rv32, FSGNJ_S, untyped, fp, fp),
+        0b001 => rrm_no_rm!(rv32, FSGNJN_S, untyped, fp, fp),
+        0b010 => rrm_no_rm!(rv32, FSGNJX_S, untyped, fp, fp),
         _ => return None,
       }
       0b0010001 => match untyped.r().funct3() as u8 {
-        0b000 => rrm_no_rm!(rv32, FSGNJ_D, untyped, fp),
-        0b001 => rrm_no_rm!(rv32, FSGNJN_D, untyped, fp),
-        0b010 => rrm_no_rm!(rv32, FSGNJX_D, untyped, fp),
+        0b000 => rrm_no_rm!(rv32, FSGNJ_D, untyped, fp, fp),
+        0b001 => rrm_no_rm!(rv32, FSGNJN_D, untyped, fp, fp),
+        0b010 => rrm_no_rm!(rv32, FSGNJX_D, untyped, fp, fp),
         _ => return None,
       }
       0b0010100 => match untyped.r().funct3() as u8 {
-        0b000 => rrm_no_rm!(rv32, FMIN_S, untyped, fp),
-        0b001 => rrm_no_rm!(rv32, FMAX_S, untyped, fp),
+        0b000 => rrm_no_rm!(rv32, FMIN_S, untyped, fp, fp),
+        0b001 => rrm_no_rm!(rv32, FMAX_S, untyped, fp, fp),
         _ => return None,
       }
       0b0010101 => match untyped.r().funct3() as u8 {
-        0b000 => rrm_no_rm!(rv32, FMIN_D, untyped, fp),
-        0b001 => rrm_no_rm!(rv32, FMAX_D, untyped, fp),
+        0b000 => rrm_no_rm!(rv32, FMIN_D, untyped, fp, fp),
+        0b001 => rrm_no_rm!(rv32, FMAX_D, untyped, fp, fp),
         _ => return None,
       }
       0b1100000 => match untyped.r().rs2() as u8 {
-        0b00000 => rrm_no_rs2!(rv32, FCVT_W_S, untyped, fp),
-        0b00001 => rrm_no_rs2!(rv32, FCVT_WU_S, untyped, fp),
-        0b00010 => rrm_no_rs2!(rv64, FCVT_L_S, untyped, fp),
-        0b00011 => rrm_no_rs2!(rv64, FCVT_LU_S, untyped, fp),
+        0b00000 => rrm_no_rs2!(rv32, FCVT_W_S, untyped, gp, fp),
+        0b00001 => rrm_no_rs2!(rv32, FCVT_WU_S, untyped, gp, fp),
+        0b00010 => rrm_no_rs2!(rv64, FCVT_L_S, untyped, gp, fp),
+        0b00011 => rrm_no_rs2!(rv64, FCVT_LU_S, untyped, gp, fp),
         _ => return None,
       }
       0b1110000 => match untyped.r().rs2() as u8 {
         0b00000 => match untyped.r().funct3() as u8 {
-          0b000 => rrm_no_rs2_rm!(rv32, FMV_X_W, untyped, fp),
-          0b001 => rrm_no_rs2_rm!(rv32, FCLASS_S, untyped, fp),
+          0b000 => rrm_no_rs2_rm!(rv32, FMV_X_W, untyped, gp, fp),
+          0b001 => rrm_no_rs2_rm!(rv32, FCLASS_S, untyped, gp, fp),
           _ => return None,
         }
         _ => return None,
       },
       0b0100000 => match untyped.r().rs2() as u8 {
-        0b00001 => rrm_no_rs2!(rv32, FCVT_S_D, untyped, fp),
+        0b00001 => rrm_no_rs2!(rv32, FCVT_S_D, untyped, fp, fp),
         _ => return None,
       },
       0b0100001 => match untyped.r().rs2() as u8 {
-        0b00000 => rrm_no_rs2!(rv32, FCVT_D_S, untyped, fp),
+        0b00000 => rrm_no_rs2!(rv32, FCVT_D_S, untyped, fp, fp),
         _ => return None,
       },
       0b1010000 => match untyped.r().funct3() as u8 {
-        0b010 => rrm_no_rm!(rv32, FEQ_S, untyped, fp),
-        0b001 => rrm_no_rm!(rv32, FLT_S, untyped, fp),
-        0b000 => rrm_no_rm!(rv32, FLE_S, untyped, fp),
+        0b010 => rrm_no_rm!(rv32, FEQ_S, untyped, gp, fp),
+        0b001 => rrm_no_rm!(rv32, FLT_S, untyped, gp, fp),
+        0b000 => rrm_no_rm!(rv32, FLE_S, untyped, gp, fp),
         _ => return None,
       },
       0b1010001 => match untyped.r().funct3() as u8 {
-        0b010 => rrm_no_rm!(rv32, FEQ_D, untyped, fp),
-        0b001 => rrm_no_rm!(rv32, FLT_D, untyped, fp),
-        0b000 => rrm_no_rm!(rv32, FLE_D, untyped, fp),
+        0b010 => rrm_no_rm!(rv32, FEQ_D, untyped, gp, fp),
+        0b001 => rrm_no_rm!(rv32, FLT_D, untyped, gp, fp),
+        0b000 => rrm_no_rm!(rv32, FLE_D, untyped, gp, fp),
         _ => return None,
       },
       0b1101000 => match untyped.r().rs2() as u8 {
-        0b00000 => rrm_no_rs2!(rv32, FCVT_S_W, untyped, fp),
-        0b00001 => rrm_no_rs2!(rv32, FCVT_S_WU, untyped, fp),
-        0b00010 => rrm_no_rs2!(rv64, FCVT_S_L, untyped, fp),
-        0b00011 => rrm_no_rs2!(rv64, FCVT_S_LU, untyped, fp),
+        0b00000 => rrm_no_rs2!(rv32, FCVT_S_W, untyped, fp, gp),
+        0b00001 => rrm_no_rs2!(rv32, FCVT_S_WU, untyped, fp, gp),
+        0b00010 => rrm_no_rs2!(rv64, FCVT_S_L, untyped, fp, gp),
+        0b00011 => rrm_no_rs2!(rv64, FCVT_S_LU, untyped, fp, gp),
         _ => return None,
       }
       0b1111000 => match (untyped.r().rs2() as u8, untyped.r().funct3() as u8) {
-        (0b00000, 0b000) => rrm_no_rs2_rm!(rv32, FMV_W_X, untyped, fp),
+        (0b00000, 0b000) => rrm_no_rs2_rm!(rv32, FMV_W_X, untyped, fp, gp),
         _ => return None,
       },
       0b1111001 => match (untyped.r().rs2() as u8, untyped.r().funct3() as u8) {
-        (0b00000, 0b000) => rrm_no_rs2_rm!(rv64, FMV_D_X, untyped, fp),
+        (0b00000, 0b000) => rrm_no_rs2_rm!(rv64, FMV_D_X, untyped, fp, gp),
         _ => return None,
       },
       0b1110001 => match (untyped.r().rs2() as u8, untyped.r().funct3() as u8) {
-        (0b00000, 0b000) => rrm_no_rs2_rm!(rv64, FMV_X_D, untyped, fp),
-        (0b00000, 0b001) => rrm_no_rs2_rm!(rv32, FCLASS_D, untyped, fp),
+        (0b00000, 0b000) => rrm_no_rs2_rm!(rv64, FMV_X_D, untyped, gp, fp),
+        (0b00000, 0b001) => rrm_no_rs2_rm!(rv32, FCLASS_D, untyped, gp, fp),
         _ => return None,
       },
       0b1100001 => match untyped.r().rs2() as u8 {
-        0b00000 => rrm_no_rs2!(rv32, FCVT_W_D, untyped, fp),
-        0b00001 => rrm_no_rs2!(rv32, FCVT_WU_D, untyped, fp),
-        0b00010 => rrm_no_rs2!(rv64, FCVT_L_D, untyped, fp),
-        0b00011 => rrm_no_rs2!(rv64, FCVT_LU_D, untyped, fp),
+        0b00000 => rrm_no_rs2!(rv32, FCVT_W_D, untyped, gp, fp),
+        0b00001 => rrm_no_rs2!(rv32, FCVT_WU_D, untyped, gp, fp),
+        0b00010 => rrm_no_rs2!(rv64, FCVT_L_D, untyped, gp, fp),
+        0b00011 => rrm_no_rs2!(rv64, FCVT_LU_D, untyped, gp, fp),
         _ => return None,
       }
       0b1101001 => match untyped.r().rs2() as u8 {
-        0b00000 => rrm_no_rs2!(rv32, FCVT_D_W, untyped, fp),
-        0b00001 => rrm_no_rs2!(rv32, FCVT_D_WU, untyped, fp),
-        0b00010 => rrm_no_rs2!(rv64, FCVT_D_L, untyped, fp),
-        0b00011 => rrm_no_rs2!(rv64, FCVT_D_LU, untyped, fp),
+        0b00000 => rrm_no_rs2!(rv32, FCVT_D_W, untyped, fp, gp),
+        0b00001 => rrm_no_rs2!(rv32, FCVT_D_WU, untyped, fp, gp),
+        0b00010 => rrm_no_rs2!(rv64, FCVT_D_L, untyped, fp, gp),
+        0b00011 => rrm_no_rs2!(rv64, FCVT_D_LU, untyped, fp, gp),
         _ => return None,
       }
       _ => return None,
