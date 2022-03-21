@@ -59,6 +59,8 @@ impl Machine {
       // TODO: stop treating breakpoint as good trap
       Err(Exception::Breakpoint) => false,
       Err(ex) => {
+        println!("[Valheim] Exception: {:?} at {:#x}", ex, self.cpu.read_pc().0);
+        self.show_status();
         // TODO: add watchdog to prevent kernels that do not handle double fault?
         // note: double/triple-fault can be handled by the M-mode program.
         // see: https://github.com/riscv/riscv-isa-manual/issues/3#issuecomment-278495907
@@ -86,6 +88,7 @@ impl Machine {
     println!("  Machine Level CSR register:");
     println!("    mstatus: {:<#18x}    mtvec:   {:<#18x}    mepc:    {:<#18x}", csr!(self, MSTATUS), csr!(self, MTVEC), csr!(self, MEPC));
     println!("    mcause:  {:<#18x}    medeleg: {:<#18x}    mideleg: {:<#18x}", csr!(self, MCAUSE), csr!(self, MEDELEG), csr!(self, MIDELEG));
+    println!("    mscratch: {:<#18x}", csr!(self, MSCRATCH));
     println!("  Supervisor Level CSR register:");
     println!("    sstatus: {:<#18x}    stvec:   {:<#18x}    sepc:    {:<#18x}", csr!(self, SSTATUS), csr!(self, STVEC), csr!(self, SEPC));
     println!("    scause:  {:<#18x}", csr!(self, SCAUSE));

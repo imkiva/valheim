@@ -509,7 +509,10 @@ impl RV64Cpu {
         let _ = self.csrs.write_bit(MSTATUS, 11, false);
         let _ = self.csrs.write_bit(MSTATUS, 12, false);
       }
-      RV64(WFI) => self.wfi = true,
+      RV64(WFI) => {
+        println!("[Valheim] CPU wfi at {:#x}", pc.0);
+        self.wfi = true
+      },
 
       // 4.1.11 Supervisor Address Translation and Protection (satp) Register
       // The satp register is considered active when the effective privilege mode is S-mode or U-mode.
