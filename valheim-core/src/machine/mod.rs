@@ -80,7 +80,7 @@ impl Machine {
     println!("=======================================");
     println!("Privileged mode: {:?}", self.cpu.mode);
     println!("General purpose registers:");
-    println!("  pc: {:x}", self.cpu.read_pc().0);
+    println!("  pc : {:#x}", self.cpu.read_pc().0);
     for i in 0..31 {
       println!("  x{:<2}: {:<#18x}    f{:<2}: {:}", i, self.cpu.regs.x[i], i, self.cpu.regs.f[i]);
     }
@@ -91,7 +91,7 @@ impl Machine {
     println!("    mscratch: {:<#18x}", csr!(self, MSCRATCH));
     println!("  Supervisor Level CSR register:");
     println!("    sstatus: {:<#18x}    stvec:   {:<#18x}    sepc:    {:<#18x}", csr!(self, SSTATUS), csr!(self, STVEC), csr!(self, SEPC));
-    println!("    scause:  {:<#18x}", csr!(self, SCAUSE));
+    println!("    scause:  {:<#18x}    satp:    {:<#18x}", csr!(self, SCAUSE), csr!(self, SATP));
     println!("=======================================");
   }
 
