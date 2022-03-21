@@ -402,68 +402,152 @@ impl RV64Cpu {
         if csr.value() == SATP { self.sync_pagetable(); }
       }
 
-      RV32(FLW(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FSW(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FMADD_S(_, _, _, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FMSUB_S(_, _, _, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FNMSUB_S(_, _, _, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FNMADD_S(_, _, _, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FADD_S(_, _, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FSUB_S(_, _, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FMUL_S(_, _, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FDIV_S(_, _, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FSQRT_S(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FSGNJ_S(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FSGNJN_S(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FSGNJX_S(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FMIN_S(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FMAX_S(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FCVT_W_S(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FCVT_WU_S(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FMV_X_W(_, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FEQ_S(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FLT_S(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FLE_S(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
+      RV32(FLW(rd, rs1, imm)) => {
+        let addr = rs1.read(self).wrapping_add(imm.decode_sext() as u64);
+        let val = f32::from_bits(self.read_mem::<u32>(VirtAddr(addr))? as u32);
+        rd.write_fp(self, val as f64);
+      }
+      RV32(FLD(rd, rs1, imm)) => {
+        let addr = rs1.read(self).wrapping_add(imm.decode_sext() as u64);
+        let val = f64::from_bits(self.read_mem::<u64>(VirtAddr(addr))?);
+        rd.write_fp(self, val);
+      }
+      RV32(FSW(rs1, rs2, imm)) => {
+        let addr = rs1.read(self).wrapping_add(imm.decode_sext() as u64);
+        let val = rs2.read_fp(self) as f32;
+        self.write_mem::<u32>(VirtAddr(addr), val.to_bits())?;
+      }
+      RV32(FSD(rs1, rs2, imm)) => {
+        let addr = rs1.read(self).wrapping_add(imm.decode_sext() as u64);
+        let val = rs2.read_fp(self);
+        self.write_mem::<u64>(VirtAddr(addr), val.to_bits())?;
+      }
+
+      RV32(FMADD_S(rd, rs1, rs2, rs3, _)) => {
+        let rs1 = rs1.read_fp(self) as f32;
+        let rs2 = rs2.read_fp(self) as f32;
+        let rs3 = rs3.read_fp(self) as f32;
+        let val = rs1.mul_add(rs2, rs3);
+        rd.write_fp(self, val as f64);
+      }
+      RV32(FMADD_D(rd, rs1, rs2, rs3, _)) => {
+        let rs1 = rs1.read_fp(self);
+        let rs2 = rs2.read_fp(self);
+        let rs3 = rs3.read_fp(self);
+        let val = rs1.mul_add(rs2, rs3);
+        rd.write_fp(self, val);
+      }
+      RV32(FMSUB_S(rd, rs1, rs2, rs3, _)) => {
+        let rs1 = rs1.read_fp(self) as f32;
+        let rs2 = rs2.read_fp(self) as f32;
+        let rs3 = rs3.read_fp(self) as f32;
+        let val = rs1.mul_add(rs2, -rs3);
+        rd.write_fp(self, val as f64);
+      }
+      RV32(FMSUB_D(rd, rs1, rs2, rs3, _)) => {
+        let rs1 = rs1.read_fp(self);
+        let rs2 = rs2.read_fp(self);
+        let rs3 = rs3.read_fp(self);
+        let val = rs1.mul_add(rs2, -rs3);
+        rd.write_fp(self, val);
+      }
+      RV32(FNMADD_S(rd, rs1, rs2, rs3, _)) => {
+        let rs1 = -rs1.read_fp(self) as f32;
+        let rs2 = rs2.read_fp(self) as f32;
+        let rs3 = rs3.read_fp(self) as f32;
+        let val = rs1.mul_add(rs2, rs3);
+        rd.write_fp(self, val as f64);
+      }
+      RV32(FNMADD_D(rd, rs1, rs2, rs3, _)) => {
+        let rs1 = -rs1.read_fp(self);
+        let rs2 = rs2.read_fp(self);
+        let rs3 = rs3.read_fp(self);
+        let val = rs1.mul_add(rs2, rs3);
+        rd.write_fp(self, val);
+      }
+      RV32(FNMSUB_S(rd, rs1, rs2, rs3, _)) => {
+        let rs1 = -rs1.read_fp(self) as f32;
+        let rs2 = rs2.read_fp(self) as f32;
+        let rs3 = rs3.read_fp(self) as f32;
+        let val = rs1.mul_add(rs2, -rs3);
+        rd.write_fp(self, val as f64);
+      }
+      RV32(FNMSUB_D(rd, rs1, rs2, rs3, _)) => {
+        let rs1 = -rs1.read_fp(self);
+        let rs2 = rs2.read_fp(self);
+        let rs3 = rs3.read_fp(self);
+        let val = rs1.mul_add(rs2, -rs3);
+        rd.write_fp(self, val);
+      }
+
+      RV32(FADD_S(rd, rs1, rs2, _)) => rd.write_fp(self, ((rs1.read_fp(self) as f32) + (rs2.read_fp(self) as f32)) as f64),
+      RV32(FADD_D(rd, rs1, rs2, _)) => rd.write_fp(self, ((rs1.read_fp(self) as f64) + (rs2.read_fp(self) as f64)) as f64),
+      RV32(FSUB_S(rd, rs1, rs2, _)) => rd.write_fp(self, ((rs1.read_fp(self) as f32) - (rs2.read_fp(self) as f32)) as f64),
+      RV32(FSUB_D(rd, rs1, rs2, _)) => rd.write_fp(self, ((rs1.read_fp(self) as f64) - (rs2.read_fp(self) as f64)) as f64),
+      RV32(FMUL_S(rd, rs1, rs2, _)) => rd.write_fp(self, ((rs1.read_fp(self) as f32) * (rs2.read_fp(self) as f32)) as f64),
+      RV32(FMUL_D(rd, rs1, rs2, _)) => rd.write_fp(self, ((rs1.read_fp(self) as f64) * (rs2.read_fp(self) as f64)) as f64),
+      RV32(FDIV_S(rd, rs1, rs2, _)) => rd.write_fp(self, ((rs1.read_fp(self) as f32) / (rs2.read_fp(self) as f32)) as f64),
+      RV32(FDIV_D(rd, rs1, rs2, _)) => rd.write_fp(self, ((rs1.read_fp(self) as f64) / (rs2.read_fp(self) as f64)) as f64),
+
+      RV32(FSQRT_S(rd, rs1, _)) => rd.write_fp(self, (rs1.read_fp(self) as f32).sqrt() as f64),
+      RV32(FSQRT_D(rd, rs1, _)) => rd.write_fp(self, (rs1.read_fp(self) as f64).sqrt() as f64),
+
+      RV32(FSGNJ_S(rd, rs1, rs2)) => rd.write_fp(self, rs1.read_fp(self).copysign(rs2.read_fp(self))),
+      RV32(FSGNJ_D(rd, rs1, rs2)) => rd.write_fp(self, rs1.read_fp(self).copysign(rs2.read_fp(self))),
+
+      RV32(FSGNJN_S(rd, rs1, rs2)) => rd.write_fp(self, rs1.read_fp(self).copysign(-rs2.read_fp(self))),
+      RV32(FSGNJN_D(rd, rs1, rs2)) => rd.write_fp(self, rs1.read_fp(self).copysign(-rs2.read_fp(self))),
+
+      RV32(FSGNJX_S(rd, rs1, rs2)) => panic!("not implemented at PC = {:?}", pc),
+      RV32(FSGNJX_D(rd, rs1, rs2)) => panic!("not implemented at PC = {:?}", pc),
+
+      RV32(FMIN_S(rd, rs1, rs2)) => rd.write_fp(self, rs1.read_fp(self).min(rs2.read_fp(self))),
+      RV32(FMIN_D(rd, rs1, rs2)) => rd.write_fp(self, rs1.read_fp(self).min(rs2.read_fp(self))),
+      RV32(FMAX_S(rd, rs1, rs2)) => rd.write_fp(self, rs1.read_fp(self).max(rs2.read_fp(self))),
+      RV32(FMAX_D(rd, rs1, rs2)) => rd.write_fp(self, rs1.read_fp(self).max(rs2.read_fp(self))),
+
+      RV32(FEQ_S(rd, rs1, rs2)) => rd.write(self, (rs1.read_fp(self) == rs2.read_fp(self)) as u64),
+      RV32(FEQ_D(rd, rs1, rs2)) => rd.write(self, (rs1.read_fp(self) == rs2.read_fp(self)) as u64),
+      RV32(FLT_S(rd, rs1, rs2)) => rd.write(self, (rs1.read_fp(self) < rs2.read_fp(self)) as u64),
+      RV32(FLT_D(rd, rs1, rs2)) => rd.write(self, (rs1.read_fp(self) < rs2.read_fp(self)) as u64),
+      RV32(FLE_S(rd, rs1, rs2)) => rd.write(self, (rs1.read_fp(self) <= rs2.read_fp(self)) as u64),
+      RV32(FLE_D(rd, rs1, rs2)) => rd.write(self, (rs1.read_fp(self) <= rs2.read_fp(self)) as u64),
+
       RV32(FCLASS_S(_, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FCVT_S_W(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FCVT_S_WU(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FMV_W_X(_, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FLD(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FSD(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FMADD_D(_, _, _, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FMSUB_D(_, _, _, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FNMSUB_D(_, _, _, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FNMADD_D(_, _, _, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FADD_D(_, _, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FSUB_D(_, _, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FMUL_D(_, _, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FDIV_D(_, _, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FSQRT_D(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FSGNJ_D(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FSGNJN_D(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FSGNJX_D(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FMIN_D(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FMAX_D(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FCVT_S_D(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FCVT_D_S(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FEQ_D(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FLT_D(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FLE_D(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
       RV32(FCLASS_D(_, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FCVT_W_D(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FCVT_WU_D(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FCVT_D_W(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FCVT_D_WU(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV64(FCVT_L_S(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV64(FCVT_LU_S(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV64(FCVT_S_L(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV64(FCVT_S_LU(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV64(FCVT_L_D(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV64(FCVT_LU_D(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV64(FMV_X_D(_, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV64(FCVT_D_L(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV64(FCVT_D_LU(_, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV64(FMV_D_X(_, _)) => panic!("not implemented at PC = {:?}", pc),
+
+      RV32(FMV_X_W(rd, rs1)) => rd.write(self, (rs1.read_fp(self).to_bits() & 0xffffffff) as i32 as i64 as u64),
+      RV32(FMV_W_X(rd, rs1)) => rd.write_fp(self, f64::from_bits(rs1.read(self) & 0xffffffff)),
+
+      RV64(FMV_X_D(rd, rs1)) => rd.write(self, rs1.read_fp(self).to_bits()),
+      RV64(FMV_D_X(rd, rs1)) => rd.write_fp(self, f64::from_bits(rs1.read(self))),
+
+      RV32(FCVT_W_S(rd, rs1, _)) => rd.write(self, ((rs1.read_fp(self) as f32).round() as i32) as u64),
+      RV32(FCVT_S_W(rd, rs1, _)) => rd.write_fp(self, ((rs1.read(self) as i32) as f32) as f64),
+
+      RV32(FCVT_W_D(rd, rs1, _)) => rd.write(self, (rs1.read_fp(self).round() as i32) as u64),
+      RV32(FCVT_D_W(rd, rs1, _)) => rd.write_fp(self, (rs1.read(self) as i32) as f64),
+
+      RV32(FCVT_WU_S(rd, rs1, _)) => rd.write(self, (((rs1.read_fp(self) as f32).round() as u32) as i32) as u64),
+      RV32(FCVT_S_WU(rd, rs1, _)) => rd.write_fp(self, ((rs1.read(self) as u32) as f32) as f64),
+
+      RV32(FCVT_WU_D(rd, rs1, _)) => rd.write(self, ((rs1.read_fp(self).round() as u32) as i32) as u64),
+      RV32(FCVT_D_WU(rd, rs1, _)) => rd.write_fp(self, (rs1.read(self) as u32) as f64),
+
+      RV32(FCVT_S_D(rd, rs1, _)) => rd.write_fp(self, rs1.read_fp(self)),
+      RV32(FCVT_D_S(rd, rs1, _)) => rd.write_fp(self, (rs1.read_fp(self) as f32) as f64),
+
+      RV64(FCVT_L_S(rd, rs1, _)) => rd.write(self, (rs1.read_fp(self) as f32).round() as u64),
+      RV64(FCVT_S_L(rd, rs1, _)) => rd.write_fp(self, (rs1.read(self) as f32) as f64),
+
+      RV64(FCVT_LU_S(rd, rs1, _)) => rd.write(self, (rs1.read_fp(self) as f32).round() as u64),
+      RV64(FCVT_S_LU(rd, rs1, _)) => rd.write_fp(self, ((rs1.read(self) as u64) as f32) as f64),
+
+      RV64(FCVT_L_D(rd, rs1, _)) => rd.write(self, rs1.read_fp(self).round() as u64),
+      RV64(FCVT_D_L(rd, rs1, _)) => rd.write_fp(self, rs1.read(self) as f64),
+
+      RV64(FCVT_LU_D(rd, rs1, _)) => rd.write(self, rs1.read_fp(self).round() as u64),
+      RV64(FCVT_D_LU(rd, rs1, _)) => rd.write_fp(self, rs1.read(self) as f64),
 
       // Privileged
       RV64(SRET) => {
@@ -512,7 +596,7 @@ impl RV64Cpu {
       RV64(WFI) => {
         println!("[Valheim] CPU wfi at {:#x}", pc.0);
         self.wfi = true
-      },
+      }
 
       // 4.1.11 Supervisor Address Translation and Protection (satp) Register
       // The satp register is considered active when the effective privilege mode is S-mode or U-mode.
@@ -538,30 +622,33 @@ impl RV64Cpu {
   }
 }
 
-impl Rs1 {
-  #[inline(always)]
-  fn read(&self, cpu: &RV64Cpu) -> u64 {
-    cpu.read_reg(self.0).expect("internal error")
-  }
+macro_rules! impl_read {
+  ($ty:ident) => {
+    impl $ty {
+      #[inline(always)]
+      fn read(&self, cpu: &RV64Cpu) -> u64 {
+        cpu.read_reg(self.0).expect("internal error")
+      }
+
+      #[inline(always)]
+      fn read_fp(&self, cpu: &RV64Cpu) -> f64 {
+        cpu.read_reg_fp(self.0).expect("internal error")
+      }
+    }
+  };
 }
 
-impl Rs2 {
-  #[inline(always)]
-  fn read(&self, cpu: &RV64Cpu) -> u64 {
-    cpu.read_reg(self.0).expect("internal error")
-  }
-}
-
-impl Rs3 {
-  #[inline(always)]
-  fn read(&self, cpu: &RV64Cpu) -> u64 {
-    cpu.read_reg(self.0).expect("internal error")
-  }
-}
+impl_read!(Rs1);
+impl_read!(Rs2);
+impl_read!(Rs3);
 
 impl Rd {
   #[inline(always)]
   fn write(&self, cpu: &mut RV64Cpu, val: u64) {
     cpu.write_reg(self.0, val);
+  }
+
+  fn write_fp(&self, cpu: &mut RV64Cpu, val: f64) {
+    cpu.write_reg_fp(self.0, val);
   }
 }

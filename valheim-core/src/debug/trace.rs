@@ -1,5 +1,4 @@
 use std::cell::RefCell;
-use std::io::Write;
 use crate::cpu::regs::Regs;
 use crate::isa::compressed::untyped::Bytecode16;
 use crate::isa::typed::{Instr, Reg};
@@ -16,7 +15,7 @@ pub struct Journal {
   pub trace_file: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Trace {
   Reg(RegTrace),
   Mem(MemTrace),
@@ -33,10 +32,12 @@ pub enum InstrTrace {
   ExecutedCompressed(VirtAddr, Instr),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum RegTrace {
   Read(Reg, Option<u64>),
+  ReadFp(Reg, Option<f64>),
   Write(Reg, u64, bool),
+  WriteFp(Reg, f64, bool),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

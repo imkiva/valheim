@@ -27,12 +27,27 @@ impl Regs {
     }
   }
 
+  pub fn read_fp(&self, reg: Reg) -> Option<f64> {
+    match reg {
+      Reg::F(f) => Some(self.f[f.value() as usize]),
+      _ => None,
+    }
+  }
+
   pub fn write(&mut self, reg: Reg, value: u64) -> Option<()> {
     match reg {
       Reg::ZERO => (),
       Reg::X(x) if x.value() == 0 => (),
       Reg::X(x) => self.x[x.value() as usize] = value,
       Reg::PC => self.pc = VirtAddr(value),
+      _ => return None,
+    }
+    Some(())
+  }
+
+  pub fn write_fp(&mut self, reg: Reg, value: f64) -> Option<()> {
+    match reg {
+      Reg::F(f) => self.f[f.value() as usize] = value,
       _ => return None,
     }
     Some(())

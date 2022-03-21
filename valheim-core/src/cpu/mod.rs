@@ -1,11 +1,10 @@
 use std::fmt::Debug;
 use std::cell::RefCell;
 use crate::cpu::bus::{RV64_MEMORY_BASE, RV64_MEMORY_SIZE};
-use crate::cpu::irq::Exception;
 use crate::cpu::mmu::VMMode;
-use crate::debug::trace::{Journal, MemTrace, RegTrace, Trace};
+use crate::debug::trace::{Journal, RegTrace, Trace};
 use crate::isa::typed::Reg;
-use crate::memory::{CanIO, VirtAddr};
+use crate::memory::VirtAddr;
 
 pub mod regs;
 pub mod execute;
@@ -75,9 +74,23 @@ impl RV64Cpu {
   }
 
   #[inline(always)]
+  pub fn read_reg_fp(&self, reg: Reg) -> Option<f64> {
+    let val = self.regs.read_fp(reg);
+    self.journal.trace(|| Trace::Reg(RegTrace::ReadFp(reg, val)));
+    val
+  }
+
+  #[inline(always)]
   pub fn write_reg(&mut self, reg: Reg, val: u64) -> Option<()> {
     let res = self.regs.write(reg, val);
     self.journal.trace(|| Trace::Reg(RegTrace::Write(reg, val, res.is_some())));
+    res
+  }
+
+  #[inline(always)]
+  pub fn write_reg_fp(&mut self, reg: Reg, val: f64) -> Option<()> {
+    let res = self.regs.write_fp(reg, val);
+    self.journal.trace(|| Trace::Reg(RegTrace::WriteFp(reg, val, res.is_some())));
     res
   }
 
