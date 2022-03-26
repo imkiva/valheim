@@ -276,9 +276,7 @@ impl RV64Cpu {
 
       RV32(LR_W(rd, rs1, _, _)) => {
         let addr = rs1.read(self);
-        if addr % 4 != 0 {
-          return Err(Exception::LoadAddressMisaligned(VirtAddr(addr)));
-        }
+        if addr % 4 != 0 { return Err(Exception::LoadAddressMisaligned(VirtAddr(addr))); }
         let addr = VirtAddr(addr);
         let val = self.read_mem::<u32>(addr)?;
         rd.write(self, val as i32 as i64 as u64);
@@ -286,9 +284,7 @@ impl RV64Cpu {
       }
       RV32(SC_W(rd, rs1, rs2, _, _)) => {
         let addr = rs1.read(self);
-        if addr % 4 != 0 {
-          return Err(Exception::StoreAddressMisaligned(VirtAddr(addr)));
-        }
+        if addr % 4 != 0 { return Err(Exception::StoreAddressMisaligned(VirtAddr(addr))); }
         let addr = VirtAddr(addr);
         if self.reserved.contains(&addr) {
           // "Regardless of success or failure, executing an SC.W instruction
@@ -303,18 +299,14 @@ impl RV64Cpu {
       }
       RV64(LR_D(rd, rs1, _, _)) => {
         let addr = rs1.read(self);
-        if addr % 8 != 0 {
-          return Err(Exception::LoadAddressMisaligned(VirtAddr(addr)));
-        }
+        if addr % 8 != 0 { return Err(Exception::LoadAddressMisaligned(VirtAddr(addr))); }
         let val = self.read_mem::<u64>(VirtAddr(addr))?;
         rd.write(self, val);
         self.reserved.push(VirtAddr(addr));
       }
       RV64(SC_D(rd, rs1, rs2, _, _)) => {
         let addr = rs1.read(self);
-        if addr % 8 != 0 {
-          return Err(Exception::StoreAddressMisaligned(VirtAddr(addr)));
-        }
+        if addr % 8 != 0 { return Err(Exception::StoreAddressMisaligned(VirtAddr(addr))); }
         let addr = VirtAddr(addr);
         if self.reserved.contains(&addr) {
           self.reserved.retain(|&x| x != addr);
@@ -328,54 +320,90 @@ impl RV64Cpu {
 
       RV32(AMOADD_W(rd, rs1, rs2, _, _)) => {
         let addr = VirtAddr(rs1.read(self));
-        if addr.0 % 4 != 0 {
-          return Err(Exception::LoadAddressMisaligned(addr));
-        }
+        if addr.0 % 4 != 0 { return Err(Exception::LoadAddressMisaligned(addr)); }
         let val = self.read_mem::<u32>(addr)?;
         self.write_mem::<u32>(addr, val.wrapping_add(rs2.read(self) as u32))?;
         rd.write(self, val as i32 as i64 as u64)
       }
       RV64(AMOADD_D(rd, rs1, rs2, _, _)) => {
-        let addr = rs1.read(self);
-        if addr % 8 != 0 {
-          return Err(Exception::LoadAddressMisaligned(VirtAddr(addr)));
-        }
-        let val = self.read_mem::<u64>(VirtAddr(addr))?;
-        self.write_mem::<u64>(VirtAddr(addr), val.wrapping_add(rs2.read(self)))?;
+        let addr = VirtAddr(rs1.read(self));
+        if addr.0 % 8 != 0 { return Err(Exception::LoadAddressMisaligned(addr)); }
+        let val = self.read_mem::<u64>(addr)?;
+        self.write_mem::<u64>(addr, val.wrapping_add(rs2.read(self)))?;
         rd.write(self, val);
       }
 
-      RV32(AMOXOR_W(_, _, _, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV64(AMOXOR_D(_, _, _, _, _)) => panic!("not implemented at PC = {:?}", pc),
+      RV32(AMOXOR_W(rd, rs1, rs2, _, _)) => {
+        let addr = VirtAddr(rs1.read(self));
+        if addr.0 % 4 != 0 { return Err(Exception::LoadAddressMisaligned(addr)); }
+        let val = self.read_mem::<u32>(addr)?;
+        self.write_mem::<u32>(addr, (val as i32 ^ (rs2.read(self) as i32)) as u32)?;
+        rd.write(self, val as i32 as i64 as u64)
+      }
+      RV64(AMOXOR_D(rd, rs1, rs2, _, _)) => {
+        let addr = VirtAddr(rs1.read(self));
+        if addr.0 % 8 != 0 { return Err(Exception::LoadAddressMisaligned(addr)); }
+        let val = self.read_mem::<u64>(addr)?;
+        self.write_mem::<u64>(addr, val ^ rs2.read(self))?;
+        rd.write(self, val);
+      }
 
-      RV32(AMOAND_W(_, _, _, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV64(AMOAND_D(_, _, _, _, _)) => panic!("not implemented at PC = {:?}", pc),
+      RV32(AMOAND_W(rd, rs1, rs2, _, _)) => {
+        let addr = VirtAddr(rs1.read(self));
+        if addr.0 % 4 != 0 { return Err(Exception::LoadAddressMisaligned(addr)); }
+        let val = self.read_mem::<u32>(addr)?;
+        self.write_mem::<u32>(addr, (val as i32 & (rs2.read(self) as i32)) as u32)?;
+        rd.write(self, val as i32 as i64 as u64)
+      }
+      RV64(AMOAND_D(rd, rs1, rs2, _, _)) => {
+        let addr = VirtAddr(rs1.read(self));
+        if addr.0 % 8 != 0 { return Err(Exception::LoadAddressMisaligned(addr)); }
+        let val = self.read_mem::<u64>(addr)?;
+        self.write_mem::<u64>(addr, val & rs2.read(self))?;
+        rd.write(self, val);
+      }
 
-      RV32(AMOOR_W(_, _, _, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV64(AMOOR_D(_, _, _, _, _)) => panic!("not implemented at PC = {:?}", pc),
+      RV32(AMOOR_W(rd, rs1, rs2, _, _)) => {
+        let addr = VirtAddr(rs1.read(self));
+        if addr.0 % 4 != 0 { return Err(Exception::LoadAddressMisaligned(addr)); }
+        let val = self.read_mem::<u32>(addr)?;
+        self.write_mem::<u32>(addr, (val as i32 | (rs2.read(self) as i32)) as u32)?;
+        rd.write(self, val as i32 as i64 as u64)
+      }
+      RV64(AMOOR_D(rd, rs1, rs2, _, _)) => {
+        let addr = VirtAddr(rs1.read(self));
+        if addr.0 % 8 != 0 { return Err(Exception::LoadAddressMisaligned(addr)); }
+        let val = self.read_mem::<u64>(addr)?;
+        self.write_mem::<u64>(addr, val | rs2.read(self))?;
+        rd.write(self, val);
+      }
 
-      RV32(AMOMIN_W(_, _, _, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV64(AMOMIN_D(_, _, _, _, _)) => panic!("not implemented at PC = {:?}", pc),
+      RV32(AMOMIN_W(rd, rs1, rs2, _, _)) => panic!("not implemented at PC = {:?}", pc),
+      RV64(AMOMIN_D(rd, rs1, rs2, _, _)) => panic!("not implemented at PC = {:?}", pc),
 
-      RV32(AMOMAX_W(_, _, _, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV64(AMOMAX_D(_, _, _, _, _)) => panic!("not implemented at PC = {:?}", pc),
+      RV32(AMOMAX_W(rd, rs1, rs2, _, _)) => panic!("not implemented at PC = {:?}", pc),
+      RV64(AMOMAX_D(rd, rs1, rs2, _, _)) => panic!("not implemented at PC = {:?}", pc),
 
-      RV32(AMOMINU_W(_, _, _, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV64(AMOMINU_D(_, _, _, _, _)) => panic!("not implemented at PC = {:?}", pc),
+      RV32(AMOMINU_W(rd, rs1, rs2, _, _)) => panic!("not implemented at PC = {:?}", pc),
+      RV64(AMOMINU_D(rd, rs1, rs2, _, _)) => panic!("not implemented at PC = {:?}", pc),
 
-      RV32(AMOMAXU_W(_, _, _, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV64(AMOMAXU_D(_, _, _, _, _)) => panic!("not implemented at PC = {:?}", pc),
+      RV32(AMOMAXU_W(rd, rs1, rs2, _, _)) => panic!("not implemented at PC = {:?}", pc),
+      RV64(AMOMAXU_D(rd, rs1, rs2, _, _)) => panic!("not implemented at PC = {:?}", pc),
 
       RV32(AMOSWAP_W(rd, rs1, rs2, _, _)) => {
         let addr = rs1.read(self);
-        if addr % 4 != 0 {
-          return Err(Exception::LoadAddressMisaligned(VirtAddr(addr)));
-        }
+        if addr % 4 != 0 { return Err(Exception::LoadAddressMisaligned(VirtAddr(addr))); }
         let val = self.read_mem::<u32>(VirtAddr(addr))?;
         self.write_mem::<u32>(VirtAddr(addr), rs2.read(self) as u32)?;
         rd.write(self, val as i32 as i64 as u64)
       }
-      RV64(AMOSWAP_D(_, _, _, _, _)) => panic!("not implemented at PC = {:?}", pc),
+      RV64(AMOSWAP_D(rd, rs1, rs2, _, _)) => {
+        let addr = rs1.read(self);
+        if addr % 8 != 0 { return Err(Exception::LoadAddressMisaligned(VirtAddr(addr))); }
+        let val = self.read_mem::<u64>(VirtAddr(addr))?;
+        self.write_mem::<u64>(VirtAddr(addr), rs2.read(self))?;
+        rd.write(self, val)
+      }
 
       RV64(CSRRW(rd, rs1, csr)) => {
         let old = self.csrs.read(csr);
