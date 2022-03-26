@@ -85,7 +85,7 @@ impl<const HIGH_BIT: usize, const LOW_BIT: usize> Imm32<HIGH_BIT, LOW_BIT> {
   }
 
   pub fn decode_sext(self) -> i32 {
-    sign_extend32(self.decode(), self.valid_bits())
+    sign_extend32(self.decode(), HIGH_BIT)
   }
 }
 
@@ -95,9 +95,10 @@ impl<const HIGH_BIT: usize, const LOW_BIT: usize> Debug for Imm32<HIGH_BIT, LOW_
   }
 }
 
+/// `sign_bit` The sign bit position of the `data`
 #[inline(always)]
-fn sign_extend32(data: u32, size: usize) -> i32 {
-  ((data << (32 - size)) as i32) >> (32 - size)
+fn sign_extend32(data: u32, sign_bit: usize) -> i32 {
+  ((data << (31 - sign_bit)) as i32) >> (31 - sign_bit)
 }
 
 impl<
@@ -141,5 +142,31 @@ mod tests {
 
     let all_u32 = imm20.decode() | imm19_12.decode() | imm11.decode() | imm10_1.decode();
     assert_eq!(all.decode(), all_u32);
+  }
+
+  #[test]
+  fn test_jal_decode() {
+    let instr_asm: u32 = 0x760c30ef;
+    let instr = JType::from_bytes(instr_asm.to_le_bytes());
+
+    let imm19_12 = Imm32::<19, 12>::from(instr.imm19_12() as u32);
+    let imm11 = Imm32::<11, 11>::from(instr.imm11() as u32);
+    let imm10_1 = Imm32::<10, 1>::from(instr.imm10_1() as u32);
+    let imm20 = Imm32::<20, 20>::from(instr.imm20() as u32);
+    let all = imm20.bitor(imm19_12).bitor(imm11).bitor(imm10_1);
+
+    let all_u32 = imm20.decode() | imm19_12.decode() | imm11.decode() | imm10_1.decode();
+    assert_eq!(all.decode(), all_u32);
+
+    // imm[20|10:1|11|19:12] = inst[31|30:21|20|19:12]
+    let instr_asm = instr_asm as u64;
+    let offset = (((instr_asm & 0x80000000) as i32 as i64 >> 11) as u64) // imm[20]
+      | (instr_asm & 0xff000) // imm[19:12]
+      | ((instr_asm >> 9) & 0x800) // imm[11]
+      | ((instr_asm >> 20) & 0x7fe); // imm[10:1]
+
+    dbg!(all.decode_sext());
+    dbg!(all.decode());
+    dbg!(offset);
   }
 }
