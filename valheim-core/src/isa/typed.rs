@@ -124,7 +124,7 @@ mod tests {
   use crate::isa::untyped::JType;
   #[test]
   fn test_imm_decode() {
-    // jal x0, -6*4
+    // jal x0, -24
     let instr_asm: u32 = 0b_1_1111110100_1_11111111_00000_1101111;
     let instr = JType::from_bytes(instr_asm.to_le_bytes());
 
