@@ -13,14 +13,8 @@ This project is built for [一生一芯](https://ysyx.org/) as a reference imple
 
 ### Amazing Moments
 
-#### Running [xv6 for RISC-V](https://github.com/mit-pdos/xv6-riscv)
-With the following command:
-```shell
-$(CROSS)objcopy -O binary xv6/kernel xv6/kernel.bin
-cargo run --release -- --kernel xv6/kernel.bin --disk xv6/fs.img
-```
-
-![xv6-booting](./pictures/xv6-booting.png)
+#### Running [openEuler Linux for RISC-V](https://github.com/openeuler-mirror/RISC-V) (Work in progress)
+[![asciicast](https://asciinema.org/a/480953.svg)](https://asciinema.org/a/480953)
 
 #### Running [RustSBI-QEMU with its test kernel](https://github.com/rustsbi/rustsbi-qemu)
 With the following command:
@@ -30,3 +24,11 @@ cargo run --release -- --kernel tests/test-kernel.bin --bios tests/rustsbi-qemu.
 
 ![rustsbi-booting](./pictures/rustsbi-booting.jpg)
 
+#### Running [xv6 for RISC-V](https://github.com/mit-pdos/xv6-riscv)
+With the following command:
+```shell
+$(CROSS)objcopy -O binary xv6/kernel xv6/kernel.bin
+cargo run --release -- --kernel xv6/kernel.bin --disk xv6/fs.img
+```
+
+![xv6-booting](./pictures/xv6-booting.png)
