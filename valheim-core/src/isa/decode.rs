@@ -121,11 +121,31 @@ macro_rules! i {
     $type!($opcode, rd, rs1, imm)
   }};
 }
+macro_rules! i_load_fp {
+  ($type:ident, $opcode:ident, $untyped:expr, $freg:ident, $greg:ident) => {{
+    let i = $untyped.i();
+    let rd = Rd($freg(i.rd()));
+    let rs1 = Rs1($greg(i.rs1()));
+    let imm = Imm32::<11, 0>::from(i.imm11_0() as u32);
+    $type!($opcode, rd, rs1, imm)
+  }};
+}
 macro_rules! s {
   ($type:ident, $opcode:ident, $untyped:expr, $reg:ident) => {{
     let s = $untyped.s();
     let rs1 = Rs1($reg(s.rs1()));
     let rs2 = Rs2($reg(s.rs2()));
+    let imm11_5 = Imm32::<11, 5>::from(s.imm11_5() as u32);
+    let imm4_0 = Imm32::<4, 0>::from(s.imm4_0() as u32);
+    let imm = imm11_5.bitor(imm4_0);
+    $type!($opcode, rs1, rs2, imm)
+  }};
+}
+macro_rules! s_store_fp {
+  ($type:ident, $opcode:ident, $untyped:expr, $freg:ident, $greg:ident) => {{
+    let s = $untyped.s();
+    let rs1 = Rs1($greg(s.rs1()));
+    let rs2 = Rs2($freg(s.rs2()));
     let imm11_5 = Imm32::<11, 5>::from(s.imm11_5() as u32);
     let imm4_0 = Imm32::<4, 0>::from(s.imm4_0() as u32);
     let imm = imm11_5.bitor(imm4_0);
@@ -435,13 +455,13 @@ fn decode_untyped(untyped: Bytecode) -> Option<Instr> {
 
     // RV32/64 FD
     OpcodeMap::LOAD_FP => match untyped.i().funct3() as u8 {
-      0b010 => i!(rv32, FLW, untyped, fp),
-      0b011 => i!(rv32, FLD, untyped, fp),
+      0b010 => i_load_fp!(rv32, FLW, untyped, fp, gp),
+      0b011 => i_load_fp!(rv32, FLD, untyped, fp, gp),
       _ => return None,
     }
     OpcodeMap::STORE_FP => match untyped.s().funct3() as u8 {
-      0b010 => s!(rv32, FSW, untyped, fp),
-      0b011 => s!(rv32, FSD, untyped, fp),
+      0b010 => s_store_fp!(rv32, FSW, untyped, fp, gp),
+      0b011 => s_store_fp!(rv32, FSD, untyped, fp, gp),
       _ => return None,
     }
     OpcodeMap::MADD => match untyped.r4().funct2() as u8 {
