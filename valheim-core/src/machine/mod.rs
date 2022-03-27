@@ -27,7 +27,7 @@ impl Machine {
   pub fn new(cmdline: Option<String>, trace: Option<String>) -> Machine {
     let mut cpu = RV64Cpu::new(trace);
     let cmdline = cmdline.unwrap_or(DEFAULT_CMDLINE.to_string());
-    let device_tree_rom = generate_device_tree_rom(cmdline)
+    let device_tree_rom = generate_device_tree_rom(cmdline, cpu.bus.mem.memory_size)
       .expect("Cannot generate device tree");
     cpu.bus.load_device_tree(device_tree_rom.as_slice());
     unsafe {
