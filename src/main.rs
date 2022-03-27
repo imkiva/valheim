@@ -1,8 +1,6 @@
 use std::fs::File;
 use std::io::Read;
-
 use clap::Parser;
-
 use valheim_core::machine::Machine;
 
 mod repl;
