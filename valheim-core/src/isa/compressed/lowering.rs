@@ -1,6 +1,6 @@
 use crate::isa::compressed::untyped::Bytecode16;
 use crate::isa::data::Fin;
-use crate::isa::decode::gp;
+use crate::isa::decode::{fp, gp};
 use crate::isa::typed::{Imm32, Instr, Rd, Reg, Rs1, Rs2, Shamt};
 use crate::isa::rv32::RV32Instr;
 use crate::isa::rv64::RV64Instr;
@@ -72,7 +72,16 @@ fn decode_untyped(untyped: Bytecode16) -> Option<Instr> {
       }
 
       // C.FLD for RV32/64, C.LQ for RV128 (not supported)
-      0b001 => todo!("C.FLD"),
+      0b001 => {
+        let cl = untyped.cl();
+        let rd = Rd(fp_3(cl.rd()));
+        let rs1 = Rs1(gp_3(cl.rs1()));
+        // offset[5:3|7:6] = isnt[12:10|6:5]
+        let offset = ((inst << 1) & 0xc0) // imm[7:6]
+          | ((inst >> 7) & 0x38); // imm[5:3]
+
+        rv32!(FLD, rd, rs1, Imm32::from(offset as u32))
+      }
 
       // C.LW
       0b010 => {
@@ -103,7 +112,16 @@ fn decode_untyped(untyped: Bytecode16) -> Option<Instr> {
       0b100 => reserved!(),
 
       // C.FSD for RV32/64, C.SQ for RV128 (not supported)
-      0b101 => todo!("C.FSD"),
+      0b101 => {
+        let cs = untyped.cs();
+        let rs1 = Rs1(gp_3(cs.rs1()));
+        let rs2 = Rs2(fp_3(cs.rs2()));
+        // offset[5:3|7:6] = isnt[12:10|6:5]
+        let offset = ((inst << 1) & 0xc0) // imm[7:6]
+          | ((inst >> 7) & 0x38); // imm[5:3]
+
+        rv32!(FSD, rs1, rs2, Imm32::from(offset as u32))
+      }
 
       // C.SW
       0b110 => {
@@ -344,7 +362,15 @@ fn decode_untyped(untyped: Bytecode16) -> Option<Instr> {
       }
 
       // C.FLDSP for RV32/64, C.LQSP for RV128 (not supported)
-      0b001 => todo!("C.FLDSP"),
+      0b001 => {
+        let ci = untyped.ci();
+        let rd = Rd(fp(ci.rd()));
+        // offset[5|4:3|8:6] = inst[12|6:5|4:2]
+        let offset = ((inst << 4) & 0x1c0) // offset[8:6]
+          | ((inst >> 7) & 0x20) // offset[5]
+          | ((inst >> 2) & 0x18); // offset[4:3]
+        rv32!(FLD, rd, Rs1(Reg::X(Fin::new(2))), Imm32::from(offset as u32))
+      }
 
       // C.LWSP (RES for rd = 0)
       0b010 if rd_is_0!(untyped) => reserved!(),
@@ -406,7 +432,14 @@ fn decode_untyped(untyped: Bytecode16) -> Option<Instr> {
       }
 
       // C.FSDSP for RV32/64, C.SQSP for RV128 (not supported)
-      0b101 => todo!("C.FSDSP"),
+      0b101 => {
+        let css = untyped.css();
+        let rs2 = Rs2(fp(css.rs2()));
+        // offset[5:3|8:6] = isnt[12:10|9:7]
+        let offset = ((inst >> 1) & 0x1c0) // offset[8:6]
+          | ((inst >> 7) & 0x38); // offset[5:3]
+        rv32!(FSD, Rs1(Reg::X(Fin::new(2))), rs2, Imm32::from(offset as u32))
+      }
 
       // C.SWSP
       0b110 => {
