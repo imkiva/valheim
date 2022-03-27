@@ -4,6 +4,9 @@
 #![feature(generic_const_exprs)]
 #![feature(inline_const_pat)]
 
+extern crate core;
+#[macro_use]
+extern crate derive_more;
 pub mod cpu;
 pub mod isa;
 pub mod memory;
@@ -13,6 +16,3 @@ pub mod debug;
 pub mod machine;
 pub mod dtb;
 
-#[macro_use]
-extern crate derive_more;
-extern crate core;

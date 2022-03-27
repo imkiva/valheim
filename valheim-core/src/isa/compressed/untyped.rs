@@ -1,5 +1,7 @@
 use std::fmt::{Debug, Formatter};
+
 use modular_bitfield::prelude::*;
+
 use crate::memory::CanIO;
 use crate::unsafe_wrapper;
 

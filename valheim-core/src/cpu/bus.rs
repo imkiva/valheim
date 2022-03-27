@@ -1,8 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt::{Debug, Formatter};
-use std::fs::File;
-use std::io::Read;
 use std::sync::Arc;
+
 use crate::cpu::irq::Exception;
 use crate::device::clint::Clint;
 use crate::device::Device;

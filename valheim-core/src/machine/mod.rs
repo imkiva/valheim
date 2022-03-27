@@ -1,4 +1,5 @@
 use std::sync::Arc;
+
 use crate::cpu::irq::Exception;
 use crate::cpu::RV64Cpu;
 use crate::device::ns16550a::Uart16550a;

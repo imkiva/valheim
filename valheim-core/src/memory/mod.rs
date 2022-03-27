@@ -1,4 +1,5 @@
 use std::fmt::Debug;
+
 use memmap2::MmapMut;
 
 /// `transmutable` data types

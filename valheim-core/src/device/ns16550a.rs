@@ -1,9 +1,10 @@
 use std::io;
 use std::io::prelude::*;
 use std::sync::{
-  atomic::{AtomicBool, Ordering},
-  Arc, Condvar, Mutex,
+  Arc,
+  atomic::{AtomicBool, Ordering}, Condvar, Mutex,
 };
+
 use crate::device::Device;
 use crate::memory::{Memory, VirtAddr};
 

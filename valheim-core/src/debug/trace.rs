@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+
 use crate::cpu::regs::Regs;
 use crate::isa::compressed::untyped::Bytecode16;
 use crate::isa::typed::{Instr, Reg};

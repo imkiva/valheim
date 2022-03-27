@@ -1,4 +1,5 @@
 use lalrpop_util::lalrpop_mod;
+
 use valheim_core::isa::typed::Reg;
 use valheim_core::memory::VirtAddr;
 

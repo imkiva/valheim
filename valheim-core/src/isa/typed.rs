@@ -1,4 +1,5 @@
 use std::fmt::{Debug, Formatter};
+
 use crate::isa::data::{Fin, workaround};
 use crate::isa::rv32::RV32Instr;
 use crate::isa::rv64::RV64Instr;
@@ -121,8 +122,10 @@ impl<
 #[cfg(test)]
 mod tests {
   use std::ops::BitOr;
+
   use crate::isa::typed::Imm32;
   use crate::isa::untyped::JType;
+
   #[test]
   fn test_imm_decode() {
     // jal x0, -24

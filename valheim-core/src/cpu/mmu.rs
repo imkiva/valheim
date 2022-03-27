@@ -1,7 +1,8 @@
 use std::fmt::Debug;
-use crate::cpu::irq::Exception;
+
 use crate::cpu::{PrivilegeMode, RV64Cpu};
 use crate::cpu::csr::CSRMap::SATP;
+use crate::cpu::irq::Exception;
 use crate::debug::trace::{MemTrace, Trace};
 use crate::memory::{CanIO, VirtAddr};
 
@@ -323,7 +324,7 @@ impl RV64Cpu {
           5 => (ppn[4] << 48) | (ppn[3] << 39) | (ppn[2] << 30) | (vpn[1] << 21) | (vpn[0] << 12) | page_offset,
           _ => unreachable!()
         }
-      },
+      }
       3 => {
         // pa.ppn[2:0] = va.vpn[2:0]
         // pa.ppn[LEVELS−1:3] = pte.ppn[LEVELS−1:3]
@@ -333,7 +334,7 @@ impl RV64Cpu {
           5 => (ppn[4] << 48) | (ppn[3] << 39) | (vpn[2] << 30) | (vpn[1] << 21) | (vpn[0] << 12) | page_offset,
           _ => unreachable!()
         }
-      },
+      }
       4 => {
         // pa.ppn[3:0] = va.vpn[3:0]
         // pa.ppn[LEVELS−1:4] = pte.ppn[LEVELS−1:4]

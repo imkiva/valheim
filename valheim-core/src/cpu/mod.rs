@@ -1,5 +1,6 @@
-use std::fmt::Debug;
 use std::cell::RefCell;
+use std::fmt::Debug;
+
 use crate::cpu::bus::{RV64_MEMORY_BASE, RV64_MEMORY_SIZE};
 use crate::cpu::mmu::VMMode;
 use crate::debug::trace::{Journal, RegTrace, Trace};

@@ -1,8 +1,8 @@
 // TODO: rewrite this file.
 
 use crate::cpu::bus::VIRTIO_BASE;
-use crate::cpu::RV64Cpu;
 use crate::cpu::irq::Exception;
+use crate::cpu::RV64Cpu;
 use crate::memory::{CanIO, VirtAddr};
 
 /// The interrupt request of virtio.

@@ -3,8 +3,8 @@
 
 use crate::cpu::bus::CLINT_BASE;
 use crate::cpu::csr::{CSRMap, CSRRegs};
-use crate::cpu::irq::Exception;
 use crate::cpu::csr::CSRMap::{*};
+use crate::cpu::irq::Exception;
 use crate::memory::{CanIO, VirtAddr};
 
 /// machine timer register

@@ -1,11 +1,12 @@
 use std::ops::BitOr;
-use crate::isa::rv32::RV32Instr;
-use crate::isa::rv64::RV64Instr;
-use crate::isa::typed::{Imm32, Instr, Rd, Reg, Rs1, Rs2, Rs3, Shamt, AQ, RL, RoundingMode};
-use crate::isa::rv32::{FenceFm, FenceSucc, FencePred};
-use crate::isa::rv64::{CSRAddr, UImm};
-use crate::isa::untyped::Bytecode;
+
 use crate::isa::data::Fin;
+use crate::isa::rv32::{FenceFm, FencePred, FenceSucc};
+use crate::isa::rv32::RV32Instr;
+use crate::isa::rv64::{CSRAddr, UImm};
+use crate::isa::rv64::RV64Instr;
+use crate::isa::typed::{AQ, Imm32, Instr, Rd, Reg, RL, RoundingMode, Rs1, Rs2, Rs3, Shamt};
+use crate::isa::untyped::Bytecode;
 
 impl Instr {
   pub fn try_from(untyped: Bytecode) -> Option<Instr> {
@@ -664,6 +665,7 @@ mod OpcodeMap {
 mod tests {
   use crate::isa::typed::Instr;
   use crate::isa::untyped::Bytecode;
+
   #[test]
   fn test_instr_decode() {
     // jal x0, -6*4

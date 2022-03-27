@@ -1,17 +1,17 @@
+use crate::cpu::{PrivilegeMode, RV64Cpu};
 use crate::cpu::csr::CSRMap::{FCSR, FCSR_DZ_MASK, MEPC, MSTATUS, SATP, SEPC, SSTATUS};
 use crate::cpu::data::Either;
 use crate::cpu::irq::Exception;
-use crate::cpu::{PrivilegeMode, RV64Cpu};
 use crate::debug::trace::{InstrTrace, Trace};
 use crate::isa::compressed::untyped::Bytecode16;
 use crate::isa::rv32::RV32Instr;
-use crate::isa::typed::{Imm32, Instr, Rd, Reg, Rs1, Rs2, Rs3};
-use crate::isa::untyped::Bytecode;
-use crate::memory::VirtAddr;
 use crate::isa::rv32::RV32Instr::*;
 use crate::isa::rv64::RV64Instr;
 use crate::isa::rv64::RV64Instr::*;
+use crate::isa::typed::{Imm32, Instr, Rd, Reg, Rs1, Rs2, Rs3};
 use crate::isa::typed::Instr::{RV32, RV64};
+use crate::isa::untyped::Bytecode;
+use crate::memory::VirtAddr;
 
 impl RV64Cpu {
   pub fn fetch(&mut self) -> Result<(VirtAddr, Bytecode, Bytecode16), Exception> {
