@@ -42,8 +42,7 @@ pub struct Bus {
   pub io_map: BTreeMap<(VirtAddr, VirtAddr), usize>,
 
   // Builtin IO devices
-  // TODO: replace with a real device
-  pub virt_mrom: Memory,
+  pub device_tree: Memory,
   pub clint: Clint,
   pub plic: Plic,
   pub virtio: Virtio,
@@ -62,26 +61,19 @@ impl Debug for Bus {
 
 impl Bus {
   pub fn new() -> Result<Bus, std::io::Error> {
-    let mut dtb = Vec::new();
-    File::open("valheim.dtb")?.read_to_end(&mut dtb)?;
-    let mut rom = vec![0; 32];
-    rom.append(&mut dtb);
-    let align = 0x1000;
-    rom.resize((rom.len() + align - 1) / align * align, 0);
-
-    let mut mrom = Memory::new(VIRT_MROM_BASE, VIRT_MROM_SIZE as usize)?;
-    mrom.load(rom.as_slice(), VIRT_MROM_BASE as usize).unwrap();
-
-    let bus = Bus {
+    Ok(Bus {
       mem: Memory::new(RV64_MEMORY_BASE, RV64_MEMORY_SIZE as usize)?,
       devices: Vec::with_capacity(8),
       io_map: BTreeMap::new(),
-      virt_mrom: mrom,
+      device_tree: Memory::new(VIRT_MROM_BASE, VIRT_MROM_SIZE as usize)?,
       clint: Clint::new(),
       plic: Plic::new(),
       virtio: Virtio::new(),
-    };
-    Ok(bus)
+    })
+  }
+
+  pub fn load_device_tree(&mut self, bytes: &[u8]) -> Option<()> {
+    self.device_tree.load(bytes, VIRT_MROM_BASE as usize)
   }
 
   pub unsafe fn add_device(&mut self, device: Arc<dyn Device>) -> Result<(), ()> {
@@ -105,7 +97,7 @@ impl Bus {
     // fast-path for builtin io devices
     match addr.0 {
       RV64_MEMORY_BASE..=RV64_MEMORY_END => self.mem.read::<T>(addr).ok_or(Exception::LoadAccessFault(addr)),
-      VIRT_MROM_BASE..=VIRT_MROM_END => self.virt_mrom.read::<T>(addr).ok_or(Exception::LoadAccessFault(addr)),
+      VIRT_MROM_BASE..=VIRT_MROM_END => self.device_tree.read::<T>(addr).ok_or(Exception::LoadAccessFault(addr)),
       CLINT_BASE..=CLINT_END => Ok(Bus::safe_reinterpret_as_T(self.clint.read::<T>(addr)?)),
       PLIC_BASE..=PLIC_END => {
         assert_eq!(std::mem::size_of::<T>(), 4);
@@ -131,7 +123,7 @@ impl Bus {
     // fast-path for builtin io devices
     match addr.0 {
       RV64_MEMORY_BASE..=RV64_MEMORY_END => self.mem.write::<T>(addr, val).ok_or(Exception::StoreAccessFault(addr)),
-      VIRT_MROM_BASE..=VIRT_MROM_END => self.virt_mrom.write::<T>(addr, val).ok_or(Exception::StoreAccessFault(addr)),
+      VIRT_MROM_BASE..=VIRT_MROM_END => self.device_tree.write::<T>(addr, val).ok_or(Exception::StoreAccessFault(addr)),
       CLINT_BASE..=CLINT_END => self.clint.write::<T>(addr, Bus::safe_reinterpret_as_u64(val)),
       PLIC_BASE..=PLIC_END => {
         assert_eq!(std::mem::size_of::<T>(), 4);

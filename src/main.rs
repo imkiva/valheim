@@ -1,6 +1,8 @@
 use std::fs::File;
 use std::io::Read;
+
 use clap::Parser;
+
 use valheim_core::machine::Machine;
 
 mod repl;
@@ -12,6 +14,8 @@ struct Args {
   pub kernel: String,
   #[clap(short, long)]
   pub bios: Option<String>,
+  #[clap(short, long)]
+  pub cmdline: Option<String>,
   #[clap(short, long)]
   pub disk: Option<String>,
   #[clap(long)]
@@ -38,7 +42,7 @@ fn main() {
     bytes
   });
 
-  let mut machine = Machine::new(args.trace);
+  let mut machine = Machine::new(args.cmdline, args.trace);
   match bios_bytes {
     Some(bios_bytes) => {
       machine.load(0x80000000, bios_bytes.as_slice());

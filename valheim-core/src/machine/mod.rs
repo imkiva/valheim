@@ -2,6 +2,7 @@ use std::sync::Arc;
 use crate::cpu::irq::Exception;
 use crate::cpu::RV64Cpu;
 use crate::device::ns16550a::Uart16550a;
+use crate::dtb::generate_device_tree_rom;
 use crate::interp::naive::NaiveInterpreter;
 use crate::interp::RV64Interpreter;
 use crate::isa::data::Fin;
@@ -10,6 +11,7 @@ use crate::isa::typed::{Imm32, Reg};
 use crate::memory::{CanIO, VirtAddr};
 
 const RV64_PC_RESET: u64 = 0x80000000;
+const DEFAULT_CMDLINE: &str = "root=/dev/vda ro console=ttyS0";
 
 pub struct Machine {
   pub cpu: RV64Cpu,
@@ -21,8 +23,12 @@ macro_rules! csr {
 }
 
 impl Machine {
-  pub fn new(trace: Option<String>) -> Machine {
+  pub fn new(cmdline: Option<String>, trace: Option<String>) -> Machine {
     let mut cpu = RV64Cpu::new(trace);
+    let cmdline = cmdline.unwrap_or(DEFAULT_CMDLINE.to_string());
+    let device_tree_rom = generate_device_tree_rom(cmdline)
+      .expect("Cannot generate device tree");
+    cpu.bus.load_device_tree(device_tree_rom.as_slice());
     unsafe {
       cpu.bus.add_device(Arc::new(Uart16550a::new()))
         .expect("Cannot install UART device")

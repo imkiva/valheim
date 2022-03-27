@@ -11,6 +11,7 @@ pub mod interp;
 pub mod device;
 pub mod debug;
 pub mod machine;
+pub mod dtb;
 
 #[macro_use]
 extern crate derive_more;
