@@ -16,7 +16,7 @@ use crate::memory::VirtAddr;
 impl RV64Cpu {
   pub fn fetch(&mut self) -> Result<(VirtAddr, Bytecode, Bytecode16), Exception> {
     let pc = self.read_pc();
-    let bytecode: Bytecode = self.fetch_mem(pc)?;
+    let bytecode: Bytecode = Bytecode { repr: self.fetch_mem(pc)? };
     let compressed: Bytecode16 = Bytecode16 { repr: bytecode.repr() as u16 };
     self.journal.trace(|| Trace::Instr(InstrTrace::Fetched(pc, bytecode, compressed)));
     Ok((pc, bytecode, compressed))
