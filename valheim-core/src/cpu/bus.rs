@@ -67,7 +67,7 @@ impl Bus {
       device_tree: Memory::new(VIRT_MROM_BASE, VIRT_MROM_SIZE as usize)?,
       clint: Clint::new(),
       plic: Plic::new(),
-      virtio: Virtio::new(),
+      virtio: Virtio::new(0),
     })
   }
 

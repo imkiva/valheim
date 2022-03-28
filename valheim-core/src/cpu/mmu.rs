@@ -147,9 +147,9 @@ impl Reason {
 
 impl RV64Cpu {
   #[inline(always)]
-  pub fn fetch_mem<T: CanIO + Debug>(&self, addr: VirtAddr) -> Result<T, Exception> {
+  pub fn fetch_mem(&self, addr: VirtAddr) -> Result<u32, Exception> {
     let paddr = self.translate(addr, Reason::Fetch)?;
-    self.bus.read::<T>(paddr)
+    self.bus.read::<u32>(paddr)
   }
 
   #[inline(always)]

@@ -2,7 +2,6 @@ use std::fmt::{Debug, Formatter};
 
 use modular_bitfield::prelude::*;
 
-use crate::memory::CanIO;
 use crate::unsafe_wrapper;
 
 #[bitfield(bits = 16)]
@@ -160,8 +159,6 @@ impl Bytecode16 {
   unsafe_wrapper!(cbi, CBIType);
   unsafe_wrapper!(cj, CJType);
 }
-
-impl CanIO for Bytecode16 {}
 
 impl Debug for Bytecode16 {
   fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {

@@ -16,7 +16,7 @@ use crate::memory::VirtAddr;
 impl RV64Cpu {
   pub fn fetch(&mut self) -> Result<(VirtAddr, Bytecode, Bytecode16), Exception> {
     let pc = self.read_pc();
-    let bytecode: Bytecode = self.fetch_mem(pc)?;
+    let bytecode: Bytecode = Bytecode { repr: self.fetch_mem(pc)? };
     let compressed: Bytecode16 = Bytecode16 { repr: bytecode.repr() as u16 };
     self.journal.trace(|| Trace::Instr(InstrTrace::Fetched(pc, bytecode, compressed)));
     Ok((pc, bytecode, compressed))
@@ -85,22 +85,18 @@ impl RV64Cpu {
         }
       }
 
-      RV64(LD(rd, rs1, offset)) => rd.write(self, self.read_mem::<u64>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)))?),
-      RV32(LW(rd, rs1, offset)) => rd.write(self, self.read_mem::<u32>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)))? as i32 as i64 as u64),
       RV32(LB(rd, rs1, offset)) => rd.write(self, self.read_mem::<u8>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)))? as i8 as i32 as i64 as u64),
       RV32(LH(rd, rs1, offset)) => rd.write(self, self.read_mem::<u16>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)))? as i16 as i32 as i64 as u64),
-      RV64(LWU(rd, rs1, offset)) => rd.write(self, self.read_mem::<u32>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)))? as u64),
+      RV32(LW(rd, rs1, offset)) => rd.write(self, self.read_mem::<u32>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)))? as i32 as i64 as u64),
+      RV64(LD(rd, rs1, offset)) => rd.write(self, self.read_mem::<u64>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)))?),
       RV32(LBU(rd, rs1, offset)) => rd.write(self, self.read_mem::<u8>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)))? as u64),
       RV32(LHU(rd, rs1, offset)) => rd.write(self, self.read_mem::<u16>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)))? as u64),
+      RV64(LWU(rd, rs1, offset)) => rd.write(self, self.read_mem::<u32>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)))? as u64),
 
-      RV32(SB(rs1, rs2, offset)) => {
-        let addr = rs1.read(self).wrapping_add(offset.decode_sext() as u64);
-        let val = rs2.read(self) as u8;
-        self.write_mem(VirtAddr(addr), val)?
-      }
-      RV32(SH(rs1, rs2, offset)) => self.write_mem(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)), rs2.read(self) as u16)?,
-      RV32(SW(rs1, rs2, offset)) => self.write_mem(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)), rs2.read(self) as u32)?,
-      RV64(SD(rs1, rs2, offset)) => self.write_mem(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)), rs2.read(self) as u64)?,
+      RV32(SB(rs1, rs2, offset)) => self.write_mem::<u8>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)), rs2.read(self) as u8)?,
+      RV32(SH(rs1, rs2, offset)) => self.write_mem::<u16>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)), rs2.read(self) as u16)?,
+      RV32(SW(rs1, rs2, offset)) => self.write_mem::<u32>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)), rs2.read(self) as u32)?,
+      RV64(SD(rs1, rs2, offset)) => self.write_mem::<u64>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)), rs2.read(self) as u64)?,
 
       RV32(ADDI(rd, rs1, Imm32(0))) => rd.write(self, rs1.read(self)),
       // sext.w is encoded as `addiw rd, rs1, 0`

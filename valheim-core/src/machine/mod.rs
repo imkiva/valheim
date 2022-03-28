@@ -12,7 +12,7 @@ use crate::interp::RV64Interpreter;
 use crate::isa::data::Fin;
 use crate::isa::rv64::CSRAddr;
 use crate::isa::typed::{Imm32, Reg};
-use crate::memory::{CanIO, VirtAddr};
+use crate::memory::VirtAddr;
 
 const RV64_PC_RESET: u64 = 0x80000000;
 const DEFAULT_CMDLINE: &str = "root=/dev/vda ro console=ttyS0";
@@ -107,7 +107,7 @@ impl Machine {
     println!("=======================================");
   }
 
-  pub fn load_memory<T: CanIO>(&mut self, offset: usize, mem: &[T]) {
+  pub fn load_memory(&mut self, offset: usize, mem: &[u8]) {
     self.cpu.bus.mem.load(offset, mem);
   }
 
@@ -118,7 +118,7 @@ impl Machine {
   pub fn load_disk_file(&mut self, file: String) -> Result<(), std::io::Error> {
     let file = OpenOptions::new().read(true).write(true).open(&file)?;
     let mmap = unsafe { MmapMut::map_mut(&file) }?;
-    self.cpu.bus.virtio.image = Some(mmap);
+    self.cpu.bus.virtio.set_image(mmap);
     Ok(())
   }
 }
