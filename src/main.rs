@@ -56,6 +56,6 @@ fn read_image(image: &str) -> Result<Vec<u8>, std::io::Error> {
     }
   };
   let mut bytes = vec![];
-  file.read_to_end(&mut bytes).expect("Failed to read kernel");
+  file.read_to_end(&mut bytes).expect("Failed to read image file");
   Ok(bytes)
 }
