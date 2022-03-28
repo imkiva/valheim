@@ -1,4 +1,6 @@
+use std::fs::OpenOptions;
 use std::sync::Arc;
+use memmap2::MmapMut;
 
 use crate::cpu::bus::VIRT_MROM_BASE;
 use crate::cpu::irq::Exception;
@@ -113,7 +115,10 @@ impl Machine {
     self.cpu.bus.device_tree.load(VIRT_MROM_BASE as usize, bytes)
   }
 
-  pub fn load_disk(&mut self, binary: Vec<u8>) {
-    self.cpu.bus.virtio.image = binary;
+  pub fn load_disk_file(&mut self, file: String) -> Result<(), std::io::Error> {
+    let file = OpenOptions::new().read(true).write(true).open(&file)?;
+    let mmap = unsafe { MmapMut::map_mut(&file) }?;
+    self.cpu.bus.virtio.image = Some(mmap);
+    Ok(())
   }
 }
