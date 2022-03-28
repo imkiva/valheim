@@ -5,7 +5,7 @@ on:
   pull_request:
     branches: [main]
 jobs:
-  gradle-check:
+  cargo-check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
