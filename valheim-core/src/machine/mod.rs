@@ -118,7 +118,7 @@ impl Machine {
   pub fn load_disk_file(&mut self, file: String) -> Result<(), std::io::Error> {
     let file = OpenOptions::new().read(true).write(true).open(&file)?;
     let mmap = unsafe { MmapMut::map_mut(&file) }?;
-    self.cpu.bus.virtio.image = Some(mmap);
+    self.cpu.bus.virtio.set_image(mmap);
     Ok(())
   }
 }

@@ -273,25 +273,19 @@ pub struct Virtio {
   queue_notify: u32,
   interrupt_status: u32,
   status: u32,
-  config: [u8; 8],
+  capacity: u64,
   virtqueue: Option<VirtqueueAddr>,
-  pub image: Option<MmapMut>,
+  image: Option<MmapMut>,
 }
 
 impl Virtio {
-  pub fn new() -> Self {
-    let mut config = [0; 8];
+  /// `capacity` how many 512-byte blocks?
+  pub fn new(capacity: u64) -> Self {
     // https://docs.oasis-open.org/virtio/virtio/v1.1/csprd01/virtio-v1.1-csprd01.html#x1-2440004
     // 5.2.4 Device configuration layout
     // struct virtio_blk_config {
     //   le64 capacity;
     // }
-    //
-    // The value is based on QEMU's output:
-    // "virtio_blk virtio0: [vda] 204800 512-byte logical blocks (105 MB/100 MiB)"
-    // 204800 --> 0x32000
-    config[1] = 0x20;
-    config[2] = 0x03;
 
     Self {
       id: 0,
@@ -307,10 +301,16 @@ impl Virtio {
       queue_notify: u32::MAX,
       interrupt_status: 0,
       status: 0,
-      config,
+      capacity,
       image: None,
       virtqueue: None,
     }
+  }
+
+  pub fn set_image(&mut self, image: MmapMut) {
+    // "virtio_blk virtio0: [vda] `capacity` 512-byte logical blocks (XXX XB/XXX XiB)"
+    self.capacity = (image.len() as u64) / 512;
+    self.image = Some(image);
   }
 
   /// Returns device features.
@@ -384,7 +384,7 @@ impl Virtio {
           return Err(Exception::StoreAccessFault(VirtAddr(addr)));
         }
         let index = addr - CONFIG;
-        (self.config[index as usize] as u32, 0)
+        (self.capacity.to_le_bytes()[index as usize] as u32, 0)
       }
       _ => return Err(Exception::LoadAccessFault(VirtAddr(addr))),
     };
@@ -434,7 +434,9 @@ impl Virtio {
           return Err(Exception::StoreAccessFault(VirtAddr(addr)));
         }
         let index = addr - CONFIG;
-        self.config[index as usize] = (value >> (index * 8)) as u8;
+        let mut bytes = self.capacity.to_le_bytes();
+        bytes[index as usize] = (value >> (index * 8)) as u8;
+        self.capacity = u64::from_le_bytes(bytes);
         return Ok(());
       }
       _ => return Err(Exception::StoreAccessFault(VirtAddr(addr))),
