@@ -1,5 +1,8 @@
+use std::fs::OpenOptions;
 use std::sync::Arc;
+use memmap2::MmapMut;
 
+use crate::cpu::bus::VIRT_MROM_BASE;
 use crate::cpu::irq::Exception;
 use crate::cpu::RV64Cpu;
 use crate::device::ns16550a::Uart16550a;
@@ -25,19 +28,21 @@ macro_rules! csr {
 
 impl Machine {
   pub fn new(cmdline: Option<String>, trace: Option<String>) -> Machine {
-    let mut cpu = RV64Cpu::new(trace);
+    let mut machine = Machine {
+      cpu: RV64Cpu::new(trace),
+      interpreter: Box::new(NaiveInterpreter::new()),
+    };
+
     let cmdline = cmdline.unwrap_or(DEFAULT_CMDLINE.to_string());
-    let device_tree_rom = generate_device_tree_rom(cmdline, cpu.bus.mem.memory_size)
+    let device_tree_rom = generate_device_tree_rom(cmdline, machine.cpu.bus.mem.memory_size)
       .expect("Cannot generate device tree");
-    cpu.bus.load_device_tree(device_tree_rom.as_slice());
+    machine.load_device_tree(device_tree_rom.as_slice())
+      .expect("Cannot load device tree");
     unsafe {
-      cpu.bus.add_device(Arc::new(Uart16550a::new()))
+      machine.cpu.bus.add_device(Arc::new(Uart16550a::new()))
         .expect("Cannot install UART device")
     };
-    Machine {
-      cpu,
-      interpreter: Box::new(NaiveInterpreter::new()),
-    }
+    machine
   }
 
   pub fn run(&mut self) {
@@ -102,7 +107,18 @@ impl Machine {
     println!("=======================================");
   }
 
-  pub fn load<T: CanIO>(&mut self, offset: usize, mem: &[T]) {
-    self.cpu.bus.load(mem, offset);
+  pub fn load_memory<T: CanIO>(&mut self, offset: usize, mem: &[T]) {
+    self.cpu.bus.mem.load(offset, mem);
+  }
+
+  pub fn load_device_tree(&mut self, bytes: &[u8]) -> Option<()> {
+    self.cpu.bus.device_tree.load(VIRT_MROM_BASE as usize, bytes)
+  }
+
+  pub fn load_disk_file(&mut self, file: String) -> Result<(), std::io::Error> {
+    let file = OpenOptions::new().read(true).write(true).open(&file)?;
+    let mmap = unsafe { MmapMut::map_mut(&file) }?;
+    self.cpu.bus.virtio.image = Some(mmap);
+    Ok(())
   }
 }

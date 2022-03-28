@@ -22,42 +22,40 @@ struct Args {
   pub trace: Option<String>,
 }
 
-fn main() {
+fn main() -> Result<(), std::io::Error> {
   let args = Args::parse();
-  let mut kernel = File::open(&args.kernel).expect("Failed to open kernel");
-  let mut kernel_bytes = vec![];
-  kernel.read_to_end(&mut kernel_bytes).expect("Failed to read kernel");
-
-  let bios_bytes = args.bios.map(|bios| {
-    let mut file = File::open(&bios).expect("Failed to open bios");
-    let mut bytes = vec![];
-    file.read_to_end(&mut bytes).expect("Failed to read kernel");
-    bytes
-  });
-
-  let disk_bytes = args.disk.map(|bios| {
-    let mut file = File::open(&bios).expect("Failed to open disk");
-    let mut bytes = vec![];
-    file.read_to_end(&mut bytes).expect("Failed to read disk");
-    bytes
-  });
-
   let mut machine = Machine::new(args.cmdline, args.trace);
-  match bios_bytes {
-    Some(bios_bytes) => {
-      machine.load(0x80000000, bios_bytes.as_slice());
-      machine.load(0x80200000, kernel_bytes.as_slice());
+
+  let kernel = read_image(&args.kernel)?;
+  let bios = args.bios.and_then(|bios| read_image(&bios).ok());
+
+  match bios {
+    Some(bios) => {
+      machine.load_memory(0x80000000, bios.as_slice());
+      machine.load_memory(0x80200000, kernel.as_slice());
     }
     None => {
-      machine.load(0x80000000, kernel_bytes.as_slice());
+      machine.load_memory(0x80000000, kernel.as_slice());
     }
   }
-  match disk_bytes {
-    Some(disk_bytes) => {
-      machine.cpu.bus.virtio.initialize(disk_bytes);
-    }
-    None => {}
+
+  if let Some(disk_file) = args.disk {
+    machine.load_disk_file(disk_file)?;
   }
 
   machine.run();
+  Ok(())
+}
+
+fn read_image(image: &str) -> Result<Vec<u8>, std::io::Error> {
+  let mut file = match File::open(&image) {
+    Ok(file) => file,
+    Err(err) => {
+      eprintln!("Error opening image file: {}", err);
+      return Err(err);
+    }
+  };
+  let mut bytes = vec![];
+  file.read_to_end(&mut bytes).expect("Failed to read image file");
+  Ok(bytes)
 }

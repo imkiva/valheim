@@ -1,5 +1,6 @@
 // TODO: rewrite this file.
 
+use memmap2::MmapMut;
 use crate::cpu::bus::VIRTIO_BASE;
 use crate::cpu::irq::Exception;
 use crate::cpu::RV64Cpu;
@@ -258,7 +259,7 @@ impl VirtqAvail {
   }
 }
 
-/// Paravirtualized drivers for IO virtualization.
+/// Para-virtualized drivers for IO virtualization.
 pub struct Virtio {
   id: u64,
   device_features: [u32; 2],
@@ -273,8 +274,8 @@ pub struct Virtio {
   interrupt_status: u32,
   status: u32,
   config: [u8; 8],
-  disk: Vec<u8>,
   virtqueue: Option<VirtqueueAddr>,
+  pub image: Option<MmapMut>,
 }
 
 impl Virtio {
@@ -307,7 +308,7 @@ impl Virtio {
       interrupt_status: 0,
       status: 0,
       config,
-      disk: Vec::new(),
+      image: None,
       virtqueue: None,
     }
   }
@@ -353,11 +354,6 @@ impl Virtio {
       return Some(VIRTIO_IRQ);
     }
     None
-  }
-
-  /// Sets the binary in the virtio disk.
-  pub fn initialize(&mut self, binary: Vec<u8>) {
-    self.disk.extend(binary.iter().cloned());
   }
 
   pub fn read<T: CanIO>(&self, addr: VirtAddr) -> Result<u32, Exception> {
@@ -496,12 +492,18 @@ impl Virtio {
     Ok(())
   }
 
-  fn read_disk(&self, addr: u64) -> u8 {
-    self.disk[addr as usize]
+  fn read_disk(&self, addr: u64) -> Result<u8, Exception> {
+    match &self.image {
+      Some(mm) => Ok(mm[addr as usize]),
+      None => Err(Exception::LoadAccessFault(VirtAddr(addr))),
+    }
   }
 
-  fn write_disk(&mut self, addr: u64, value: u8) {
-    self.disk[addr as usize] = value
+  fn write_disk(&mut self, addr: u64, value: u8) -> Result<(), Exception> {
+    match &mut self.image {
+      Some(mm) => Ok(mm[addr as usize] = value),
+      None => Err(Exception::StoreAccessFault(VirtAddr(addr))),
+    }
   }
 
   /// Accesses the disk via virtio. This is an associated function which takes a `cpu` object to
@@ -544,13 +546,13 @@ impl Virtio {
         // Read memory data and write it to a disk.
         for i in 0..desc1.len {
           let data = cpu.bus.read::<u8>(VirtAddr(desc1.addr + i as u64))?;
-          cpu.bus.virtio.write_disk(sector * SECTOR_SIZE + i as u64, data);
+          cpu.bus.virtio.write_disk(sector * SECTOR_SIZE + i as u64, data)?;
         }
       }
       false => {
         // Read disk data and write it to memory.
         for i in 0..desc1.len {
-          let data = cpu.bus.virtio.read_disk(sector * SECTOR_SIZE + i as u64);
+          let data = cpu.bus.virtio.read_disk(sector * SECTOR_SIZE + i as u64)?;
           cpu.bus.write::<u8>(VirtAddr(desc1.addr + i as u64), data)?;
         }
       }
