@@ -45,16 +45,16 @@ fn main() {
   let mut machine = Machine::new(args.cmdline, args.trace);
   match bios_bytes {
     Some(bios_bytes) => {
-      machine.load(0x80000000, bios_bytes.as_slice());
-      machine.load(0x80200000, kernel_bytes.as_slice());
+      machine.load_memory(0x80000000, bios_bytes.as_slice());
+      machine.load_memory(0x80200000, kernel_bytes.as_slice());
     }
     None => {
-      machine.load(0x80000000, kernel_bytes.as_slice());
+      machine.load_memory(0x80000000, kernel_bytes.as_slice());
     }
   }
   match disk_bytes {
     Some(disk_bytes) => {
-      machine.cpu.bus.virtio.initialize(disk_bytes);
+      machine.load_disk(disk_bytes);
     }
     None => {}
   }

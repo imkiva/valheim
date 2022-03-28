@@ -96,7 +96,7 @@ impl Memory {
     self.get_mut(addr).map(|v| *v = value)
   }
 
-  pub fn load<T: CanIO>(&mut self, mem: &[T], offset: usize) -> Option<()> {
+  pub fn load<T: CanIO>(&mut self, offset: usize, mem: &[T]) -> Option<()> {
     let phys = self.to_phys(VirtAddr(offset as u64))?;
     unsafe {
       std::ptr::copy_nonoverlapping(

@@ -71,10 +71,6 @@ impl Bus {
     })
   }
 
-  pub fn load_device_tree(&mut self, bytes: &[u8]) -> Option<()> {
-    self.device_tree.load(bytes, VIRT_MROM_BASE as usize)
-  }
-
   pub unsafe fn add_device(&mut self, device: Arc<dyn Device>) -> Result<(), ()> {
     let ranges = device.init()?;
     let idx = self.devices.len();
@@ -184,9 +180,5 @@ impl Bus {
       }
     }
     None
-  }
-
-  pub fn load<T: CanIO>(&mut self, mem: &[T], offset: usize) {
-    self.mem.load(mem, offset);
   }
 }

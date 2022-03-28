@@ -258,7 +258,7 @@ impl VirtqAvail {
   }
 }
 
-/// Paravirtualized drivers for IO virtualization.
+/// Para-virtualized drivers for IO virtualization.
 pub struct Virtio {
   id: u64,
   device_features: [u32; 2],
@@ -273,8 +273,8 @@ pub struct Virtio {
   interrupt_status: u32,
   status: u32,
   config: [u8; 8],
-  disk: Vec<u8>,
   virtqueue: Option<VirtqueueAddr>,
+  pub image: Vec<u8>,
 }
 
 impl Virtio {
@@ -307,7 +307,7 @@ impl Virtio {
       interrupt_status: 0,
       status: 0,
       config,
-      disk: Vec::new(),
+      image: Vec::new(),
       virtqueue: None,
     }
   }
@@ -353,11 +353,6 @@ impl Virtio {
       return Some(VIRTIO_IRQ);
     }
     None
-  }
-
-  /// Sets the binary in the virtio disk.
-  pub fn initialize(&mut self, binary: Vec<u8>) {
-    self.disk.extend(binary.iter().cloned());
   }
 
   pub fn read<T: CanIO>(&self, addr: VirtAddr) -> Result<u32, Exception> {
@@ -497,11 +492,11 @@ impl Virtio {
   }
 
   fn read_disk(&self, addr: u64) -> u8 {
-    self.disk[addr as usize]
+    self.image[addr as usize]
   }
 
   fn write_disk(&mut self, addr: u64, value: u8) {
-    self.disk[addr as usize] = value
+    self.image[addr as usize] = value
   }
 
   /// Accesses the disk via virtio. This is an associated function which takes a `cpu` object to
