@@ -22,6 +22,7 @@ fn call_compiler(dts: String) -> Result<Vec<u8>, std::io::Error> {
     .args(["-I", "dts", "-O", "dtb", "-o", "-", "-"])
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())
+    .stderr(Stdio::null())
     .spawn() {
     Ok(p) => p,
     Err(e) => {
