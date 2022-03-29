@@ -2,6 +2,7 @@ use crate::cpu::{PrivilegeMode, RV64Cpu};
 use crate::cpu::csr::CSRMap::{FCSR, FCSR_DZ_MASK, MEPC, MSTATUS, SATP, SEPC, SSTATUS};
 use crate::cpu::data::Either;
 use crate::cpu::irq::Exception;
+use crate::cpu::mmu::Reason;
 use crate::debug::trace::{InstrTrace, Trace};
 use crate::isa::compressed::untyped::Bytecode16;
 use crate::isa::rv32::RV32Instr;
@@ -28,11 +29,15 @@ impl RV64Cpu {
         self.journal.trace(|| Trace::Instr(InstrTrace::DecodedCompressed(pc, compressed, instr)));
         Ok((Either::Right(compressed), instr))
       }
-      None => {
-        Instr::try_from(untyped).map(|instr| {
+      None => match Instr::try_from(untyped) {
+        Some(instr) => {
           self.journal.trace(|| Trace::Instr(InstrTrace::Decoded(pc, untyped, instr)));
-          (Either::Left(untyped), instr)
-        }).ok_or(Exception::IllegalInstruction)
+          Ok((Either::Left(untyped), instr))
+        },
+        None => {
+          // println!("Warning: invalid instruction in {:?} mode: {:#x} at {:#x}, at kernel {:?}", self.mode, untyped.repr(), pc.0, self.translate(pc, Reason::Read));
+          Err(Exception::IllegalInstruction)
+        },
       }
     }
   }
@@ -629,7 +634,23 @@ impl RV64Cpu {
         let _ = self.csrs.write_bit(MSTATUS, 12, false);
       }
       RV64(WFI) => {
-        println!("[Valheim] CPU wfi at {:#x}", pc.0);
+        println!("[Valheim] CPU wfi at {:#x} in {:?} mode", pc.0, self.mode);
+        pub fn debug_dump(cpu: &RV64Cpu, begin: VirtAddr, ninstr: u64) {
+          let udump_start = begin - VirtAddr(4 * ninstr);
+          let udump_end = begin + VirtAddr(4 * ninstr);
+          unsafe {
+            let mut udump = udump_start;
+            while udump != udump_end {
+              let kdump = cpu.translate(udump, Reason::Read).unwrap();
+              let ptr = cpu.bus.mem.to_phys(kdump).unwrap().0;
+              println!("{:#08x} -> {:#08x}: {:02x} {:02x} {:02x} {:02x}  |  {}{}{}{}", udump.0, kdump.0,
+                       *ptr, *(ptr.wrapping_add(1)), *(ptr.wrapping_add(2)), *(ptr.wrapping_add(3)),
+                       *ptr as char, *(ptr.wrapping_add(1)) as char, *(ptr.wrapping_add(2)) as char, *(ptr.wrapping_add(3)) as char);
+              udump += VirtAddr(4);
+            }
+          }
+        }
+        debug_dump(self, pc, 5);
         self.wfi = true
       }
 

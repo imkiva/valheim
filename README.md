@@ -14,7 +14,10 @@ This project is built for [一生一芯](https://ysyx.org/) as a reference imple
 ### Amazing Moments
 
 #### Running [openEuler Linux for RISC-V](https://github.com/openeuler-mirror/RISC-V) (Work in progress)
-[![asciicast](https://asciinema.org/a/480953.svg)](https://asciinema.org/a/480953)
+
+Currently, the emulated CPU got WFI after trying to spawn `/bin/sh` as init process.
+
+[![asciicast](https://asciinema.org/a/481577.svg)](https://asciinema.org/a/481577)
 
 #### Running [RustSBI-QEMU with its test kernel](https://github.com/rustsbi/rustsbi-qemu)
 With the following command:

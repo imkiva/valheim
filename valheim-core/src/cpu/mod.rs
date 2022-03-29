@@ -29,10 +29,11 @@ pub struct RV64Cpu {
   pub vmmode: VMMode,
   /// physical page number used in virtual memory translation
   pub vmppn: u64,
+  /// current cycle instruction
+  pub instr: u64,
 
   // used for debugging
   pub journal: Journal,
-  pub previous_instr: u64,
 }
 
 #[derive(Debug, PartialEq, PartialOrd, Eq, Copy, Clone)]
@@ -63,7 +64,7 @@ impl RV64Cpu {
         max_recent_traces: if trace.is_some() { 1024 } else { 0 },
         trace_file: trace,
       },
-      previous_instr: 0,
+      instr: 0,
     }
   }
 
