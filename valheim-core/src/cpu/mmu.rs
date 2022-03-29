@@ -147,13 +147,13 @@ impl Reason {
 
 impl RV64Cpu {
   #[inline(always)]
-  pub fn fetch_mem(&self, addr: VirtAddr) -> Result<u32, Exception> {
+  pub fn fetch_mem(&mut self, addr: VirtAddr) -> Result<u32, Exception> {
     let paddr = self.translate(addr, Reason::Fetch)?;
     self.bus.read::<u32>(paddr)
   }
 
   #[inline(always)]
-  pub fn read_mem<T: CanIO + Debug>(&self, addr: VirtAddr) -> Result<T, Exception> {
+  pub fn read_mem<T: CanIO + Debug>(&mut self, addr: VirtAddr) -> Result<T, Exception> {
     // TODO: mstatus MPRV
     let paddr = self.translate(addr, Reason::Read)?;
     let val = self.bus.read::<T>(paddr);
@@ -187,7 +187,7 @@ impl RV64Cpu {
     }
   }
 
-  pub fn translate(&self, addr: VirtAddr, reason: Reason) -> Result<VirtAddr, Exception> {
+  pub fn translate(&mut self, addr: VirtAddr, reason: Reason) -> Result<VirtAddr, Exception> {
     if self.vmmode == VMMode::MBARE || self.mode == PrivilegeMode::Machine {
       return Ok(addr);
     }
@@ -269,10 +269,9 @@ impl RV64Cpu {
       let pte_a = (pte >> PTE_A) & 1;
       let pte_d = (pte >> PTE_D) & 1;
       if pte_a == 0 || (reason == Reason::Write && pte_d == 0) {
-        // TODO: PMA or PMP checks
-
         // Compare pte to the value of the PTE at address a + va.vpn[i] × PTESIZE.
-        let compare = self.bus.read::<u64>(VirtAddr(a + vpn[i as usize] * ptesize))?;
+        let pte_addr= VirtAddr(a + vpn[i as usize] * ptesize);
+        let compare = self.bus.read::<u64>(pte_addr)?;
 
         // If the values match, set pte.a to 1 and
         if compare == pte {
@@ -281,11 +280,14 @@ impl RV64Cpu {
           if reason == Reason::Write {
             pte = pte | (1 << PTE_D);
           }
+
+          // TODO: PMA or PMP checks
+          self.bus.write::<u64>(pte_addr, pte)?;
           // note: and goto step 8
           break;
         } else {
           // If the comparison fails, return to step 2
-          eprint!("[Valheim] translate: compare pte failed: {} != {}, returning to step 2\n", compare, pte);
+          eprintln!("[Valheim] translate: compare pte failed: {} != {}, returning to step 2", compare, pte);
           continue;
         }
       } else {

@@ -90,13 +90,34 @@ impl RV64Cpu {
         }
       }
 
-      RV32(LB(rd, rs1, offset)) => rd.write(self, self.read_mem::<u8>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)))? as i8 as i32 as i64 as u64),
-      RV32(LH(rd, rs1, offset)) => rd.write(self, self.read_mem::<u16>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)))? as i16 as i32 as i64 as u64),
-      RV32(LW(rd, rs1, offset)) => rd.write(self, self.read_mem::<u32>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)))? as i32 as i64 as u64),
-      RV64(LD(rd, rs1, offset)) => rd.write(self, self.read_mem::<u64>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)))?),
-      RV32(LBU(rd, rs1, offset)) => rd.write(self, self.read_mem::<u8>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)))? as u64),
-      RV32(LHU(rd, rs1, offset)) => rd.write(self, self.read_mem::<u16>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)))? as u64),
-      RV64(LWU(rd, rs1, offset)) => rd.write(self, self.read_mem::<u32>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)))? as u64),
+      RV32(LB(rd, rs1, offset)) => {
+        let val = self.read_mem::<u8>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)))? as i8 as i32 as i64 as u64;
+        rd.write(self, val)
+      },
+      RV32(LH(rd, rs1, offset)) => {
+        let val = self.read_mem::<u16>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)))? as i16 as i32 as i64 as u64;
+        rd.write(self, val)
+      },
+      RV32(LW(rd, rs1, offset)) => {
+        let val = self.read_mem::<u32>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)))? as i32 as i64 as u64;
+        rd.write(self, val)
+      },
+      RV64(LD(rd, rs1, offset)) => {
+        let val = self.read_mem::<u64>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)))?;
+        rd.write(self, val)
+      },
+      RV32(LBU(rd, rs1, offset)) => {
+        let val = self.read_mem::<u8>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)))? as u64;
+        rd.write(self, val)
+      },
+      RV32(LHU(rd, rs1, offset)) => {
+        let val = self.read_mem::<u16>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)))? as u64;
+        rd.write(self, val)
+      },
+      RV64(LWU(rd, rs1, offset)) => {
+        let val = self.read_mem::<u32>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)))? as u64;
+        rd.write(self, val)
+      },
 
       RV32(SB(rs1, rs2, offset)) => self.write_mem::<u8>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)), rs2.read(self) as u8)?,
       RV32(SH(rs1, rs2, offset)) => self.write_mem::<u16>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)), rs2.read(self) as u16)?,
@@ -635,7 +656,7 @@ impl RV64Cpu {
       }
       RV64(WFI) => {
         println!("[Valheim] CPU wfi at {:#x} in {:?} mode", pc.0, self.mode);
-        pub fn debug_dump(cpu: &RV64Cpu, begin: VirtAddr, ninstr: u64) {
+        pub fn debug_dump(cpu: &mut RV64Cpu, begin: VirtAddr, ninstr: u64) {
           let udump_start = begin - VirtAddr(4 * ninstr);
           let udump_end = begin + VirtAddr(4 * ninstr);
           unsafe {
