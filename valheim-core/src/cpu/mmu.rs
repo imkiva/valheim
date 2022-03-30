@@ -188,13 +188,57 @@ impl RV64Cpu {
   }
 
   pub fn translate(&mut self, addr: VirtAddr, reason: Reason) -> Result<VirtAddr, Exception> {
-    if self.vmmode == VMMode::MBARE || self.mode == PrivilegeMode::Machine {
+    if self.vmmode == VMMode::MBARE {
       return Ok(addr);
     }
 
+    // 3.1.6.3 Memory Privilege in mstatus Register
+    // The MPRV (Modify PRiVilege) bit modifies the effective privilege mode,
+    // i.e., the privilege level at which loads and stores execute.
+    // When MPRV=0, loads and stores behave as normal, using the translation and protection
+    // mechanisms of the current privilege mode.
+    // When MPRV=1, load and store memory addresses are translated and protected,
+    // and endianness is applied, as though the current privilege mode were set to MPP.
+    // Instruction address-translation and protection are unaffected by the setting of MPRV.
+    // MPRV is read-only 0 if U-mode is not supported.
+    let eff_mode = match reason {
+      Reason::Fetch => self.mode,
+      _ => match self.csrs.read_mstatus_MPRV() {
+        true => self.csrs.read_mstatus_MPP(),
+        false => self.mode,
+      }
+    };
+
+    if eff_mode == PrivilegeMode::Machine {
+      return Ok(addr);
+    }
+
+    // 3.1.6.3 Memory Privilege in mstatus Register
+    // The MXR (Make eXecutable Readable) bit modifies the privilege with which loads access virtual memory.
+    // When MXR=0, only loads from pages marked readable (R=1 in Figure 4.18) will succeed.
+    // When MXR=1, loads from pages marked either readable or executable (R=1 or X=1) will succeed.
+    // MXR has no effect when page-based virtual memory is not in effect.
+    // MXR is read-only 0 if S-mode is not supported.
+    let mxr = self.csrs.read_mstatus_MXR();
+
+    // 3.1.6.3 Memory Privilege in mstatus Register
+    // The SUM (permit Supervisor User Memory access) bit modifies the privilege with which S-mode loads and stores access virtual memory.
+    // When SUM=0, S-mode memory accesses to pages that are accessible by U-mode (U=1 in Figure 4.18) will fault.
+    // When SUM=1, these accesses are permitted.
+    // SUM has no effect when page-based virtual memory is not in effect. Note that,
+    // while SUM is ordinarily ignored when not executing in S-mode,
+    // it is in effect when MPRV=1 and MPP=S.
+    // SUM is read-only 0 if S-mode is not supported or if satp.MODE is read-only 0.
+    let sum = self.csrs.read_mstatus_SUM();
+
+    // 3.1.6.3 Memory Privilege in mstatus Register
+    // The MXR and SUM mechanisms only affect the interpretation of permissions encoded
+    // in page-table entries. In particular, they have no impact on whether access-fault
+    // exceptions are raised due to PMAs or PMP.
+
     // 4.3.2 Virtual Address Translation Process
     let addr = addr.0;
-    let (levels, ptidxbits, ptesize) = self.vmmode.translation_args().unwrap();
+    let (levels, _ptidxbits, ptesize) = self.vmmode.translation_args().unwrap();
     let vpn: [u64; 5] = self.vmmode.vpn(addr);
 
     // 1. Let a be satp.ppn × PAGESIZE, and let i = LEVELS − 1.
@@ -248,7 +292,42 @@ impl RV64Cpu {
       // privilege mode and the value of the SUM and MXR fields of the mstatus register.
       // If not, stop and raise a page-fault exception corresponding to the original access type.
 
-      // TODO: check access rights according to 3.1.6.3 Memory Privilege in mstatus Register
+      // check access rights according to 3.1.6.3 Memory Privilege in mstatus Register
+      // see: https://github.com/qemu/qemu/blob/aea6e471085f39ada1ccd637043c3ee3dfd88750/target/riscv/cpu_helper.c#L952
+      let pte_r = (pte >> PTE_R) & 1;
+      let pte_w = (pte >> PTE_W) & 1;
+      let pte_x = (pte >> PTE_X) & 1;
+      let pte_u = (pte >> PTE_U) & 1;
+
+      match (pte_r, pte_w, pte_x) {
+        // Reserved leaf PTE flags: PTE_W
+        (0, 1, 0) |
+        // Reserved leaf PTE flags: PTE_W + PTE_X
+        (0, 1, 1) => return reason.to_page_fault(VirtAddr(addr)),
+        _ => (),
+      }
+
+      if (pte_u == 1) && ((eff_mode != PrivilegeMode::User) && (!sum || reason == Reason::Fetch)) {
+        // User PTE flags when not U mode and mstatus.SUM is not set,
+        // or the access type is an instruction fetch
+        return reason.to_page_fault(VirtAddr(addr));
+      }
+
+      if (pte_u == 0) && (eff_mode != PrivilegeMode::Supervisor) {
+        // Supervisor PTE flags when not S mode
+        return reason.to_page_fault(VirtAddr(addr));
+      }
+
+      if reason == Reason::Read && !((pte_r == 1) || ((pte_x == 1) && mxr)) {
+        // Read access check failed
+        return reason.to_page_fault(VirtAddr(addr));
+      } else if reason == Reason::Write && (pte_w == 0) {
+        // Write access check failed
+        return reason.to_page_fault(VirtAddr(addr));
+      } else if reason == Reason::Fetch && (pte_x == 0) {
+        // Fetch access check failed
+        return reason.to_page_fault(VirtAddr(addr));
+      }
 
       // 6. If i > 0 and pte.ppn[i−1 : 0] != 0, this is a misaligned superpage;
       // stop and raise a page-fault exception corresponding to the original access type.
@@ -270,7 +349,7 @@ impl RV64Cpu {
       let pte_d = (pte >> PTE_D) & 1;
       if pte_a == 0 || (reason == Reason::Write && pte_d == 0) {
         // Compare pte to the value of the PTE at address a + va.vpn[i] × PTESIZE.
-        let pte_addr= VirtAddr(a + vpn[i as usize] * ptesize);
+        let pte_addr = VirtAddr(a + vpn[i as usize] * ptesize);
         let compare = self.bus.read::<u64>(pte_addr)?;
 
         // If the values match, set pte.a to 1 and

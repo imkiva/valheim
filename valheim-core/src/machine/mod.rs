@@ -74,7 +74,7 @@ impl Machine {
       // TODO: stop treating breakpoint as good trap
       Err(Exception::Breakpoint) => false,
       Err(ex) => {
-        // println!("[Valheim] Exception: {:?} at {:#x}", ex, self.cpu.read_pc().0);
+        // println!("[Valheim] Exception: {:?} at {:#x} in {:?}", ex, self.cpu.read_pc().0, self.cpu.mode);
         // self.show_status();
         // TODO: add watchdog to prevent kernels that do not handle double fault?
         // note: double/triple-fault can be handled by the M-mode program.
