@@ -33,11 +33,11 @@ impl RV64Cpu {
         Some(instr) => {
           self.journal.trace(|| Trace::Instr(InstrTrace::Decoded(pc, untyped, instr)));
           Ok((Either::Left(untyped), instr))
-        },
+        }
         None => {
           // println!("Warning: invalid instruction in {:?} mode: {:#x} at {:#x}, at kernel {:?}", self.mode, untyped.repr(), pc.0, self.translate(pc, Reason::Read));
           Err(Exception::IllegalInstruction)
-        },
+        }
       }
     }
   }
@@ -93,31 +93,31 @@ impl RV64Cpu {
       RV32(LB(rd, rs1, offset)) => {
         let val = self.read_mem::<u8>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)))? as i8 as i32 as i64 as u64;
         rd.write(self, val)
-      },
+      }
       RV32(LH(rd, rs1, offset)) => {
         let val = self.read_mem::<u16>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)))? as i16 as i32 as i64 as u64;
         rd.write(self, val)
-      },
+      }
       RV32(LW(rd, rs1, offset)) => {
         let val = self.read_mem::<u32>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)))? as i32 as i64 as u64;
         rd.write(self, val)
-      },
+      }
       RV64(LD(rd, rs1, offset)) => {
         let val = self.read_mem::<u64>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)))?;
         rd.write(self, val)
-      },
+      }
       RV32(LBU(rd, rs1, offset)) => {
         let val = self.read_mem::<u8>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)))? as u64;
         rd.write(self, val)
-      },
+      }
       RV32(LHU(rd, rs1, offset)) => {
         let val = self.read_mem::<u16>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)))? as u64;
         rd.write(self, val)
-      },
+      }
       RV64(LWU(rd, rs1, offset)) => {
         let val = self.read_mem::<u32>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)))? as u64;
         rd.write(self, val)
-      },
+      }
 
       RV32(SB(rs1, rs2, offset)) => self.write_mem::<u8>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)), rs2.read(self) as u8)?,
       RV32(SH(rs1, rs2, offset)) => self.write_mem::<u16>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)), rs2.read(self) as u16)?,
@@ -614,10 +614,7 @@ impl RV64Cpu {
       RV64(SRET) => {
         let sepc = self.csrs.read_unchecked(SEPC);
         let spie = self.csrs.read_bit(SSTATUS, 5);
-        let spp = match self.csrs.read_bit(SSTATUS, 8) {
-          false => PrivilegeMode::User,
-          true => PrivilegeMode::Supervisor,
-        };
+        let spp = self.csrs.read_sstatus_spp();
 
         // set pc to MEPC
         next_pc = VirtAddr(sepc);
@@ -628,19 +625,12 @@ impl RV64Cpu {
         // set SPIE to 1
         let _ = self.csrs.write_bit(SSTATUS, 5, true);
         // set SPP to User if User is supported, otherwise to Machine
-        let _ = self.csrs.write_bit(SSTATUS, 8, false);
+        self.csrs.write_sstatus_spp(PrivilegeMode::User);
       }
       RV64(MRET) => {
         let mepc = self.csrs.read_unchecked(MEPC);
         let mpie = self.csrs.read_bit(MSTATUS, 7);
-        let mpp0 = self.csrs.read_bit(MSTATUS, 11);
-        let mpp1 = self.csrs.read_bit(MSTATUS, 12);
-        let mpp = match (mpp1, mpp0) {
-          (false, false) => PrivilegeMode::User,
-          (false, true) => PrivilegeMode::Supervisor,
-          (true, true) => PrivilegeMode::Machine,
-          _ => panic!("invalid privilege mode in MPP (mstatus[11:12]) = {}{}", mpp1 as i32, mpp0 as i32),
-        };
+        let mpp = self.csrs.read_mstatus_mpp();
 
         // set pc to MEPC
         next_pc = VirtAddr(mepc);
@@ -651,9 +641,9 @@ impl RV64Cpu {
         // set MPIE to 1
         let _ = self.csrs.write_bit(MSTATUS, 7, true);
         // set MPP to User if User is supported, otherwise to Machine
-        let _ = self.csrs.write_bit(MSTATUS, 11, false);
-        let _ = self.csrs.write_bit(MSTATUS, 12, false);
+        self.csrs.write_mstatus_mpp(PrivilegeMode::User);
       }
+
       RV64(WFI) => {
         println!("[Valheim] CPU wfi at {:#x} in {:?} mode", pc.0, self.mode);
         pub fn debug_dump(cpu: &mut RV64Cpu, begin: VirtAddr, ninstr: u64) {

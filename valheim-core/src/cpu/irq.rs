@@ -203,6 +203,7 @@ pub fn trap_entry(mcause: u64, mtval: u64, is_interrupt: bool, cpu: &mut RV64Cpu
 
   let previous_pc = cpu.regs.pc.0;
   let previous_mode = cpu.mode;
+  let interrupt_bit = is_interrupt as u64;
 
   // 3.1.8 Machine Trap Delegation Registers (medeleg and mideleg)
   // In systems with S-mode, the medeleg and mideleg registers must exist,
@@ -273,7 +274,6 @@ pub fn trap_entry(mcause: u64, mtval: u64, is_interrupt: bool, cpu: &mut RV64Cpu
       // though it may be explicitly written by software.
       // The Interrupt bit (mcause[63]) in the mcause register is set if the trap was caused by an interrupt.
       // The Exception Code field(mcause[0:62]) contains a code identifying the last exception or interrupt.
-      let interrupt_bit = is_interrupt as u64;
       let _ = cpu.csrs.write_unchecked(MCAUSE, interrupt_bit << 63 | mcause);
 
       // 3.1.16 Machine Trap Value Register (mtval)
@@ -289,29 +289,23 @@ pub fn trap_entry(mcause: u64, mtval: u64, is_interrupt: bool, cpu: &mut RV64Cpu
       let _ = cpu.csrs.write_bit(MSTATUS, 3, false);
 
       // set MPP to previous privileged mode
-      match previous_mode {
-        PrivilegeMode::User => {
-          // mstatus[12:11] = 0b00
-          let _ = cpu.csrs.write_bit(MSTATUS, 11, false);
-          let _ = cpu.csrs.write_bit(MSTATUS, 12, false);
-        }
-        PrivilegeMode::Supervisor => {
-          // mstatus[12:11] = 0b01
-          let _ = cpu.csrs.write_bit(MSTATUS, 11, true);
-          let _ = cpu.csrs.write_bit(MSTATUS, 12, false);
-        }
-        PrivilegeMode::Machine => {
-          // mstatus[12:11] = 0b11
-          let _ = cpu.csrs.write_bit(MSTATUS, 11, true);
-          let _ = cpu.csrs.write_bit(MSTATUS, 12, true);
-        }
-      }
-
+      cpu.csrs.write_mstatus_mpp(previous_mode);
       Ok(())
     }
 
     false => {
       // Comments omitted since there's only register differences
+      if previous_mode == PrivilegeMode::Machine {
+        panic!(
+          "Machine trap (int={}, mcause={}, mtval={}, mpp={:?}, mepc={:#x}) cannot be handled in supervisor mode",
+          is_interrupt,
+          interrupt_bit << 63 | mcause,
+          mtval,
+          previous_mode,
+          previous_pc,
+        );
+      }
+
       cpu.mode = PrivilegeMode::Supervisor;
       let mode = cpu.csrs.read_unchecked(STVEC) & 0b11;
       let offset = match (is_interrupt, mode) {
@@ -323,7 +317,6 @@ pub fn trap_entry(mcause: u64, mtval: u64, is_interrupt: bool, cpu: &mut RV64Cpu
 
       cpu.regs.pc.0 = ((cpu.csrs.read_unchecked(STVEC) & (!0b11)) + offset) as u64;
       let _ = cpu.csrs.write_unchecked(SEPC, previous_pc & !1);
-      let interrupt_bit = is_interrupt as u64;
       let _ = cpu.csrs.write_unchecked(SCAUSE, interrupt_bit << 63 | mcause);
       let _ = cpu.csrs.write_unchecked(STVAL, mtval);
 
@@ -334,19 +327,7 @@ pub fn trap_entry(mcause: u64, mtval: u64, is_interrupt: bool, cpu: &mut RV64Cpu
       let _ = cpu.csrs.write_bit(SSTATUS, 1, false);
 
       // set SPP to previous privileged mode
-      let _ = match previous_mode {
-        PrivilegeMode::User => cpu.csrs.write_bit(SSTATUS, 8, false),
-        PrivilegeMode::Supervisor => cpu.csrs.write_bit(SSTATUS, 8, true),
-        PrivilegeMode::Machine => panic!(
-          "Machine trap (int={}, mcause={}, mtval={}, mpp={:?}, mepc={:#x}) cannot be handled in supervisor mode",
-          is_interrupt,
-          interrupt_bit << 63 | mcause,
-          mtval,
-          previous_mode,
-          previous_pc,
-        ),
-      };
-
+      cpu.csrs.write_sstatus_spp(previous_mode);
       Ok(())
     }
   }

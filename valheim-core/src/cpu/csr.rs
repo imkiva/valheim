@@ -1,6 +1,7 @@
-use crate::cpu::csr::CSRMap::{MEIP_MASK, MSIP_MASK, MTIP_MASK, SEIP_MASK, SSIP_MASK, STIP_MASK};
+use crate::cpu::csr::CSRMap::{MEIP_MASK, MIE, MIP, MISA, MSIP_MASK, MSTATUS, MTIP_MASK, SEIP_MASK, SSIP_MASK, SSTATUS, SSTATUS_MASK, STIP_MASK};
 use crate::cpu::irq::Exception;
 use crate::cpu::mmu::{SATP64_MODE_MASK, SATP64_MODE_SHIFT, VM_V20211203_SV64};
+use crate::cpu::PrivilegeMode;
 use crate::isa::rv64::CSRAddr;
 
 pub const MXLEN: usize = 64;
@@ -215,7 +216,7 @@ pub struct CSRRegs {
 impl CSRRegs {
   pub fn new() -> Self {
     let mut csrs = [0; CSR_MAX];
-    csrs[CSRMap::MISA as usize] = VALHEIM_MISA;
+    csrs[MISA as usize] = VALHEIM_MISA;
     Self { csrs }
   }
 
@@ -316,11 +317,57 @@ impl CSRRegs {
     (self.read_unchecked(addr) & (1 << bit)) != 0
   }
 
+  pub fn read_mstatus_mpp(&self) -> PrivilegeMode {
+    let mpp0 = self.read_bit(MSTATUS, 11);
+    let mpp1 = self.read_bit(MSTATUS, 12);
+    match (mpp1, mpp0) {
+      (false, false) => PrivilegeMode::User,
+      (false, true) => PrivilegeMode::Supervisor,
+      (true, true) => PrivilegeMode::Machine,
+      _ => panic!("invalid privilege mode in MPP (mstatus[11:12]) = {}{}", mpp1 as i32, mpp0 as i32),
+    }
+  }
+
+  pub fn read_sstatus_spp(&self) -> PrivilegeMode {
+    match self.read_bit(SSTATUS, 8) {
+      false => PrivilegeMode::User,
+      true => PrivilegeMode::Supervisor,
+    }
+  }
+
+  pub fn write_mstatus_mpp(&mut self, mode: PrivilegeMode) {
+    match mode {
+      PrivilegeMode::User => {
+        // mstatus[12:11] = 0b00
+        let _ = self.write_bit(MSTATUS, 11, false);
+        let _ = self.write_bit(MSTATUS, 12, false);
+      }
+      PrivilegeMode::Supervisor => {
+        // mstatus[12:11] = 0b01
+        let _ = self.write_bit(MSTATUS, 11, true);
+        let _ = self.write_bit(MSTATUS, 12, false);
+      }
+      PrivilegeMode::Machine => {
+        // mstatus[12:11] = 0b11
+        let _ = self.write_bit(MSTATUS, 11, true);
+        let _ = self.write_bit(MSTATUS, 12, true);
+      }
+    }
+  }
+
+  pub fn write_sstatus_spp(&mut self, mode: PrivilegeMode) {
+    let _ = match mode {
+      PrivilegeMode::User => self.write_bit(SSTATUS, 8, false),
+      PrivilegeMode::Supervisor => self.write_bit(SSTATUS, 8, true),
+      PrivilegeMode::Machine => panic!("SPP cannot be Machine"),
+    };
+  }
+
   pub fn is_machine_irq_enabled_globally(&self) -> bool {
-    self.read_bit(CSRMap::MSTATUS, 3)
+    self.read_bit(MSTATUS, 3)
   }
 
   pub fn is_supervisor_irq_enabled_globally(&self) -> bool {
-    self.read_bit(CSRMap::SSTATUS, 1)
+    self.read_bit(SSTATUS, 1)
   }
 }
