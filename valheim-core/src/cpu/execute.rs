@@ -613,35 +613,35 @@ impl RV64Cpu {
       // Privileged
       RV64(SRET) => {
         let sepc = self.csrs.read_unchecked(SEPC);
-        let spie = self.csrs.read_bit(SSTATUS, 5);
-        let spp = self.csrs.read_sstatus_spp();
+        let spie = self.csrs.read_sstatus_SPIE();
+        let spp = self.csrs.read_sstatus_SPP();
 
         // set pc to MEPC
         next_pc = VirtAddr(sepc);
         // set cpu privilege mode to MPP
         self.mode = spp;
         // set SIE = SPIE
-        let _ = self.csrs.write_bit(SSTATUS, 1, spie);
+        self.csrs.write_sstatus_SIE(spie);
         // set SPIE to 1
-        let _ = self.csrs.write_bit(SSTATUS, 5, true);
+        self.csrs.write_sstatus_SPIE(true);
         // set SPP to User if User is supported, otherwise to Machine
-        self.csrs.write_sstatus_spp(PrivilegeMode::User);
+        self.csrs.write_sstatus_SPP(PrivilegeMode::User);
       }
       RV64(MRET) => {
         let mepc = self.csrs.read_unchecked(MEPC);
-        let mpie = self.csrs.read_bit(MSTATUS, 7);
-        let mpp = self.csrs.read_mstatus_mpp();
+        let mpie = self.csrs.read_mstatus_MPIE();
+        let mpp = self.csrs.read_mstatus_MPP();
 
         // set pc to MEPC
         next_pc = VirtAddr(mepc);
         // set cpu privilege mode to MPP
         self.mode = mpp;
         // set MIE = MPIE
-        let _ = self.csrs.write_bit(MSTATUS, 3, mpie);
+        self.csrs.write_mstatus_MIE(mpie);
         // set MPIE to 1
-        let _ = self.csrs.write_bit(MSTATUS, 7, true);
+        self.csrs.write_mstatus_MPIE(true);
         // set MPP to User if User is supported, otherwise to Machine
-        self.csrs.write_mstatus_mpp(PrivilegeMode::User);
+        self.csrs.write_mstatus_MPP(PrivilegeMode::User);
       }
 
       RV64(WFI) => {

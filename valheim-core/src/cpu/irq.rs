@@ -50,8 +50,8 @@ impl RV64Cpu {
     // to disable selected higher-privilege-mode interrupts before ceding control
     // to a lower-privilege mode.
     let irq_enabled = match self.mode {
-      PrivilegeMode::Machine => self.csrs.is_machine_irq_enabled_globally(),
-      PrivilegeMode::Supervisor => self.csrs.is_supervisor_irq_enabled_globally(),
+      PrivilegeMode::Machine => self.csrs.read_mstatus_MIE(),
+      PrivilegeMode::Supervisor => self.csrs.read_sstatus_SIE(),
       PrivilegeMode::User => true,
     };
 
@@ -283,13 +283,13 @@ pub fn trap_entry(mcause: u64, mtval: u64, is_interrupt: bool, cpu: &mut RV64Cpu
       let _ = cpu.csrs.write_unchecked(MTVAL, mtval);
 
       // set MPIE to MIE
-      let mie = cpu.csrs.is_machine_irq_enabled_globally();
-      let _ = cpu.csrs.write_bit(MSTATUS, 7, mie);
+      let mie = cpu.csrs.read_mstatus_MIE();
+      cpu.csrs.write_mstatus_MPIE(mie);
       // set MIE to 0 to disable interrupts
-      let _ = cpu.csrs.write_bit(MSTATUS, 3, false);
+      cpu.csrs.write_mstatus_MIE(false);
 
       // set MPP to previous privileged mode
-      cpu.csrs.write_mstatus_mpp(previous_mode);
+      cpu.csrs.write_mstatus_MPP(previous_mode);
       Ok(())
     }
 
@@ -321,13 +321,13 @@ pub fn trap_entry(mcause: u64, mtval: u64, is_interrupt: bool, cpu: &mut RV64Cpu
       let _ = cpu.csrs.write_unchecked(STVAL, mtval);
 
       // set SPIE to SIE
-      let sie = cpu.csrs.is_supervisor_irq_enabled_globally();
-      let _ = cpu.csrs.write_bit(SSTATUS, 5, sie);
+      let sie = cpu.csrs.read_sstatus_SIE();
+      cpu.csrs.write_sstatus_SPIE(sie);
       // set SIE to 0 to disable interrupts
-      let _ = cpu.csrs.write_bit(SSTATUS, 1, false);
+      cpu.csrs.write_sstatus_SIE(false);
 
       // set SPP to previous privileged mode
-      cpu.csrs.write_sstatus_spp(previous_mode);
+      cpu.csrs.write_sstatus_SPP(previous_mode);
       Ok(())
     }
   }

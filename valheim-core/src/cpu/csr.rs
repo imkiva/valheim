@@ -317,7 +317,8 @@ impl CSRRegs {
     (self.read_unchecked(addr) & (1 << bit)) != 0
   }
 
-  pub fn read_mstatus_mpp(&self) -> PrivilegeMode {
+  #[allow(non_snake_case)]
+  pub fn read_mstatus_MPP(&self) -> PrivilegeMode {
     let mpp0 = self.read_bit(MSTATUS, 11);
     let mpp1 = self.read_bit(MSTATUS, 12);
     match (mpp1, mpp0) {
@@ -328,14 +329,16 @@ impl CSRRegs {
     }
   }
 
-  pub fn read_sstatus_spp(&self) -> PrivilegeMode {
+  #[allow(non_snake_case)]
+  pub fn read_sstatus_SPP(&self) -> PrivilegeMode {
     match self.read_bit(SSTATUS, 8) {
       false => PrivilegeMode::User,
       true => PrivilegeMode::Supervisor,
     }
   }
 
-  pub fn write_mstatus_mpp(&mut self, mode: PrivilegeMode) {
+  #[allow(non_snake_case)]
+  pub fn write_mstatus_MPP(&mut self, mode: PrivilegeMode) {
     match mode {
       PrivilegeMode::User => {
         // mstatus[12:11] = 0b00
@@ -355,7 +358,8 @@ impl CSRRegs {
     }
   }
 
-  pub fn write_sstatus_spp(&mut self, mode: PrivilegeMode) {
+  #[allow(non_snake_case)]
+  pub fn write_sstatus_SPP(&mut self, mode: PrivilegeMode) {
     let _ = match mode {
       PrivilegeMode::User => self.write_bit(SSTATUS, 8, false),
       PrivilegeMode::Supervisor => self.write_bit(SSTATUS, 8, true),
@@ -363,11 +367,53 @@ impl CSRRegs {
     };
   }
 
-  pub fn is_machine_irq_enabled_globally(&self) -> bool {
+  #[allow(non_snake_case)]
+  pub fn read_mstatus_MPRV(&self) -> bool {
+    self.read_bit(MSTATUS, 17)
+  }
+
+  #[allow(non_snake_case)]
+  pub fn write_mstatus_MPRV(&mut self, val: bool) {
+    let _ = self.write_bit(MSTATUS, 17, val);
+  }
+
+  #[allow(non_snake_case)]
+  pub fn read_mstatus_MIE(&self) -> bool {
     self.read_bit(MSTATUS, 3)
   }
 
-  pub fn is_supervisor_irq_enabled_globally(&self) -> bool {
+  #[allow(non_snake_case)]
+  pub fn write_mstatus_MIE(&mut self, val: bool) {
+    let _ = self.write_bit(MSTATUS, 3, val);
+  }
+
+  #[allow(non_snake_case)]
+  pub fn read_mstatus_MPIE(&self) -> bool {
+    self.read_bit(MSTATUS, 7)
+  }
+
+  #[allow(non_snake_case)]
+  pub fn write_mstatus_MPIE(&mut self, val: bool) {
+    let _ = self.write_bit(MSTATUS, 7, val);
+  }
+
+  #[allow(non_snake_case)]
+  pub fn read_sstatus_SIE(&self) -> bool {
     self.read_bit(SSTATUS, 1)
+  }
+
+  #[allow(non_snake_case)]
+  pub fn write_sstatus_SIE(&mut self, val: bool) {
+    let _ = self.write_bit(SSTATUS, 1, val);
+  }
+
+  #[allow(non_snake_case)]
+  pub fn read_sstatus_SPIE(&self) -> bool {
+    self.read_bit(SSTATUS, 5)
+  }
+
+  #[allow(non_snake_case)]
+  pub fn write_sstatus_SPIE(&mut self, val: bool) {
+    let _ = self.write_bit(SSTATUS, 5, val);
   }
 }
