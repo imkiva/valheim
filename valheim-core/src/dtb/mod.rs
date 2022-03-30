@@ -3,10 +3,15 @@ use std::process::{Command, Stdio};
 
 const DTS_TEMPLATE: &str = include_str!("../../../dts/valheim.dts.template");
 
-pub fn generate_device_tree_rom(cmdline: String, memory_size: usize) -> Result<Vec<u8>, std::io::Error> {
+pub fn generate_device_tree_rom(cmdline: String, memory_base: u64, memory_size: u64) -> Result<Vec<u8>, std::io::Error> {
+  let memory_reg = format!(
+    "{:#x} {:#x} {:#x} {:#x}",
+    (memory_base >> 32), (memory_base & (u32::MAX as u64)),
+    (memory_size >> 32), (memory_size & (u32::MAX as u64)),
+  );
   let instantiated: String = DTS_TEMPLATE.to_string()
     .replace("${VALHEIM_BOOTARGS}", cmdline.as_ref())
-    .replace("${VALHEIM_MEMORY_SIZE}", &format!("{:#x}", memory_size));
+    .replace("${VALHEIM_MEMORY_REG}", &memory_reg);
 
   let mut dtb_bytes = call_compiler(instantiated)?;
   let mut rom = vec![0; 32];

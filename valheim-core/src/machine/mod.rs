@@ -1,5 +1,6 @@
 use std::fs::OpenOptions;
 use std::sync::Arc;
+
 use memmap2::MmapMut;
 
 use crate::cpu::bus::VIRT_MROM_BASE;
@@ -34,7 +35,9 @@ impl Machine {
     };
 
     let cmdline = cmdline.unwrap_or(DEFAULT_CMDLINE.to_string());
-    let device_tree_rom = generate_device_tree_rom(cmdline, machine.cpu.bus.mem.memory_size)
+    let memory_size = machine.cpu.bus.mem.memory_size as u64;
+    let memory_base = machine.cpu.bus.mem.memory_base.0;
+    let device_tree_rom = generate_device_tree_rom(cmdline, memory_base, memory_size)
       .expect("Cannot generate device tree");
     machine.load_device_tree(device_tree_rom.as_slice())
       .expect("Cannot load device tree");
