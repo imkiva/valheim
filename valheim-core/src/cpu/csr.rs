@@ -378,6 +378,26 @@ impl CSRRegs {
   }
 
   #[allow(non_snake_case)]
+  pub fn read_mstatus_SUM(&self) -> bool {
+    self.read_bit(MSTATUS, 18)
+  }
+
+  #[allow(non_snake_case)]
+  pub fn write_mstatus_SUM(&mut self, val: bool) {
+    let _ = self.write_bit(MSTATUS, 18, val);
+  }
+
+  #[allow(non_snake_case)]
+  pub fn read_mstatus_MXR(&self) -> bool {
+    self.read_bit(MSTATUS, 19)
+  }
+
+  #[allow(non_snake_case)]
+  pub fn write_mstatus_MXR(&mut self, val: bool) {
+    let _ = self.write_bit(MSTATUS, 19, val);
+  }
+
+  #[allow(non_snake_case)]
   pub fn read_mstatus_MIE(&self) -> bool {
     self.read_bit(MSTATUS, 3)
   }
