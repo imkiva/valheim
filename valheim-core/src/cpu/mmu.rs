@@ -188,7 +188,28 @@ impl RV64Cpu {
   }
 
   pub fn translate(&mut self, addr: VirtAddr, reason: Reason) -> Result<VirtAddr, Exception> {
-    if self.vmmode == VMMode::MBARE || self.mode == PrivilegeMode::Machine {
+    if self.vmmode == VMMode::MBARE {
+      return Ok(addr);
+    }
+
+    // 3.1.6.3 Memory Privilege in mstatus Register
+    // The MPRV (Modify PRiVilege) bit modifies the effective privilege mode,
+    // i.e., the privilege level at which loads and stores execute.
+    // When MPRV=0, loads and stores behave as normal, using the translation and protection
+    // mechanisms of the current privilege mode.
+    // When MPRV=1, load and store memory addresses are translated and protected,
+    // and endianness is applied, as though the current privilege mode were set to MPP.
+    // Instruction address-translation and protection are unaffected by the setting of MPRV.
+    // MPRV is read-only 0 if U-mode is not supported.
+    let eff_mode = match reason {
+      Reason::Fetch => self.mode,
+      _ => match self.csrs.read_mstatus_MPRV() {
+        true => self.csrs.read_mstatus_MPP(),
+        false => self.mode,
+      }
+    };
+
+    if eff_mode == PrivilegeMode::Machine {
       return Ok(addr);
     }
 
@@ -270,7 +291,7 @@ impl RV64Cpu {
       let pte_d = (pte >> PTE_D) & 1;
       if pte_a == 0 || (reason == Reason::Write && pte_d == 0) {
         // Compare pte to the value of the PTE at address a + va.vpn[i] × PTESIZE.
-        let pte_addr= VirtAddr(a + vpn[i as usize] * ptesize);
+        let pte_addr = VirtAddr(a + vpn[i as usize] * ptesize);
         let compare = self.bus.read::<u64>(pte_addr)?;
 
         // If the values match, set pte.a to 1 and
