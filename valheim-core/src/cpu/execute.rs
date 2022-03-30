@@ -624,8 +624,13 @@ impl RV64Cpu {
         self.csrs.write_sstatus_SIE(spie);
         // set SPIE to 1
         self.csrs.write_sstatus_SPIE(true);
-        // set SPP to User if User is supported, otherwise to Machine
+        // set SPP to User if User is supported, otherwise to Supervisor
         self.csrs.write_sstatus_SPP(PrivilegeMode::User);
+
+        // 3.1.6.3 Memory Privilege in mstatus Register
+        // An MRET or SRET instruction that changes the privilege mode
+        // to a mode less privileged than M also sets MPRV=0.
+        self.csrs.write_mstatus_MPRV(false);
       }
       RV64(MRET) => {
         let mepc = self.csrs.read_unchecked(MEPC);
@@ -642,6 +647,11 @@ impl RV64Cpu {
         self.csrs.write_mstatus_MPIE(true);
         // set MPP to User if User is supported, otherwise to Machine
         self.csrs.write_mstatus_MPP(PrivilegeMode::User);
+
+        // 3.1.6.3 Memory Privilege in mstatus Register
+        // An MRET or SRET instruction that changes the privilege mode
+        // to a mode less privileged than M also sets MPRV=0.
+        self.csrs.write_mstatus_MPRV(false);
       }
 
       RV64(WFI) => {
