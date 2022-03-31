@@ -49,13 +49,25 @@ impl RV64Cpu {
     // Higher-privilege-level code can use separate per-interrupt enable bits
     // to disable selected higher-privilege-mode interrupts before ceding control
     // to a lower-privilege mode.
-    let irq_enabled = match self.mode {
-      PrivilegeMode::Machine => self.csrs.read_mstatus_MIE(),
-      PrivilegeMode::Supervisor => self.csrs.read_sstatus_SIE(),
-      PrivilegeMode::User => true,
+
+    // 3.3.3 Wait for Interrupt
+    // The WFI instruction can also be executed when interrupts are disabled.
+    // The operation of WFI must be unaffected by the global interrupt bits in mstatus (MIE and SIE)
+    // and the delegation register mideleg (i.e., the hart must resume if a locally enabled interrupt
+    // becomes pending, even if it has been delegated to a less-privileged mode),
+    // but should honor the individual interrupt enables (e.g, MTIE) (i.e., implementations should
+    // avoid resuming the hart if the interrupt is pending but not individually enabled).
+    // WFI is also required to resume execution for locally enabled interrupts pending at any privilege level,
+    // regardless of the global interrupt enable at each privilege level.
+
+    let irq_globally_enabled = match (self.wfi, self.mode) {
+      (true, _) => true,
+      (_, PrivilegeMode::Machine) => self.csrs.read_mstatus_MIE(),
+      (_, PrivilegeMode::Supervisor) => self.csrs.read_sstatus_SIE(),
+      (_, PrivilegeMode::User) => true,
     };
 
-    if !irq_enabled {
+    if !irq_globally_enabled {
       return None;
     }
 

@@ -130,9 +130,10 @@ impl Device for Uart16550a {
     let mut uart = uart.lock().expect("cannot lock uart buffer");
     match addr.0 {
       UART_RHR => {
-        cond.notify_one();
+        let val = uart[(UART_RHR - UART_BASE) as usize];
         uart[(UART_LSR - UART_BASE) as usize] &= !UART_LSR_RX;
-        Some(uart[(UART_RHR - UART_BASE) as usize])
+        cond.notify_one();
+        Some(val)
       }
       addr => Some(uart[(addr - UART_BASE) as usize]),
     }

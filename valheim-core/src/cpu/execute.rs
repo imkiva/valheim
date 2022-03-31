@@ -655,23 +655,23 @@ impl RV64Cpu {
       }
 
       RV64(WFI) => {
-        println!("[Valheim] CPU wfi at {:#x} in {:?} mode", pc.0, self.mode);
-        pub fn debug_dump(cpu: &mut RV64Cpu, begin: VirtAddr, ninstr: u64) {
-          let udump_start = begin - VirtAddr(4 * ninstr);
-          let udump_end = begin + VirtAddr(4 * ninstr);
-          unsafe {
-            let mut udump = udump_start;
-            while udump != udump_end {
-              let kdump = cpu.translate(udump, Reason::Read).unwrap();
-              let ptr = cpu.bus.mem.to_phys(kdump).unwrap().0;
-              println!("{:#08x} -> {:#08x}: {:02x} {:02x} {:02x} {:02x}  |  {}{}{}{}", udump.0, kdump.0,
-                       *ptr, *(ptr.wrapping_add(1)), *(ptr.wrapping_add(2)), *(ptr.wrapping_add(3)),
-                       *ptr as char, *(ptr.wrapping_add(1)) as char, *(ptr.wrapping_add(2)) as char, *(ptr.wrapping_add(3)) as char);
-              udump += VirtAddr(4);
-            }
-          }
-        }
-        debug_dump(self, pc, 5);
+        // println!("[Valheim] CPU wfi at {:#x} in {:?} mode", pc.0, self.mode);
+        // pub fn debug_dump(cpu: &mut RV64Cpu, begin: VirtAddr, ninstr: u64) {
+        //   let udump_start = begin - VirtAddr(4 * ninstr);
+        //   let udump_end = begin + VirtAddr(4 * ninstr);
+        //   unsafe {
+        //     let mut udump = udump_start;
+        //     while udump != udump_end {
+        //       let kdump = cpu.translate(udump, Reason::Read).unwrap();
+        //       let ptr = cpu.bus.mem.to_phys(kdump).unwrap().0;
+        //       println!("{:#08x} -> {:#08x}: {:02x} {:02x} {:02x} {:02x}  |  {}{}{}{}", udump.0, kdump.0,
+        //                *ptr, *(ptr.wrapping_add(1)), *(ptr.wrapping_add(2)), *(ptr.wrapping_add(3)),
+        //                *ptr as char, *(ptr.wrapping_add(1)) as char, *(ptr.wrapping_add(2)) as char, *(ptr.wrapping_add(3)) as char);
+        //       udump += VirtAddr(4);
+        //     }
+        //   }
+        // }
+        // debug_dump(self, pc, 5);
         self.wfi = true
       }
 
