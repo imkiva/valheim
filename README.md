@@ -13,9 +13,14 @@ This project is built for [一生一芯](https://ysyx.org/) as a reference imple
 
 ### Amazing Moments
 
-#### Running [openEuler Linux for RISC-V](https://github.com/openeuler-mirror/RISC-V) (Work in progress)
+#### Running [openEuler Linux for RISC-V](https://github.com/openeuler-mirror/RISC-V)
 
-Currently, the emulated CPU got WFI after trying to spawn `/bin/sh` as init process.
+Currently, the `init` program cannot use serial device as console (I am trying hard to find the cause).
+But the kernel was indeed __successfully booted and initialized__.
+
+I was thinking that should I just give up trying to fix the console problem, instead,
+go and implement a `virtio-net` device and start the `sshd` service when booted? 
+It's not that hard comparingly, and it's closer to the real-world use case.
 
 [![asciicast](https://asciinema.org/a/481577.svg)](https://asciinema.org/a/481577)
 
@@ -35,3 +40,15 @@ cargo run --release -- --kernel xv6/kernel.bin --disk xv6/fs.img
 ```
 
 ![xv6-booting](./pictures/xv6-booting.png)
+
+### Why not using [nemu](https://github.com/NJU-ProjectN/nemu) that was recommended by [一生一芯](https://ysyx.org/) project?
+
+Their Project-N was great, and it is definitely a good study material for students who have less code experience before.
+I feel envy at NJU students having such a great project and a great community (all teachers, TAs and RAs).
+
+One thing I can remember was that, the nemu can somehow (through some config macros) depend on the abstract-machine 
+(which is actually an operating system). How can an emulator depend on a specific operating system? It's ridiculous. 
+It is only meaningful to take it as programming exercises for those less-code-experienced students. 
+
+Unfortunately and apparently, I am not its target audience --- I am not the one who need extra programming exercise, 
+instead I code a lot, and I have my own project management style. Their project just does not fit my taste.
