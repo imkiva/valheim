@@ -559,8 +559,20 @@ impl RV64Cpu {
       RV32(FSGNJN_S(rd, rs1, rs2)) => rd.write_fp(self, rs1.read_fp(self).copysign(-rs2.read_fp(self))),
       RV32(FSGNJN_D(rd, rs1, rs2)) => rd.write_fp(self, rs1.read_fp(self).copysign(-rs2.read_fp(self))),
 
-      RV32(FSGNJX_S(rd, rs1, rs2)) => panic!("not implemented at PC = {:?}", pc),
-      RV32(FSGNJX_D(rd, rs1, rs2)) => panic!("not implemented at PC = {:?}", pc),
+      RV32(FSGNJX_S(rd, rs1, rs2)) => {
+        let rs1 = rs1.read_fp(self);
+        let sign1 = (rs1 as f32).to_bits() & 0x80000000;
+        let sign2 = (rs2.read_fp(self) as f32).to_bits() & 0x80000000;
+        let other = (rs1 as f32).to_bits() & 0x7fffffff;
+        rd.write_fp(self, f32::from_bits((sign1 ^ sign2) | other) as f64);
+      }
+      RV32(FSGNJX_D(rd, rs1, rs2)) => {
+        let rs1 = rs1.read_fp(self);
+        let sign1 = rs1.to_bits() & 0x80000000_00000000;
+        let sign2 = rs2.read_fp(self).to_bits() & 0x80000000_00000000;
+        let other = rs1.to_bits() & 0x7fffffff_ffffffff;
+        rd.write_fp(self, f64::from_bits((sign1 ^ sign2) | other));
+      }
 
       RV32(FMIN_S(rd, rs1, rs2)) => rd.write_fp(self, rs1.read_fp(self).min(rs2.read_fp(self))),
       RV32(FMIN_D(rd, rs1, rs2)) => rd.write_fp(self, rs1.read_fp(self).min(rs2.read_fp(self))),
