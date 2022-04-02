@@ -11,6 +11,3 @@ derive_more = "0.99.0"
 [features]
 default = []
 trace = []
-
-[profile.release]
-debug = true

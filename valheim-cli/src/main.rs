@@ -5,8 +5,6 @@ use clap::Parser;
 
 use valheim_core::machine::Machine;
 
-mod repl;
-
 #[derive(clap::Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
 struct Args {

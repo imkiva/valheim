@@ -1,15 +1,10 @@
-[package]
-name = "valheim"
-version = "0.1.0"
-edition = "2021"
-build = "build.rs"
+[workspace]
+members = [
+  "valheim-core",
+  "valheim-cli",
+  "xtask"
+]
+default-members = ["xtask"]
 
-[build-dependencies]
-lalrpop = { version = "0.19.7", features = ["lexer"] }
-
-[dependencies]
-valheim-core = { path = "valheim-core" }
-lalrpop-util = { version = "0.19.7", features = ["lexer"] }
-regex = "1"
-rustyline = "9.1.0"
-clap = { version = "3.1.6", features = ["derive"] }
+[profile.release]
+debug = true
