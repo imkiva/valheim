@@ -85,7 +85,7 @@ impl Machine {
     }
   }
 
-  pub fn run_for_test(&mut self) -> i32 {
+  pub fn run_for_test(&mut self, test_name: String) -> i32 {
     self.cpu.write_pc(VirtAddr(RV64_PC_RESET));
     self.cpu.write_reg(Reg::X(Fin::new(11)), 0x1020);
     loop {
@@ -99,10 +99,11 @@ impl Machine {
           let a7 = self.cpu.read_reg(Reg::X(Fin::new(17))).unwrap();
           if a7 != 93 { continue; } // not the result telling ecall
           return if a0 == 0 && gp == 1 {
-            println!("[Valheim:{:?}] Test passed!", self.cpu.mode);
+            println!("[Valheim:{:?}] {}: Test passed!", self.cpu.mode, test_name);
             0
           } else {
-            println!("[Valheim:{:?}] Test failed!, gp = {}, a0 = {}", self.cpu.mode, gp, a0);
+            println!("[Valheim:{:?}] {}: Test failed!, gp = {}, a0 = {}", self.cpu.mode, test_name, gp, a0);
+            self.show_status();
             1
           }
         }

@@ -20,6 +20,8 @@ struct Args {
   pub trace: Option<String>,
   #[clap(long)]
   pub test: bool,
+  #[clap(long)]
+  pub test_name: Option<String>,
 }
 
 fn main() -> Result<(), std::io::Error> {
@@ -44,7 +46,7 @@ fn main() -> Result<(), std::io::Error> {
   }
 
   match args.test {
-    true => std::process::exit(machine.run_for_test()),
+    true => std::process::exit(machine.run_for_test(args.test_name.unwrap_or("<unknown-test>".to_string()))),
     false => machine.run(),
   }
   Ok(())
