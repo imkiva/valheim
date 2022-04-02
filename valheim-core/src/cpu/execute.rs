@@ -598,8 +598,19 @@ impl RV64Cpu {
           rd.write_fp(self, val as f64)
         }
       }
-      // TODO: replace with softfpu
-      RV32(FSQRT_D(rd, rs1, _)) => rd.write_fp(self, (rs1.read_fp(self) as f64).sqrt() as f64),
+      RV32(FSQRT_D(rd, rs1, _)) => {
+        let rs1 = rs1.read_fp(self);
+        let val = rs1.sqrt();
+        if val.is_nan() {
+          self.csrs.write_unchecked(FFLAGS, FCSR_NV_MASK);
+          rd.write_fp(self, f64::NAN)
+        } else {
+          if rs1 % 1.0 != 0.0 || val % 1.0 != 0.0 {
+            self.csrs.write_unchecked(FFLAGS, FCSR_NX_MASK);
+          }
+          rd.write_fp(self, val)
+        }
+      },
 
       RV32(FSGNJ_S(rd, rs1, rs2)) => rd.write_fp(self, rs1.read_fp(self).copysign(rs2.read_fp(self))),
       RV32(FSGNJ_D(rd, rs1, rs2)) => rd.write_fp(self, rs1.read_fp(self).copysign(rs2.read_fp(self))),
@@ -673,9 +684,13 @@ impl RV64Cpu {
 
       RV32(FMV_X_W(rd, rs1)) => {
         let fp = rs1.read_fp(self) as f32;
-        let bits = fp.to_bits();
-        let val = (bits & 0xffffffff) as i32 as i64 as u64;
-        rd.write(self, val)
+        if fp.is_nan() {
+          rd.write(self, 0x7fc00000 as u64)
+        } else {
+          let bits = fp.to_bits();
+          let val = (bits & 0xffffffff) as i32 as i64 as u64;
+          rd.write(self, val)
+        }
       }
       RV32(FMV_W_X(rd, rs1)) => {
         let bits = (rs1.read(self) & 0xffffffff) as u32;
@@ -683,7 +698,14 @@ impl RV64Cpu {
         rd.write_fp(self, val)
       }
 
-      RV64(FMV_X_D(rd, rs1)) => rd.write(self, rs1.read_fp(self).to_bits()),
+      RV64(FMV_X_D(rd, rs1)) => {
+        let rs1 = rs1.read_fp(self);
+        if rs1.is_nan() {
+          rd.write(self, 0x7ff8000000000000);
+        } else {
+          rd.write(self, rs1.to_bits())
+        }
+      },
       RV64(FMV_D_X(rd, rs1)) => rd.write_fp(self, f64::from_bits(rs1.read(self))),
 
       // 13.7 Single-Precision Floating-Point Conversion and Move Instructions

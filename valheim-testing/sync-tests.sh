@@ -23,4 +23,6 @@ ISA_TEST_DIR="$SELF/target/share/riscv-tests/isa"
 
 > "$ENABLED_TESTS_FILE"
 find_glob 'rv64ui-p-*' "$ISA_TEST_DIR" "$DISABLED_TESTS_FILE" >> "$ENABLED_TESTS_FILE"
+find_glob 'rv64um-p-*' "$ISA_TEST_DIR" "$DISABLED_TESTS_FILE" >> "$ENABLED_TESTS_FILE"
 find_glob 'rv64uf-p-*' "$ISA_TEST_DIR" "$DISABLED_TESTS_FILE" >> "$ENABLED_TESTS_FILE"
+find_glob 'rv64ud-p-*' "$ISA_TEST_DIR" "$DISABLED_TESTS_FILE" >> "$ENABLED_TESTS_FILE"

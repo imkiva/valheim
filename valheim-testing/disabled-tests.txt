@@ -3,3 +3,9 @@ rv64uf-p-fcvt_w
 rv64uf-p-fmin
 rv64uf-p-move
 rv64uf-p-fclass
+rv64ud-p-fcmp
+rv64ud-p-fcvt_w
+rv64ud-p-fmin
+rv64ud-p-move
+rv64ud-p-fclass
+rv64ud-p-ldst
