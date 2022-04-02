@@ -18,6 +18,8 @@ struct Args {
   pub disk: Option<String>,
   #[clap(long)]
   pub trace: Option<String>,
+  #[clap(long)]
+  pub test: bool,
 }
 
 fn main() -> Result<(), std::io::Error> {
@@ -41,7 +43,10 @@ fn main() -> Result<(), std::io::Error> {
     machine.load_disk_file(disk_file)?;
   }
 
-  machine.run();
+  match args.test {
+    true => std::process::exit(machine.run_for_test()),
+    false => machine.run(),
+  }
   Ok(())
 }
 

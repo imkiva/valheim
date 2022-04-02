@@ -85,6 +85,51 @@ impl Machine {
     }
   }
 
+  pub fn run_for_test(&mut self) -> i32 {
+    self.cpu.write_pc(VirtAddr(RV64_PC_RESET));
+    self.cpu.write_reg(Reg::X(Fin::new(11)), 0x1020);
+    loop {
+      let cont = self.run_next_for_test();
+      match cont {
+        true => (),
+        false => {
+          // riscv-tests uses ecall to tell test results
+          let gp = self.cpu.read_reg(Reg::X(Fin::new(3))).unwrap();
+          let a0 = self.cpu.read_reg(Reg::X(Fin::new(10))).unwrap();
+          let a7 = self.cpu.read_reg(Reg::X(Fin::new(17))).unwrap();
+          if a7 != 93 { continue; } // not the result telling ecall
+          return if a0 == 0 && gp == 1 {
+            println!("[Valheim:{:?}] Test passed!", self.cpu.mode);
+            0
+          } else {
+            println!("[Valheim:{:?}] Test failed!, gp = {}, a0 = {}", self.cpu.mode, gp, a0);
+            1
+          }
+        }
+      }
+    }
+  }
+
+  pub fn run_next_for_test(&mut self) -> bool {
+    self.cpu.bus.clint.tick(&mut self.cpu.csrs);
+
+    if let Some(irq) = self.cpu.pending_interrupt() {
+      let _ = irq.handle(&mut self.cpu);
+    }
+
+    match self.interpreter.interp(&mut self.cpu) {
+      Ok(_) => true,
+      // riscv-tests uses ecall to tell test results
+      Err(Exception::MachineEcall) => false,
+      Err(Exception::UserEcall) => false,
+      Err(Exception::SupervisorEcall) => false,
+      Err(ex) => {
+        let _ = ex.handle(&mut self.cpu);
+        true
+      }
+    }
+  }
+
   pub fn halt(&mut self) {
     self.cpu.bus.halt();
     self.cpu.journal.flush();
