@@ -1,8 +1,12 @@
+use std::cmp::Ordering;
+
+use rustc_apfloat::{Float, Status, StatusAnd};
+use rustc_apfloat::ieee::{Double, Single};
+
 use crate::cpu::{PrivilegeMode, RV64Cpu};
-use crate::cpu::csr::CSRMap::{FCSR, FCSR_DZ_MASK, MEPC, MSTATUS, SATP, SEPC, SSTATUS};
+use crate::cpu::csr::CSRMap::{FCSR, FCSR_DZ_MASK, FCSR_NV_MASK, FCSR_NX_MASK, FCSR_OF_MASK, FCSR_UF_MASK, FFLAGS, MEPC, MSTATUS, SATP, SEPC, SSTATUS};
 use crate::cpu::data::Either;
 use crate::cpu::irq::Exception;
-use crate::cpu::mmu::Reason;
 use crate::debug::trace::{InstrTrace, Trace};
 use crate::isa::compressed::untyped::Bytecode16;
 use crate::isa::rv32::RV32Instr;
@@ -13,6 +17,80 @@ use crate::isa::typed::{Imm32, Instr, Rd, Reg, Rs1, Rs2, Rs3};
 use crate::isa::typed::Instr::{RV32, RV64};
 use crate::isa::untyped::Bytecode;
 use crate::memory::VirtAddr;
+
+macro_rules! update_fflags {
+  ($self:ident, $status:expr) => {
+    let mut fflags = 0;
+    if $status & Status::INVALID_OP == Status::INVALID_OP { fflags |= FCSR_NV_MASK; }
+    if $status & Status::DIV_BY_ZERO == Status::DIV_BY_ZERO { fflags |= FCSR_DZ_MASK; }
+    if $status & Status::OVERFLOW == Status::OVERFLOW { fflags |= FCSR_OF_MASK; }
+    if $status & Status::UNDERFLOW == Status::UNDERFLOW { fflags |= FCSR_UF_MASK; }
+    if $status & Status::INEXACT == Status::INEXACT { fflags |= FCSR_NX_MASK; }
+    $self.csrs.write_unchecked(FFLAGS, fflags);
+  };
+}
+
+macro_rules! expr {
+  ($e:expr) => { $e }
+}
+
+macro_rules! pos {
+  ($e:expr) => {$e};
+}
+
+macro_rules! neg {
+  ($e:expr) => {-$e};
+}
+
+macro_rules! softfpu_single_op {
+  ($self:ident, $rd:ident, $rs1:ident, $rs2:ident, $op:tt) => {{
+    let lhs = Single::from_bits(($rs1.read_fp($self) as f32).to_bits() as u128);
+    let rhs = Single::from_bits(($rs2.read_fp($self) as f32).to_bits() as u128);
+    let StatusAnd { status, value } = expr!(lhs $op rhs);
+    let val = f32::from_bits(value.to_bits() as u32);
+    update_fflags!($self, status);
+    $rd.write_fp($self, val as f64)
+  }};
+}
+
+macro_rules! softfpu_single_op_fuse {
+  ($self:ident, $rd:ident, $rs1sign:ident, $rs1:ident, $rs2:ident, $rs3sign:ident, $rs3:ident, $op:tt) => {{
+    let rs1 = Single::from_bits(($rs1.read_fp($self) as f32).to_bits() as u128);
+    let rs2 = Single::from_bits(($rs2.read_fp($self) as f32).to_bits() as u128);
+    let rs3 = Single::from_bits(($rs3.read_fp($self) as f32).to_bits() as u128);
+    let rs1 = $rs1sign!(rs1);
+    let rs3 = $rs3sign!(rs3);
+    let StatusAnd { status, value } = expr!(rs1.$op(rs2, rs3));
+    let val = f32::from_bits(value.to_bits() as u32);
+    update_fflags!($self , status);
+    $rd.write_fp($self, val as f64)
+  }};
+}
+
+macro_rules! softfpu_double_op {
+  ($self:ident, $rd:ident, $rs1:ident, $rs2:ident, $op:tt) => {{
+    let lhs = Double::from_bits($rs1.read_fp($self).to_bits() as u128);
+    let rhs = Double::from_bits($rs2.read_fp($self).to_bits() as u128);
+    let StatusAnd { status, value } = expr!(lhs $op rhs);
+    let val = f64::from_bits(value.to_bits() as u64);
+    update_fflags!($self, status);
+    $rd.write_fp($self, val)
+  }};
+}
+
+macro_rules! softfpu_double_op_fuse {
+  ($self:ident, $rd:ident, $rs1sign:ident, $rs1:ident, $rs2:ident, $rs3sign:ident, $rs3:ident, $op:tt) => {{
+    let rs1 = Double::from_bits($rs1.read_fp($self).to_bits() as u128);
+    let rs2 = Double::from_bits($rs2.read_fp($self).to_bits() as u128);
+    let rs3 = Double::from_bits($rs3.read_fp($self).to_bits() as u128);
+    let rs1 = $rs1sign!(rs1);
+    let rs3 = $rs3sign!(rs3);
+    let StatusAnd { status, value } = expr!(rs1.$op(rs2, rs3));
+    let val = f64::from_bits(value.to_bits() as u64);
+    update_fflags!($self , status);
+    $rd.write_fp($self, val)
+  }};
+}
 
 impl RV64Cpu {
   pub fn fetch(&mut self) -> Result<(VirtAddr, Bytecode, Bytecode16), Exception> {
@@ -172,6 +250,8 @@ impl RV64Cpu {
         PrivilegeMode::Supervisor => Err(Exception::SupervisorEcall),
         PrivilegeMode::Machine => Err(Exception::MachineEcall),
       },
+
+      // RVM
       RV32(MUL(rd, rs1, rs2)) => rd.write(self, (rs1.read(self) as i64).wrapping_mul(rs2.read(self) as i64) as u64),
       RV32(MULH(rd, rs1, rs2)) => {
         let rs1 = rs1.read(self) as i64 as i128;
@@ -296,6 +376,7 @@ impl RV64Cpu {
       // the valheim trap
       RV32(EBREAK) => return Err(Exception::Breakpoint),
 
+      // RVA
       RV32(LR_W(rd, rs1, _, _)) => {
         let addr = rs1.read(self);
         if addr % 4 != 0 { return Err(Exception::LoadAddressMisaligned(VirtAddr(addr))); }
@@ -427,6 +508,7 @@ impl RV64Cpu {
         rd.write(self, val)
       }
 
+      // CSR
       RV64(CSRRW(rd, rs1, csr)) => {
         let old = self.csrs.read(csr);
         self.csrs.write(csr, rs1.read(self))?;
@@ -463,6 +545,7 @@ impl RV64Cpu {
         if csr.value() == SATP { self.sync_pagetable(); }
       }
 
+      // RVF, RVD
       RV32(FLW(rd, rs1, imm)) => {
         let addr = rs1.read(self).wrapping_add(imm.decode_sext() as u64);
         let val = f32::from_bits(self.read_mem::<u32>(VirtAddr(addr))? as u32);
@@ -484,74 +567,50 @@ impl RV64Cpu {
         self.write_mem::<u64>(VirtAddr(addr), val.to_bits())?;
       }
 
-      RV32(FMADD_S(rd, rs1, rs2, rs3, _)) => {
-        let rs1 = rs1.read_fp(self) as f32;
-        let rs2 = rs2.read_fp(self) as f32;
-        let rs3 = rs3.read_fp(self) as f32;
-        let val = rs1.mul_add(rs2, rs3);
-        rd.write_fp(self, val as f64);
-      }
-      RV32(FMADD_D(rd, rs1, rs2, rs3, _)) => {
-        let rs1 = rs1.read_fp(self);
-        let rs2 = rs2.read_fp(self);
-        let rs3 = rs3.read_fp(self);
-        let val = rs1.mul_add(rs2, rs3);
-        rd.write_fp(self, val);
-      }
-      RV32(FMSUB_S(rd, rs1, rs2, rs3, _)) => {
-        let rs1 = rs1.read_fp(self) as f32;
-        let rs2 = rs2.read_fp(self) as f32;
-        let rs3 = rs3.read_fp(self) as f32;
-        let val = rs1.mul_add(rs2, -rs3);
-        rd.write_fp(self, val as f64);
-      }
-      RV32(FMSUB_D(rd, rs1, rs2, rs3, _)) => {
-        let rs1 = rs1.read_fp(self);
-        let rs2 = rs2.read_fp(self);
-        let rs3 = rs3.read_fp(self);
-        let val = rs1.mul_add(rs2, -rs3);
-        rd.write_fp(self, val);
-      }
-      RV32(FNMADD_S(rd, rs1, rs2, rs3, _)) => {
-        let rs1 = -rs1.read_fp(self) as f32;
-        let rs2 = rs2.read_fp(self) as f32;
-        let rs3 = rs3.read_fp(self) as f32;
-        let val = rs1.mul_add(rs2, rs3);
-        rd.write_fp(self, val as f64);
-      }
-      RV32(FNMADD_D(rd, rs1, rs2, rs3, _)) => {
-        let rs1 = -rs1.read_fp(self);
-        let rs2 = rs2.read_fp(self);
-        let rs3 = rs3.read_fp(self);
-        let val = rs1.mul_add(rs2, rs3);
-        rd.write_fp(self, val);
-      }
-      RV32(FNMSUB_S(rd, rs1, rs2, rs3, _)) => {
-        let rs1 = -rs1.read_fp(self) as f32;
-        let rs2 = rs2.read_fp(self) as f32;
-        let rs3 = rs3.read_fp(self) as f32;
-        let val = rs1.mul_add(rs2, -rs3);
-        rd.write_fp(self, val as f64);
-      }
-      RV32(FNMSUB_D(rd, rs1, rs2, rs3, _)) => {
-        let rs1 = -rs1.read_fp(self);
-        let rs2 = rs2.read_fp(self);
-        let rs3 = rs3.read_fp(self);
-        let val = rs1.mul_add(rs2, -rs3);
-        rd.write_fp(self, val);
-      }
+      RV32(FMADD_S(rd, rs1, rs2, rs3, _)) => softfpu_single_op_fuse!(self, rd, pos, rs1, rs2, pos, rs3, mul_add),
+      RV32(FMADD_D(rd, rs1, rs2, rs3, _)) => softfpu_double_op_fuse!(self, rd, pos, rs1, rs2, pos, rs3, mul_add),
+      RV32(FMSUB_S(rd, rs1, rs2, rs3, _)) => softfpu_single_op_fuse!(self, rd, pos, rs1, rs2, neg, rs3, mul_add),
+      RV32(FMSUB_D(rd, rs1, rs2, rs3, _)) => softfpu_double_op_fuse!(self, rd, pos, rs1, rs2, neg, rs3, mul_add),
+      RV32(FNMADD_S(rd, rs1, rs2, rs3, _)) => softfpu_single_op_fuse!(self, rd, neg, rs1, rs2, neg, rs3, mul_add),
+      RV32(FNMADD_D(rd, rs1, rs2, rs3, _)) => softfpu_double_op_fuse!(self, rd, neg, rs1, rs2, neg, rs3, mul_add),
+      RV32(FNMSUB_S(rd, rs1, rs2, rs3, _)) => softfpu_single_op_fuse!(self, rd, neg, rs1, rs2, pos, rs3, mul_add),
+      RV32(FNMSUB_D(rd, rs1, rs2, rs3, _)) => softfpu_double_op_fuse!(self, rd, neg, rs1, rs2, pos, rs3, mul_add),
 
-      RV32(FADD_S(rd, rs1, rs2, _)) => rd.write_fp(self, ((rs1.read_fp(self) as f32) + (rs2.read_fp(self) as f32)) as f64),
-      RV32(FADD_D(rd, rs1, rs2, _)) => rd.write_fp(self, ((rs1.read_fp(self) as f64) + (rs2.read_fp(self) as f64)) as f64),
-      RV32(FSUB_S(rd, rs1, rs2, _)) => rd.write_fp(self, ((rs1.read_fp(self) as f32) - (rs2.read_fp(self) as f32)) as f64),
-      RV32(FSUB_D(rd, rs1, rs2, _)) => rd.write_fp(self, ((rs1.read_fp(self) as f64) - (rs2.read_fp(self) as f64)) as f64),
-      RV32(FMUL_S(rd, rs1, rs2, _)) => rd.write_fp(self, ((rs1.read_fp(self) as f32) * (rs2.read_fp(self) as f32)) as f64),
-      RV32(FMUL_D(rd, rs1, rs2, _)) => rd.write_fp(self, ((rs1.read_fp(self) as f64) * (rs2.read_fp(self) as f64)) as f64),
-      RV32(FDIV_S(rd, rs1, rs2, _)) => rd.write_fp(self, ((rs1.read_fp(self) as f32) / (rs2.read_fp(self) as f32)) as f64),
-      RV32(FDIV_D(rd, rs1, rs2, _)) => rd.write_fp(self, ((rs1.read_fp(self) as f64) / (rs2.read_fp(self) as f64)) as f64),
+      RV32(FADD_S(rd, rs1, rs2, _)) => softfpu_single_op!(self, rd, rs1, rs2, +),
+      RV32(FADD_D(rd, rs1, rs2, _)) => softfpu_double_op!(self, rd, rs1, rs2, +),
+      RV32(FSUB_S(rd, rs1, rs2, _)) => softfpu_single_op!(self, rd, rs1, rs2, -),
+      RV32(FSUB_D(rd, rs1, rs2, _)) => softfpu_double_op!(self, rd, rs1, rs2, -),
+      RV32(FMUL_S(rd, rs1, rs2, _)) => softfpu_single_op!(self, rd, rs1, rs2, *),
+      RV32(FMUL_D(rd, rs1, rs2, _)) => softfpu_double_op!(self, rd, rs1, rs2, *),
+      RV32(FDIV_S(rd, rs1, rs2, _)) => softfpu_single_op!(self, rd, rs1, rs2, /),
+      RV32(FDIV_D(rd, rs1, rs2, _)) => softfpu_double_op!(self, rd, rs1, rs2, /),
 
-      RV32(FSQRT_S(rd, rs1, _)) => rd.write_fp(self, (rs1.read_fp(self) as f32).sqrt() as f64),
-      RV32(FSQRT_D(rd, rs1, _)) => rd.write_fp(self, (rs1.read_fp(self) as f64).sqrt() as f64),
+      RV32(FSQRT_S(rd, rs1, _)) => {
+        let rs1 = rs1.read_fp(self) as f32;
+        let val = rs1.sqrt();
+        if val.is_nan() {
+          self.csrs.write_unchecked(FFLAGS, FCSR_NV_MASK);
+          rd.write_fp(self, f32::NAN as f64)
+        } else {
+          if rs1 % 1.0 != 0.0 || val % 1.0 != 0.0 {
+            self.csrs.write_unchecked(FFLAGS, FCSR_NX_MASK);
+          }
+          rd.write_fp(self, val as f64)
+        }
+      }
+      RV32(FSQRT_D(rd, rs1, _)) => {
+        let rs1 = rs1.read_fp(self);
+        let val = rs1.sqrt();
+        if val.is_nan() {
+          self.csrs.write_unchecked(FFLAGS, FCSR_NV_MASK);
+          rd.write_fp(self, f64::NAN)
+        } else {
+          if rs1 % 1.0 != 0.0 || val % 1.0 != 0.0 {
+            self.csrs.write_unchecked(FFLAGS, FCSR_NX_MASK);
+          }
+          rd.write_fp(self, val)
+        }
+      },
 
       RV32(FSGNJ_S(rd, rs1, rs2)) => rd.write_fp(self, rs1.read_fp(self).copysign(rs2.read_fp(self))),
       RV32(FSGNJ_D(rd, rs1, rs2)) => rd.write_fp(self, rs1.read_fp(self).copysign(rs2.read_fp(self))),
@@ -579,21 +638,82 @@ impl RV64Cpu {
       RV32(FMAX_S(rd, rs1, rs2)) => rd.write_fp(self, rs1.read_fp(self).max(rs2.read_fp(self))),
       RV32(FMAX_D(rd, rs1, rs2)) => rd.write_fp(self, rs1.read_fp(self).max(rs2.read_fp(self))),
 
-      RV32(FEQ_S(rd, rs1, rs2)) => rd.write(self, (rs1.read_fp(self) == rs2.read_fp(self)) as u64),
+      RV32(FEQ_S(rd, rs1, rs2)) |
+      RV32(FLT_S(rd, rs1, rs2)) |
+      RV32(FLE_S(rd, rs1, rs2)) => {
+        let lhs_rawbits = (rs1.read_fp(self) as f32).to_bits();
+        let rhs_rawbits = (rs2.read_fp(self) as f32).to_bits();
+        let lhs = Single::from_bits(lhs_rawbits as u128);
+        let rhs = Single::from_bits(rhs_rawbits as u128);
+        if lhs.is_nan() || rhs.is_nan() {
+          // 13.8 Single-Precision Floating-Point Compare Instructions
+          // FEQ.S performs a quiet comparison: it only sets the invalid operation exception flag if either input is a signaling NaN.
+          // FLT.S and FLE.S perform what the IEEE 754-2008 standard refers to as signaling comparisons:
+          // that is, they set the invalid operation exception flag if either input is NaN.
+          let set_nv = match instr {
+            RV32(FEQ_S(..)) => {
+              // TODO: possible a bug of rust: converting signaling NaN from f32 to f64 (or vice versa) may lose the signaling characteristic
+              //  see: https://play.rust-lang.org/?version=stable&mode=debug&edition=2021&gist=024899edb6ca3820319e45058f838403
+              lhs.is_signaling() || rhs.is_signaling()
+            }
+            RV32(FLT_S(..)) |
+            RV32(FLE_S(..)) => true,
+            _ => unreachable!(),
+          };
+          if set_nv { let _ = self.csrs.write_unchecked(FFLAGS, FCSR_NV_MASK); }
+          rd.write(self, 0u64);
+        } else {
+          let cmp = lhs.partial_cmp(&rhs).unwrap();
+          match (instr, cmp) {
+            (RV32(FEQ_S(..)), Ordering::Equal) => rd.write(self, 1u64),
+            (RV32(FLT_S(..)), Ordering::Less) => rd.write(self, 1u64),
+            (RV32(FLE_S(..)), Ordering::Equal) => rd.write(self, 1u64),
+            (RV32(FLE_S(..)), Ordering::Less) => rd.write(self, 1u64),
+            _ => rd.write(self, 0u64),
+          }
+        }
+      }
+
+      // TODO: replace with softfpu
       RV32(FEQ_D(rd, rs1, rs2)) => rd.write(self, (rs1.read_fp(self) == rs2.read_fp(self)) as u64),
-      RV32(FLT_S(rd, rs1, rs2)) => rd.write(self, (rs1.read_fp(self) < rs2.read_fp(self)) as u64),
       RV32(FLT_D(rd, rs1, rs2)) => rd.write(self, (rs1.read_fp(self) < rs2.read_fp(self)) as u64),
-      RV32(FLE_S(rd, rs1, rs2)) => rd.write(self, (rs1.read_fp(self) <= rs2.read_fp(self)) as u64),
       RV32(FLE_D(rd, rs1, rs2)) => rd.write(self, (rs1.read_fp(self) <= rs2.read_fp(self)) as u64),
 
       RV32(FCLASS_S(_, _)) => panic!("not implemented at PC = {:?}", pc),
       RV32(FCLASS_D(_, _)) => panic!("not implemented at PC = {:?}", pc),
 
-      RV32(FMV_X_W(rd, rs1)) => rd.write(self, (rs1.read_fp(self).to_bits() & 0xffffffff) as i32 as i64 as u64),
-      RV32(FMV_W_X(rd, rs1)) => rd.write_fp(self, f64::from_bits(rs1.read(self) & 0xffffffff)),
+      RV32(FMV_X_W(rd, rs1)) => {
+        let fp = rs1.read_fp(self) as f32;
+        if fp.is_nan() {
+          rd.write(self, 0x7fc00000 as u64)
+        } else {
+          let bits = fp.to_bits();
+          let val = (bits & 0xffffffff) as i32 as i64 as u64;
+          rd.write(self, val)
+        }
+      }
+      RV32(FMV_W_X(rd, rs1)) => {
+        let bits = (rs1.read(self) & 0xffffffff) as u32;
+        let val = f32::from_bits(bits) as f64;
+        rd.write_fp(self, val)
+      }
 
-      RV64(FMV_X_D(rd, rs1)) => rd.write(self, rs1.read_fp(self).to_bits()),
+      RV64(FMV_X_D(rd, rs1)) => {
+        let rs1 = rs1.read_fp(self);
+        if rs1.is_nan() {
+          rd.write(self, 0x7ff8000000000000);
+        } else {
+          rd.write(self, rs1.to_bits())
+        }
+      },
       RV64(FMV_D_X(rd, rs1)) => rd.write_fp(self, f64::from_bits(rs1.read(self))),
+
+      // 13.7 Single-Precision Floating-Point Conversion and Move Instructions
+      // TODO: If the rounded result is not representable in the destination format,
+      //  it is clipped to the nearest value and the invalid flag is set.
+
+      // TODO: All floating-point conversion instructions set the Inexact exception flag
+      //  if the rounded result differs from the operand value and the Invalid exception flag is not set.
 
       RV32(FCVT_W_S(rd, rs1, _)) => rd.write(self, ((rs1.read_fp(self) as f32).round() as i32) as u64),
       RV32(FCVT_S_W(rd, rs1, _)) => rd.write_fp(self, ((rs1.read(self) as i32) as f32) as f64),
@@ -610,14 +730,14 @@ impl RV64Cpu {
       RV32(FCVT_S_D(rd, rs1, _)) => rd.write_fp(self, rs1.read_fp(self)),
       RV32(FCVT_D_S(rd, rs1, _)) => rd.write_fp(self, (rs1.read_fp(self) as f32) as f64),
 
-      RV64(FCVT_L_S(rd, rs1, _)) => rd.write(self, (rs1.read_fp(self) as f32).round() as u64),
-      RV64(FCVT_S_L(rd, rs1, _)) => rd.write_fp(self, (rs1.read(self) as f32) as f64),
+      RV64(FCVT_L_S(rd, rs1, _)) => rd.write(self, (rs1.read_fp(self) as f32).round() as i64 as u64),
+      RV64(FCVT_S_L(rd, rs1, _)) => rd.write_fp(self, (rs1.read(self) as i64 as f32) as f64),
 
       RV64(FCVT_LU_S(rd, rs1, _)) => rd.write(self, (rs1.read_fp(self) as f32).round() as u64),
       RV64(FCVT_S_LU(rd, rs1, _)) => rd.write_fp(self, ((rs1.read(self) as u64) as f32) as f64),
 
-      RV64(FCVT_L_D(rd, rs1, _)) => rd.write(self, rs1.read_fp(self).round() as u64),
-      RV64(FCVT_D_L(rd, rs1, _)) => rd.write_fp(self, rs1.read(self) as f64),
+      RV64(FCVT_L_D(rd, rs1, _)) => rd.write(self, rs1.read_fp(self).round() as i64 as u64),
+      RV64(FCVT_D_L(rd, rs1, _)) => rd.write_fp(self, rs1.read(self) as i64 as f64),
 
       RV64(FCVT_LU_D(rd, rs1, _)) => rd.write(self, rs1.read_fp(self).round() as u64),
       RV64(FCVT_D_LU(rd, rs1, _)) => rd.write_fp(self, rs1.read(self) as f64),

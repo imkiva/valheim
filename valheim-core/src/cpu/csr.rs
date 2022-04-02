@@ -30,21 +30,29 @@ pub mod CSRMap {
   // Unprivileged CSR addresses
 
   // User floating-point CSRs.
-  /// Flating-point accrued exceptions.
+  /// Floating-point accrued exceptions.
   pub const FFLAGS: u16 = 0x001;
   /// Floating-point dynamic rounding mode.
-  pub const FRB: u16 = 0x002;
+  pub const FRM: u16 = 0x002;
   /// Floating-point control and status register (frm + fflags).
   pub const FCSR: u16 = 0x003;
+
+  // Floating-point inexact
+  pub const FCSR_NX_MASK: u64 = 1 << 0;
+  // Floating-point underflow
+  pub const FCSR_UF_MASK: u64 = 1 << 1;
+  // Floating-point overflow
+  pub const FCSR_OF_MASK: u64 = 1 << 2;
+  // Floating-point divide-by-zero
+  pub const FCSR_DZ_MASK: u64 = 1 << 3;
+  // Floating-point invalid operation
+  pub const FCSR_NV_MASK: u64 = 1 << 4;
 
   // User Counter/Timers.
   /// Cycle counter for RDCYCLE instruction.
   pub const CYCLE: u16 = 0xc00;
   /// Timer for RDTIME instruction.
   pub const TIME: u16 = 0xc01;
-
-  // Floating-point divide-by-zero
-  pub const FCSR_DZ_MASK: u64 = 1 << 3;
 
   // Supervisor-level CSR addresses
 
@@ -246,6 +254,10 @@ impl CSRRegs {
       // Otherwise, the corresponding bits in sip and sie are read-only zero.
       SIE => self.csrs[MIE as usize] & self.csrs[MIDELEG as usize],
       SIP => self.csrs[MIP as usize] & self.csrs[MIDELEG as usize],
+      // 13.2 Floating-Point Control and Status Register
+      // frm and fflags are inside fcsr
+      FRM => (self.csrs[FCSR as usize] >> 5) & 0b111,
+      FFLAGS => (self.csrs[FCSR as usize]) & 0b11111,
       addr => self.csrs[addr as usize],
     }
   }
@@ -300,6 +312,20 @@ impl CSRRegs {
           // SV64 is not supported because spec does not say anything about it.
           self.csrs[SATP as usize] = val;
         }
+      }
+      // 13.2 Floating-Point Control and Status Register
+      // frm and fflags are inside fcsr
+      FRM => {
+        let val = val & 0b111;
+        let fcsr = self.csrs[FCSR as usize];
+        let fcsr = (fcsr & !(0b111 << 5)) | (val << 5);
+        self.csrs[FCSR as usize] = fcsr;
+      },
+      FFLAGS => {
+        let val = val & 0b11111;
+        let fcsr = self.csrs[FCSR as usize];
+        let fcsr = (fcsr & !0b11111) | val;
+        self.csrs[FCSR as usize] = fcsr;
       }
       addr => self.csrs[addr as usize] = val,
     }
