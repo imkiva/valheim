@@ -2,3 +2,5 @@
 xtask = "run --release --package xtask --"
 start = "run --release --package valheim-cli --"
 make = "build --release --package valheim-cli --"
+make-debug = "build --package valheim-cli --"
+run-riscv-tests = "xtask test"

@@ -9,9 +9,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
+        with:
+          submodules: recursive
       - uses: actions-rs/toolchain@v1
         with:
           toolchain: nightly
+      - name: Install RISC-V GNU Toolchain
+        run: |
+          wget -O toolchain.tar.gz https://github.com/riscv-collab/riscv-gnu-toolchain/releases/download/2022.03.09/riscv64-elf-ubuntu-20.04-nightly-2022.03.09-nightly.tar.gz
+          mkdir toolchain
+          tar zxvf toolchain.tar.gz -C toolchain
+          echo "$PWD/toolchain/riscv/bin" >> $GITHUB_PATH
+      - name: Install device-tree-compiler
+        run: sudo apt update && sudo apt install device-tree-compiler
       - uses: actions-rs/cargo@v1
         with:
-          command: make
+          command: run-riscv-tests
