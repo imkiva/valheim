@@ -1,0 +1,5 @@
+rv64uf-p-fcmp
+rv64uf-p-fcvt_w
+rv64uf-p-fmin
+rv64uf-p-move
+rv64uf-p-fclass

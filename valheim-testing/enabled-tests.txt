@@ -49,3 +49,9 @@ rv64ui-p-subw
 rv64ui-p-sw
 rv64ui-p-xor
 rv64ui-p-xori
+rv64uf-p-fadd
+rv64uf-p-fcvt
+rv64uf-p-fdiv
+rv64uf-p-fmadd
+rv64uf-p-ldst
+rv64uf-p-recoding
