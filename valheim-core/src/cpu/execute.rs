@@ -172,6 +172,8 @@ impl RV64Cpu {
         PrivilegeMode::Supervisor => Err(Exception::SupervisorEcall),
         PrivilegeMode::Machine => Err(Exception::MachineEcall),
       },
+
+      // RVM
       RV32(MUL(rd, rs1, rs2)) => rd.write(self, (rs1.read(self) as i64).wrapping_mul(rs2.read(self) as i64) as u64),
       RV32(MULH(rd, rs1, rs2)) => {
         let rs1 = rs1.read(self) as i64 as i128;
@@ -296,6 +298,7 @@ impl RV64Cpu {
       // the valheim trap
       RV32(EBREAK) => return Err(Exception::Breakpoint),
 
+      // RVA
       RV32(LR_W(rd, rs1, _, _)) => {
         let addr = rs1.read(self);
         if addr % 4 != 0 { return Err(Exception::LoadAddressMisaligned(VirtAddr(addr))); }
@@ -427,6 +430,7 @@ impl RV64Cpu {
         rd.write(self, val)
       }
 
+      // CSR
       RV64(CSRRW(rd, rs1, csr)) => {
         let old = self.csrs.read(csr);
         self.csrs.write(csr, rs1.read(self))?;
@@ -463,6 +467,7 @@ impl RV64Cpu {
         if csr.value() == SATP { self.sync_pagetable(); }
       }
 
+      // RVF, RVD
       RV32(FLW(rd, rs1, imm)) => {
         let addr = rs1.read(self).wrapping_add(imm.decode_sext() as u64);
         let val = f32::from_bits(self.read_mem::<u32>(VirtAddr(addr))? as u32);
@@ -589,8 +594,17 @@ impl RV64Cpu {
       RV32(FCLASS_S(_, _)) => panic!("not implemented at PC = {:?}", pc),
       RV32(FCLASS_D(_, _)) => panic!("not implemented at PC = {:?}", pc),
 
-      RV32(FMV_X_W(rd, rs1)) => rd.write(self, (rs1.read_fp(self).to_bits() & 0xffffffff) as i32 as i64 as u64),
-      RV32(FMV_W_X(rd, rs1)) => rd.write_fp(self, f64::from_bits(rs1.read(self) & 0xffffffff)),
+      RV32(FMV_X_W(rd, rs1)) => {
+        let fp = rs1.read_fp(self) as f32;
+        let bits = fp.to_bits();
+        let val = (bits & 0xffffffff) as i32 as i64 as u64;
+        rd.write(self, val)
+      }
+      RV32(FMV_W_X(rd, rs1)) => {
+        let bits = (rs1.read(self) & 0xffffffff) as u32;
+        let val = f32::from_bits(bits) as f64;
+        rd.write_fp(self, val)
+      }
 
       RV64(FMV_X_D(rd, rs1)) => rd.write(self, rs1.read_fp(self).to_bits()),
       RV64(FMV_D_X(rd, rs1)) => rd.write_fp(self, f64::from_bits(rs1.read(self))),
