@@ -102,7 +102,8 @@ impl Machine {
             println!("[Valheim:{:?}] {}: Test passed!", self.cpu.mode, test_name);
             0
           } else {
-            println!("[Valheim:{:?}] {}: Test failed!, gp = {}, a0 = {}", self.cpu.mode, test_name, gp, a0);
+            let failed = gp >> 1;
+            println!("[Valheim:{:?}] {}: Test {} failed!, gp = {}, a0 = {}", self.cpu.mode, test_name, failed, gp, a0);
             self.show_status();
             1
           };
