@@ -44,19 +44,11 @@ macro_rules! ldst_addr {
   };
 }
 
-macro_rules! load_sext {
-  ($self:ident, $rd:ident, $rs1:ident, $offset:ident, $load_type:tt, $sext_type:tt) => {{
+macro_rules! load {
+  ($self:ident, $rd:ident, $rs1:ident, $offset:ident, $load_type:tt, $sext_type:tt, $extend:ident) => {{
     let addr = ldst_addr!($self, $rs1, $offset);
     let val = $self.read_mem::<$load_type>(addr)? as $sext_type;
-    $rd.write($self, sext_w!(val))
-  }};
-}
-
-macro_rules! load_zext {
-  ($self:ident, $rd:ident, $rs1:ident, $offset:ident, $load_type:tt) => {{
-    let addr = ldst_addr!($self, $rs1, $offset);
-    let val = $self.read_mem::<$load_type>(addr)? as u64;
-    $rd.write($self, val)
+    $rd.write($self, $extend!(val))
   }};
 }
 
@@ -264,13 +256,13 @@ impl RV64Cpu {
         }
       }
 
-      RV32(LB(rd, rs1, offset)) => load_sext!(self, rd, rs1, offset, u8, i8),
-      RV32(LH(rd, rs1, offset)) => load_sext!(self, rd, rs1, offset, u16, i16),
-      RV32(LW(rd, rs1, offset)) => load_sext!(self, rd, rs1, offset, u32, i32),
-      RV64(LD(rd, rs1, offset)) => load_zext!(self, rd, rs1, offset, u64),
-      RV32(LBU(rd, rs1, offset)) => load_zext!(self, rd, rs1, offset, u8),
-      RV32(LHU(rd, rs1, offset)) => load_zext!(self, rd, rs1, offset, u16),
-      RV64(LWU(rd, rs1, offset)) => load_zext!(self, rd, rs1, offset, u32),
+      RV32(LB(rd, rs1, offset)) => load!(self, rd, rs1, offset, u8, i8, sext_w),
+      RV32(LH(rd, rs1, offset)) => load!(self, rd, rs1, offset, u16, i16, sext_w),
+      RV32(LW(rd, rs1, offset)) => load!(self, rd, rs1, offset, u32, i32, sext_w),
+      RV64(LD(rd, rs1, offset)) => load!(self, rd, rs1, offset, u64, u64, zext_d),
+      RV32(LBU(rd, rs1, offset)) => load!(self, rd, rs1, offset, u8, u8, zext_d),
+      RV32(LHU(rd, rs1, offset)) => load!(self, rd, rs1, offset, u16, u16, zext_d),
+      RV64(LWU(rd, rs1, offset)) => load!(self, rd, rs1, offset, u32, u32, zext_d),
 
       RV32(SB(rs1, rs2, offset)) => store_trunc!(self, rs1, rs2, offset, u8),
       RV32(SH(rs1, rs2, offset)) => store_trunc!(self, rs1, rs2, offset, u16),
