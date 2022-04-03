@@ -1,4 +1,4 @@
-use crate::cpu::csr::CSRMap::{MEIP_MASK, MIE, MIP, MISA, MSIP_MASK, MSTATUS, MTIP_MASK, SEIP_MASK, SSIP_MASK, SSTATUS, SSTATUS_MASK, STIP_MASK};
+use crate::cpu::csr::CSRMap::{MEIP_MASK, MISA, MSIP_MASK, MSTATUS, MTIP_MASK, SEIP_MASK, SSIP_MASK, SSTATUS, STIP_MASK};
 use crate::cpu::irq::Exception;
 use crate::cpu::mmu::{SATP64_MODE_MASK, SATP64_MODE_SHIFT, VM_V20211203_SV64};
 use crate::cpu::PrivilegeMode;

@@ -4,7 +4,7 @@ use rustc_apfloat::{Float, Status, StatusAnd};
 use rustc_apfloat::ieee::{Double, Single};
 
 use crate::cpu::{PrivilegeMode, RV64Cpu};
-use crate::cpu::csr::CSRMap::{FCSR, FCSR_DZ_MASK, FCSR_NV_MASK, FCSR_NX_MASK, FCSR_OF_MASK, FCSR_UF_MASK, FFLAGS, MEPC, MSTATUS, SATP, SEPC, SSTATUS};
+use crate::cpu::csr::CSRMap::{FCSR, FCSR_DZ_MASK, FCSR_NV_MASK, FCSR_NX_MASK, FCSR_OF_MASK, FCSR_UF_MASK, FFLAGS, MEPC, SATP, SEPC};
 use crate::cpu::data::Either;
 use crate::cpu::irq::Exception;
 use crate::debug::trace::{InstrTrace, Trace};
@@ -18,18 +18,6 @@ use crate::isa::typed::Instr::{RV32, RV64};
 use crate::isa::untyped::Bytecode;
 use crate::memory::VirtAddr;
 
-macro_rules! update_fflags {
-  ($self:ident, $status:expr) => {
-    let mut fflags = 0;
-    if $status & Status::INVALID_OP == Status::INVALID_OP { fflags |= FCSR_NV_MASK; }
-    if $status & Status::DIV_BY_ZERO == Status::DIV_BY_ZERO { fflags |= FCSR_DZ_MASK; }
-    if $status & Status::OVERFLOW == Status::OVERFLOW { fflags |= FCSR_OF_MASK; }
-    if $status & Status::UNDERFLOW == Status::UNDERFLOW { fflags |= FCSR_UF_MASK; }
-    if $status & Status::INEXACT == Status::INEXACT { fflags |= FCSR_NX_MASK; }
-    $self.csrs.write_unchecked(FFLAGS, fflags);
-  };
-}
-
 macro_rules! expr {
   ($e:expr) => { $e }
 }
@@ -40,6 +28,94 @@ macro_rules! pos {
 
 macro_rules! neg {
   ($e:expr) => {-$e};
+}
+
+macro_rules! sext_w {
+  ($e:expr) => {$e as i32 as i64 as u64};
+}
+
+macro_rules! zext_d {
+  ($e:expr) => {$e as u64};
+}
+
+macro_rules! ldst_addr {
+  ($self:ident, $rs1:ident, $offset:ident) => {
+    VirtAddr($rs1.read($self).wrapping_add($offset.decode_sext() as u64))
+  };
+}
+
+macro_rules! load {
+  ($self:ident, $rd:ident, $rs1:ident, $offset:ident, $load_type:tt, $sext_type:tt, $extend:ident) => {{
+    let addr = ldst_addr!($self, $rs1, $offset);
+    let val = $self.read_mem::<$load_type>(addr)? as $sext_type;
+    $rd.write($self, $extend!(val))
+  }};
+}
+
+macro_rules! store_trunc {
+  ($self:ident, $rs1:ident, $rs2:ident, $offset:ident, $store_type:tt) => {{
+    let addr = ldst_addr!($self, $rs1, $offset);
+    let val = $rs2.read($self) as $store_type;
+    $self.write_mem::<$store_type>(addr, val)?
+  }};
+}
+
+macro_rules! amo_addr {
+  ($self:ident, $rs1:ident, $align:expr) => {{
+    let addr = VirtAddr($rs1.read($self));
+    if addr.0 % $align != 0 { return Err(Exception::LoadAddressMisaligned(addr)); }
+    addr
+  }};
+}
+
+macro_rules! amo_bitop_w {
+  ($self:ident, $rd:ident, $rs1:ident, $rs2:ident, $op:tt) => {{
+    let addr = amo_addr!($self, $rs1, 4);
+    let val = $self.read_mem::<u32>(addr)? as i32;
+    let rs2 = $rs2.read($self) as i32;
+    let res = expr!(val $op rs2) as u32;
+    $self.write_mem::<u32>(addr, res)?;
+    $rd.write($self, val as i64 as u64)
+  }};
+}
+
+macro_rules! amo_bitop_d {
+  ($self:ident, $rd:ident, $rs1:ident, $rs2:ident, $op:tt) => {{
+    let addr = amo_addr!($self, $rs1, 8);
+    let val = $self.read_mem::<u64>(addr)?;
+    let rs2 = $rs2.read($self);
+    let res = expr!(val $op rs2);
+    $self.write_mem::<u64>(addr, res)?;
+    $rd.write($self, val);
+  }};
+}
+
+macro_rules! amo_cmp {
+  ($self:ident, $rd:ident, $rs1:ident, $rs2:ident, $align:expr, $ldst_type:ident, $sext_type:ident, $op:tt, $extend: ident) => {{
+    let addr = amo_addr!($self, $rs1, $align);
+    let val = $self.read_mem::<$ldst_type>(addr)? as $sext_type;
+    let rs2 = $rs2.read($self) as $sext_type;
+    $self.write_mem::<$ldst_type>(addr, expr!(val.$op(rs2)) as $ldst_type)?;
+    $rd.write($self, $extend!(val))
+  }};
+}
+
+macro_rules! amo_swap {
+  ($self:ident, $rd:ident, $rs1:ident, $rs2:ident, $align:expr, $ldst_type:ident, $extend: ident) => {{
+    let addr = amo_addr!($self, $rs1, $align);
+    let val = $self.read_mem::<$ldst_type>(addr)?;
+    $self.write_mem::<$ldst_type>(addr, $rs2.read($self) as $ldst_type)?;
+    $rd.write($self, $extend!(val))
+  }};
+}
+
+macro_rules! amo_add {
+  ($self:ident, $rd:ident, $rs1:ident, $rs2:ident, $align:expr, $ldst_type:ident, $extend: ident) => {{
+    let addr = amo_addr!($self, $rs1, $align);
+    let val = $self.read_mem::<$ldst_type>(addr)?;
+    $self.write_mem::<$ldst_type>(addr, val.wrapping_add($rs2.read($self) as $ldst_type))?;
+    $rd.write($self, $extend!(val))
+  }};
 }
 
 macro_rules! softfpu_single_op {
@@ -92,6 +168,18 @@ macro_rules! softfpu_double_op_fuse {
   }};
 }
 
+macro_rules! update_fflags {
+  ($self:ident, $status:expr) => {
+    let mut fflags = 0;
+    if $status & Status::INVALID_OP == Status::INVALID_OP { fflags |= FCSR_NV_MASK; }
+    if $status & Status::DIV_BY_ZERO == Status::DIV_BY_ZERO { fflags |= FCSR_DZ_MASK; }
+    if $status & Status::OVERFLOW == Status::OVERFLOW { fflags |= FCSR_OF_MASK; }
+    if $status & Status::UNDERFLOW == Status::UNDERFLOW { fflags |= FCSR_UF_MASK; }
+    if $status & Status::INEXACT == Status::INEXACT { fflags |= FCSR_NX_MASK; }
+    let _ = $self.csrs.write_unchecked(FFLAGS, fflags);
+  };
+}
+
 impl RV64Cpu {
   pub fn fetch(&mut self) -> Result<(VirtAddr, Bytecode, Bytecode16), Exception> {
     let pc = self.read_pc();
@@ -132,8 +220,8 @@ impl RV64Cpu {
       Instr::NOP => (),
       // nop is also encoded as `ADDI x0, x0, 0`
       RV32(ADDI(Rd(Reg::ZERO), Rs1(Reg::ZERO), Imm32(0))) => (),
-      RV32(LUI(rd, imm)) => rd.write(self, imm.decode() as i32 as i64 as u64),
-      RV32(AUIPC(rd, offset)) => rd.write(self, pc.0.wrapping_add(offset.decode() as i32 as i64 as u64)),
+      RV32(LUI(rd, imm)) => rd.write(self, sext_w!(imm.decode())),
+      RV32(AUIPC(rd, offset)) => rd.write(self, pc.0.wrapping_add(sext_w!(offset.decode()))),
       RV32(JAL(rd, imm)) => {
         let offset = imm.decode_sext() as i64;
         let target = (pc.0 as i64).wrapping_add(offset);
@@ -155,12 +243,12 @@ impl RV64Cpu {
         let rs1 = rs1.read(self);
         let rs2 = rs2.read(self);
         let compare = match instr {
-          RV32(BEQ(_, _, _)) => rs1 == rs2,
-          RV32(BNE(_, _, _)) => rs1 != rs2,
-          RV32(BLT(_, _, _)) => (rs1 as i64) < (rs2 as i64),
-          RV32(BGE(_, _, _)) => (rs1 as i64) >= (rs2 as i64),
-          RV32(BLTU(_, _, _)) => rs1 < rs2,
-          RV32(BGEU(_, _, _)) => rs1 >= rs2,
+          RV32(BEQ(..)) => rs1 == rs2,
+          RV32(BNE(..)) => rs1 != rs2,
+          RV32(BLT(..)) => (rs1 as i64) < (rs2 as i64),
+          RV32(BGE(..)) => (rs1 as i64) >= (rs2 as i64),
+          RV32(BLTU(..)) => rs1 < rs2,
+          RV32(BGEU(..)) => rs1 >= rs2,
           _ => unreachable!()
         };
         if compare {
@@ -168,79 +256,68 @@ impl RV64Cpu {
         }
       }
 
-      RV32(LB(rd, rs1, offset)) => {
-        let val = self.read_mem::<u8>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)))? as i8 as i32 as i64 as u64;
-        rd.write(self, val)
-      }
-      RV32(LH(rd, rs1, offset)) => {
-        let val = self.read_mem::<u16>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)))? as i16 as i32 as i64 as u64;
-        rd.write(self, val)
-      }
-      RV32(LW(rd, rs1, offset)) => {
-        let val = self.read_mem::<u32>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)))? as i32 as i64 as u64;
-        rd.write(self, val)
-      }
-      RV64(LD(rd, rs1, offset)) => {
-        let val = self.read_mem::<u64>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)))?;
-        rd.write(self, val)
-      }
-      RV32(LBU(rd, rs1, offset)) => {
-        let val = self.read_mem::<u8>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)))? as u64;
-        rd.write(self, val)
-      }
-      RV32(LHU(rd, rs1, offset)) => {
-        let val = self.read_mem::<u16>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)))? as u64;
-        rd.write(self, val)
-      }
-      RV64(LWU(rd, rs1, offset)) => {
-        let val = self.read_mem::<u32>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)))? as u64;
-        rd.write(self, val)
-      }
+      RV32(LB(rd, rs1, offset)) => load!(self, rd, rs1, offset, u8, i8, sext_w),
+      RV32(LH(rd, rs1, offset)) => load!(self, rd, rs1, offset, u16, i16, sext_w),
+      RV32(LW(rd, rs1, offset)) => load!(self, rd, rs1, offset, u32, i32, sext_w),
+      RV64(LD(rd, rs1, offset)) => load!(self, rd, rs1, offset, u64, u64, zext_d),
+      RV32(LBU(rd, rs1, offset)) => load!(self, rd, rs1, offset, u8, u8, zext_d),
+      RV32(LHU(rd, rs1, offset)) => load!(self, rd, rs1, offset, u16, u16, zext_d),
+      RV64(LWU(rd, rs1, offset)) => load!(self, rd, rs1, offset, u32, u32, zext_d),
 
-      RV32(SB(rs1, rs2, offset)) => self.write_mem::<u8>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)), rs2.read(self) as u8)?,
-      RV32(SH(rs1, rs2, offset)) => self.write_mem::<u16>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)), rs2.read(self) as u16)?,
-      RV32(SW(rs1, rs2, offset)) => self.write_mem::<u32>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)), rs2.read(self) as u32)?,
-      RV64(SD(rs1, rs2, offset)) => self.write_mem::<u64>(VirtAddr(rs1.read(self).wrapping_add(offset.decode_sext() as u64)), rs2.read(self) as u64)?,
+      RV32(SB(rs1, rs2, offset)) => store_trunc!(self, rs1, rs2, offset, u8),
+      RV32(SH(rs1, rs2, offset)) => store_trunc!(self, rs1, rs2, offset, u16),
+      RV32(SW(rs1, rs2, offset)) => store_trunc!(self, rs1, rs2, offset, u32),
+      RV64(SD(rs1, rs2, offset)) => store_trunc!(self, rs1, rs2, offset, u64),
 
+      // mv is encoded as `addi rd, rs1, 0`
       RV32(ADDI(rd, rs1, Imm32(0))) => rd.write(self, rs1.read(self)),
       // sext.w is encoded as `addiw rd, rs1, 0`
-      RV64(ADDIW(rd, rs1, Imm32(0))) => rd.write(self, rs1.read(self) as i32 as i64 as u64),
+      RV64(ADDIW(rd, rs1, Imm32(0))) => rd.write(self, sext_w!(rs1.read(self))),
+
       RV32(ADDI(rd, rs1, imm)) => rd.write(self, (rs1.read(self) as i64).wrapping_add(imm.decode_sext() as i64) as u64),
-      RV64(ADDIW(rd, rs1, imm)) => rd.write(self, (rs1.read(self) as i32).wrapping_add(imm.decode_sext() as i32) as i32 as i64 as u64),
-      RV32(SLTI(rd, rs1, imm)) => rd.write(self, if (rs1.read(self) as i64) < (imm.decode_sext() as i64) { 1 } else { 0 }),
-      RV32(SLTIU(rd, rs1, Imm32(1))) => rd.write(self, if rs1.read(self) == 0 { 1 } else { 0 }),
-      RV32(SLTIU(rd, rs1, imm)) => rd.write(self, if rs1.read(self) < (imm.decode_sext() as u64) { 1 } else { 0 }),
+      RV64(ADDIW(rd, rs1, imm)) => rd.write(self, sext_w!((rs1.read(self) as i32).wrapping_add(imm.decode_sext() as i32))),
+
       RV32(XORI(rd, rs1, imm)) => rd.write(self, rs1.read(self) ^ (imm.decode_sext() as u64)),
       RV32(ORI(rd, rs1, imm)) => rd.write(self, rs1.read(self) | (imm.decode_sext() as u64)),
       RV32(ANDI(rd, rs1, imm)) => rd.write(self, rs1.read(self) & (imm.decode_sext() as u64)),
+
+      RV32(SLTI(rd, rs1, imm)) => rd.write(self, if (rs1.read(self) as i64) < (imm.decode_sext() as i64) { 1 } else { 0 }),
+      RV32(SLTIU(rd, rs1, Imm32(1))) => rd.write(self, if rs1.read(self) == 0 { 1 } else { 0 }),
+      RV32(SLTIU(rd, rs1, imm)) => rd.write(self, if rs1.read(self) < (imm.decode_sext() as u64) { 1 } else { 0 }),
 
       // RV32's SLLI, SRLI, SRAI was not used when decoding, so they never executes
       // but their implementation should be same.
       RV32(RV32Instr::SLLI(rd, rs1, shamt)) => rd.write(self, rs1.read(self) << shamt.0),
       RV32(RV32Instr::SRLI(rd, rs1, shamt)) => rd.write(self, rs1.read(self) >> shamt.0),
-      RV32(RV32Instr::SRAI(rd, rs1, shamt)) => rd.write(self, ((rs1.read(self) as i64) >> shamt.0) as u64),
       RV64(RV64Instr::SLLI(rd, rs1, shamt)) => rd.write(self, rs1.read(self) << shamt.0),
-      RV64(RV64Instr::SLLIW(rd, rs1, shamt)) => rd.write(self, ((rs1.read(self) as u32) << shamt.0) as i32 as i64 as u64),
       RV64(RV64Instr::SRLI(rd, rs1, shamt)) => rd.write(self, rs1.read(self) >> shamt.0),
-      RV64(RV64Instr::SRLIW(rd, rs1, shamt)) => rd.write(self, ((rs1.read(self) as u32) >> shamt.0) as i32 as i64 as u64),
+      RV32(RV32Instr::SRAI(rd, rs1, shamt)) => rd.write(self, ((rs1.read(self) as i64) >> shamt.0) as u64),
       RV64(RV64Instr::SRAI(rd, rs1, shamt)) => rd.write(self, ((rs1.read(self) as i64) >> shamt.0) as u64),
-      RV64(RV64Instr::SRAIW(rd, rs1, shamt)) => rd.write(self, ((rs1.read(self) as i32) >> shamt.0) as i32 as i64 as u64),
+
+      RV64(RV64Instr::SLLIW(rd, rs1, shamt)) => rd.write(self, sext_w!((rs1.read(self) as u32) << shamt.0)),
+      RV64(RV64Instr::SRLIW(rd, rs1, shamt)) => rd.write(self, sext_w!((rs1.read(self) as u32) >> shamt.0)),
+      RV64(RV64Instr::SRAIW(rd, rs1, shamt)) => rd.write(self, sext_w!((rs1.read(self) as i32) >> shamt.0)),
+
       RV32(ADD(rd, rs1, rs2)) => rd.write(self, rs1.read(self).wrapping_add(rs2.read(self))),
-      RV64(ADDW(rd, rs1, rs2)) => rd.write(self, rs1.read(self).wrapping_add(rs2.read(self)) as i32 as i64 as u64),
       RV32(SUB(rd, rs1, rs2)) => rd.write(self, rs1.read(self).wrapping_sub(rs2.read(self))),
-      RV64(SUBW(rd, rs1, rs2)) => rd.write(self, rs1.read(self).wrapping_sub(rs2.read(self)) as i32 as i64 as u64),
+      RV64(ADDW(rd, rs1, rs2)) => rd.write(self, sext_w!(rs1.read(self).wrapping_add(rs2.read(self)))),
+      RV64(SUBW(rd, rs1, rs2)) => rd.write(self, sext_w!(rs1.read(self).wrapping_sub(rs2.read(self)))),
+
       RV32(SLT(rd, rs1, rs2)) => rd.write(self, if (rs1.read(self) as i64) < (rs2.read(self) as i64) { 1 } else { 0 }),
       RV32(SLTU(rd, Rs1(Reg::ZERO), rs2)) => rd.write(self, if rs2.read(self) != 0 { 1 } else { 0 }),
       RV32(SLTU(rd, rs1, rs2)) => rd.write(self, if rs1.read(self) < rs2.read(self) { 1 } else { 0 }),
-      RV32(XOR(rd, rs1, rs2)) => rd.write(self, rs1.read(self) ^ rs2.read(self)),
+
       RV32(SLL(rd, rs1, rs2)) => rd.write(self, rs1.read(self) << (rs2.read(self) & 0b111111)),
-      RV64(SLLW(rd, rs1, rs2)) => rd.write(self, ((rs1.read(self) as u32) << (rs2.read(self) & 0b11111)) as i32 as i64 as u64),
       RV32(SRL(rd, rs1, rs2)) => rd.write(self, rs1.read(self) >> (rs2.read(self) & 0b111111)),
-      RV64(SRLW(rd, rs1, rs2)) => rd.write(self, ((rs1.read(self) as u32) >> (rs2.read(self) & 0b11111)) as i32 as i64 as u64),
+      RV64(SLLW(rd, rs1, rs2)) => rd.write(self, sext_w!((rs1.read(self) as u32) << (rs2.read(self) & 0b11111))),
+      RV64(SRLW(rd, rs1, rs2)) => rd.write(self, sext_w!((rs1.read(self) as u32) >> (rs2.read(self) & 0b11111))),
       RV32(SRA(rd, rs1, rs2)) => rd.write(self, ((rs1.read(self) as i64) >> (rs2.read(self) & 0b111111)) as u64),
-      RV64(SRAW(rd, rs1, rs2)) => rd.write(self, ((rs1.read(self) as i32) >> (rs2.read(self) & 0b11111)) as i32 as i64 as u64),
+      RV64(SRAW(rd, rs1, rs2)) => rd.write(self, sext_w!((rs1.read(self) as i32) >> (rs2.read(self) & 0b11111))),
+
+      RV32(XOR(rd, rs1, rs2)) => rd.write(self, rs1.read(self) ^ rs2.read(self)),
       RV32(OR(rd, rs1, rs2)) => rd.write(self, rs1.read(self) | rs2.read(self)),
       RV32(AND(rd, rs1, rs2)) => rd.write(self, rs1.read(self) & rs2.read(self)),
+
       RV32(FENCE(_, _, _, _, _)) => (),
       RV64(FENCE_I(_, _, _)) => (),
       RV32(FENCE_TSO) => (),
@@ -346,7 +423,7 @@ impl RV64Cpu {
           let _ = self.csrs.write_unchecked(FCSR, self.csrs.read_unchecked(FCSR) | FCSR_DZ_MASK);
           u64::MAX
         } else {
-          dividend.wrapping_div(divisor) as i32 as i64 as u64
+          sext_w!(dividend.wrapping_div(divisor))
         };
         rd.write(self, val);
       }
@@ -366,9 +443,9 @@ impl RV64Cpu {
         let dividend = rs1.read(self) as u32;
         let divisor = rs2.read(self) as u32;
         let val = if divisor == 0 {
-          dividend as i32 as i64 as u64
+          sext_w!(dividend)
         } else {
-          dividend.wrapping_rem(divisor) as i32 as i64 as u64
+          sext_w!(dividend.wrapping_rem(divisor))
         };
         rd.write(self, val);
       }
@@ -378,17 +455,13 @@ impl RV64Cpu {
 
       // RVA
       RV32(LR_W(rd, rs1, _, _)) => {
-        let addr = rs1.read(self);
-        if addr % 4 != 0 { return Err(Exception::LoadAddressMisaligned(VirtAddr(addr))); }
-        let addr = VirtAddr(addr);
+        let addr = amo_addr!(self, rs1, 4);
         let val = self.read_mem::<u32>(addr)?;
-        rd.write(self, val as i32 as i64 as u64);
+        rd.write(self, sext_w!(val));
         self.reserved.push(addr);
       }
       RV32(SC_W(rd, rs1, rs2, _, _)) => {
-        let addr = rs1.read(self);
-        if addr % 4 != 0 { return Err(Exception::StoreAddressMisaligned(VirtAddr(addr))); }
-        let addr = VirtAddr(addr);
+        let addr = amo_addr!(self, rs1, 4);
         if self.reserved.contains(&addr) {
           // "Regardless of success or failure, executing an SC.W instruction
           // invalidates any reservation held by this hart. "
@@ -401,16 +474,13 @@ impl RV64Cpu {
         };
       }
       RV64(LR_D(rd, rs1, _, _)) => {
-        let addr = rs1.read(self);
-        if addr % 8 != 0 { return Err(Exception::LoadAddressMisaligned(VirtAddr(addr))); }
-        let val = self.read_mem::<u64>(VirtAddr(addr))?;
+        let addr = amo_addr!(self, rs1, 8);
+        let val = self.read_mem::<u64>(addr)?;
         rd.write(self, val);
-        self.reserved.push(VirtAddr(addr));
+        self.reserved.push(addr);
       }
       RV64(SC_D(rd, rs1, rs2, _, _)) => {
-        let addr = rs1.read(self);
-        if addr % 8 != 0 { return Err(Exception::StoreAddressMisaligned(VirtAddr(addr))); }
-        let addr = VirtAddr(addr);
+        let addr = amo_addr!(self, rs1, 8);
         if self.reserved.contains(&addr) {
           self.reserved.retain(|&x| x != addr);
           self.write_mem::<u64>(addr, rs2.read(self))?;
@@ -421,92 +491,26 @@ impl RV64Cpu {
         }
       }
 
-      RV32(AMOADD_W(rd, rs1, rs2, _, _)) => {
-        let addr = VirtAddr(rs1.read(self));
-        if addr.0 % 4 != 0 { return Err(Exception::LoadAddressMisaligned(addr)); }
-        let val = self.read_mem::<u32>(addr)?;
-        self.write_mem::<u32>(addr, val.wrapping_add(rs2.read(self) as u32))?;
-        rd.write(self, val as i32 as i64 as u64)
-      }
-      RV64(AMOADD_D(rd, rs1, rs2, _, _)) => {
-        let addr = VirtAddr(rs1.read(self));
-        if addr.0 % 8 != 0 { return Err(Exception::LoadAddressMisaligned(addr)); }
-        let val = self.read_mem::<u64>(addr)?;
-        self.write_mem::<u64>(addr, val.wrapping_add(rs2.read(self)))?;
-        rd.write(self, val);
-      }
+      RV32(AMOADD_W(rd, rs1, rs2, _, _)) => amo_add!(self, rd, rs1, rs2, 4, u32, sext_w),
+      RV64(AMOADD_D(rd, rs1, rs2, _, _)) => amo_add!(self, rd, rs1, rs2, 8, u64, zext_d),
+      RV32(AMOSWAP_W(rd, rs1, rs2, _, _)) => amo_swap!(self, rd, rs1, rs2, 4, u32, sext_w),
+      RV64(AMOSWAP_D(rd, rs1, rs2, _, _)) => amo_swap!(self, rd, rs1, rs2, 8, u64, zext_d),
 
-      RV32(AMOXOR_W(rd, rs1, rs2, _, _)) => {
-        let addr = VirtAddr(rs1.read(self));
-        if addr.0 % 4 != 0 { return Err(Exception::LoadAddressMisaligned(addr)); }
-        let val = self.read_mem::<u32>(addr)?;
-        self.write_mem::<u32>(addr, (val as i32 ^ (rs2.read(self) as i32)) as u32)?;
-        rd.write(self, val as i32 as i64 as u64)
-      }
-      RV64(AMOXOR_D(rd, rs1, rs2, _, _)) => {
-        let addr = VirtAddr(rs1.read(self));
-        if addr.0 % 8 != 0 { return Err(Exception::LoadAddressMisaligned(addr)); }
-        let val = self.read_mem::<u64>(addr)?;
-        self.write_mem::<u64>(addr, val ^ rs2.read(self))?;
-        rd.write(self, val);
-      }
+      RV32(AMOXOR_W(rd, rs1, rs2, _, _)) => amo_bitop_w!(self, rd, rs1, rs2, ^),
+      RV32(AMOAND_W(rd, rs1, rs2, _, _)) => amo_bitop_w!(self, rd, rs1, rs2, &),
+      RV32(AMOOR_W(rd, rs1, rs2, _, _)) => amo_bitop_w!(self, rd, rs1, rs2, |),
+      RV64(AMOXOR_D(rd, rs1, rs2, _, _)) => amo_bitop_d!(self, rd, rs1, rs2, ^),
+      RV64(AMOAND_D(rd, rs1, rs2, _, _)) => amo_bitop_d!(self, rd, rs1, rs2, &),
+      RV64(AMOOR_D(rd, rs1, rs2, _, _)) => amo_bitop_d!(self, rd, rs1, rs2, |),
 
-      RV32(AMOAND_W(rd, rs1, rs2, _, _)) => {
-        let addr = VirtAddr(rs1.read(self));
-        if addr.0 % 4 != 0 { return Err(Exception::LoadAddressMisaligned(addr)); }
-        let val = self.read_mem::<u32>(addr)?;
-        self.write_mem::<u32>(addr, (val as i32 & (rs2.read(self) as i32)) as u32)?;
-        rd.write(self, val as i32 as i64 as u64)
-      }
-      RV64(AMOAND_D(rd, rs1, rs2, _, _)) => {
-        let addr = VirtAddr(rs1.read(self));
-        if addr.0 % 8 != 0 { return Err(Exception::LoadAddressMisaligned(addr)); }
-        let val = self.read_mem::<u64>(addr)?;
-        self.write_mem::<u64>(addr, val & rs2.read(self))?;
-        rd.write(self, val);
-      }
-
-      RV32(AMOOR_W(rd, rs1, rs2, _, _)) => {
-        let addr = VirtAddr(rs1.read(self));
-        if addr.0 % 4 != 0 { return Err(Exception::LoadAddressMisaligned(addr)); }
-        let val = self.read_mem::<u32>(addr)?;
-        self.write_mem::<u32>(addr, (val as i32 | (rs2.read(self) as i32)) as u32)?;
-        rd.write(self, val as i32 as i64 as u64)
-      }
-      RV64(AMOOR_D(rd, rs1, rs2, _, _)) => {
-        let addr = VirtAddr(rs1.read(self));
-        if addr.0 % 8 != 0 { return Err(Exception::LoadAddressMisaligned(addr)); }
-        let val = self.read_mem::<u64>(addr)?;
-        self.write_mem::<u64>(addr, val | rs2.read(self))?;
-        rd.write(self, val);
-      }
-
-      RV32(AMOMIN_W(rd, rs1, rs2, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV64(AMOMIN_D(rd, rs1, rs2, _, _)) => panic!("not implemented at PC = {:?}", pc),
-
-      RV32(AMOMAX_W(rd, rs1, rs2, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV64(AMOMAX_D(rd, rs1, rs2, _, _)) => panic!("not implemented at PC = {:?}", pc),
-
-      RV32(AMOMINU_W(rd, rs1, rs2, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV64(AMOMINU_D(rd, rs1, rs2, _, _)) => panic!("not implemented at PC = {:?}", pc),
-
-      RV32(AMOMAXU_W(rd, rs1, rs2, _, _)) => panic!("not implemented at PC = {:?}", pc),
-      RV64(AMOMAXU_D(rd, rs1, rs2, _, _)) => panic!("not implemented at PC = {:?}", pc),
-
-      RV32(AMOSWAP_W(rd, rs1, rs2, _, _)) => {
-        let addr = rs1.read(self);
-        if addr % 4 != 0 { return Err(Exception::LoadAddressMisaligned(VirtAddr(addr))); }
-        let val = self.read_mem::<u32>(VirtAddr(addr))?;
-        self.write_mem::<u32>(VirtAddr(addr), rs2.read(self) as u32)?;
-        rd.write(self, val as i32 as i64 as u64)
-      }
-      RV64(AMOSWAP_D(rd, rs1, rs2, _, _)) => {
-        let addr = rs1.read(self);
-        if addr % 8 != 0 { return Err(Exception::LoadAddressMisaligned(VirtAddr(addr))); }
-        let val = self.read_mem::<u64>(VirtAddr(addr))?;
-        self.write_mem::<u64>(VirtAddr(addr), rs2.read(self))?;
-        rd.write(self, val)
-      }
+      RV32(AMOMIN_W(rd, rs1, rs2, _, _)) => amo_cmp!(self, rd, rs1, rs2, 4, u32, i32, min, sext_w),
+      RV64(AMOMIN_D(rd, rs1, rs2, _, _)) => amo_cmp!(self, rd, rs1, rs2, 8, u64, i64, min, zext_d),
+      RV32(AMOMAX_W(rd, rs1, rs2, _, _)) => amo_cmp!(self, rd, rs1, rs2, 4, u32, i32, max, sext_w),
+      RV64(AMOMAX_D(rd, rs1, rs2, _, _)) => amo_cmp!(self, rd, rs1, rs2, 8, u64, i64, max, zext_d),
+      RV32(AMOMINU_W(rd, rs1, rs2, _, _)) => amo_cmp!(self, rd, rs1, rs2, 4, u32, u32, min, sext_w),
+      RV64(AMOMINU_D(rd, rs1, rs2, _, _)) => amo_cmp!(self, rd, rs1, rs2, 8, u64, u64, min, zext_d),
+      RV32(AMOMAXU_W(rd, rs1, rs2, _, _)) => amo_cmp!(self, rd, rs1, rs2, 4, u32, u32, max, sext_w),
+      RV64(AMOMAXU_D(rd, rs1, rs2, _, _)) => amo_cmp!(self, rd, rs1, rs2, 8, u64, u64, max, zext_d),
 
       // CSR
       RV64(CSRRW(rd, rs1, csr)) => {
@@ -547,24 +551,24 @@ impl RV64Cpu {
 
       // RVF, RVD
       RV32(FLW(rd, rs1, imm)) => {
-        let addr = rs1.read(self).wrapping_add(imm.decode_sext() as u64);
-        let val = f32::from_bits(self.read_mem::<u32>(VirtAddr(addr))? as u32);
+        let addr = ldst_addr!(self, rs1, imm);
+        let val = f32::from_bits(self.read_mem::<u32>(addr)? as u32);
         rd.write_fp(self, val as f64);
       }
       RV32(FLD(rd, rs1, imm)) => {
-        let addr = rs1.read(self).wrapping_add(imm.decode_sext() as u64);
-        let val = f64::from_bits(self.read_mem::<u64>(VirtAddr(addr))?);
+        let addr = ldst_addr!(self, rs1, imm);
+        let val = f64::from_bits(self.read_mem::<u64>(addr)?);
         rd.write_fp(self, val);
       }
       RV32(FSW(rs1, rs2, imm)) => {
-        let addr = rs1.read(self).wrapping_add(imm.decode_sext() as u64);
+        let addr = ldst_addr!(self, rs1, imm);
         let val = rs2.read_fp(self) as f32;
-        self.write_mem::<u32>(VirtAddr(addr), val.to_bits())?;
+        self.write_mem::<u32>(addr, val.to_bits())?;
       }
       RV32(FSD(rs1, rs2, imm)) => {
-        let addr = rs1.read(self).wrapping_add(imm.decode_sext() as u64);
+        let addr = ldst_addr!(self, rs1, imm);
         let val = rs2.read_fp(self);
-        self.write_mem::<u64>(VirtAddr(addr), val.to_bits())?;
+        self.write_mem::<u64>(addr, val.to_bits())?;
       }
 
       RV32(FMADD_S(rd, rs1, rs2, rs3, _)) => softfpu_single_op_fuse!(self, rd, pos, rs1, rs2, pos, rs3, mul_add),
@@ -589,11 +593,11 @@ impl RV64Cpu {
         let rs1 = rs1.read_fp(self) as f32;
         let val = rs1.sqrt();
         if val.is_nan() {
-          self.csrs.write_unchecked(FFLAGS, FCSR_NV_MASK);
+          let _ = self.csrs.write_unchecked(FFLAGS, FCSR_NV_MASK);
           rd.write_fp(self, f32::NAN as f64)
         } else {
           if rs1 % 1.0 != 0.0 || val % 1.0 != 0.0 {
-            self.csrs.write_unchecked(FFLAGS, FCSR_NX_MASK);
+            let _ = self.csrs.write_unchecked(FFLAGS, FCSR_NX_MASK);
           }
           rd.write_fp(self, val as f64)
         }
@@ -602,11 +606,11 @@ impl RV64Cpu {
         let rs1 = rs1.read_fp(self);
         let val = rs1.sqrt();
         if val.is_nan() {
-          self.csrs.write_unchecked(FFLAGS, FCSR_NV_MASK);
+          let _ = self.csrs.write_unchecked(FFLAGS, FCSR_NV_MASK);
           rd.write_fp(self, f64::NAN)
         } else {
           if rs1 % 1.0 != 0.0 || val % 1.0 != 0.0 {
-            self.csrs.write_unchecked(FFLAGS, FCSR_NX_MASK);
+            let _ = self.csrs.write_unchecked(FFLAGS, FCSR_NX_MASK);
           }
           rd.write_fp(self, val)
         }
@@ -688,7 +692,7 @@ impl RV64Cpu {
           rd.write(self, 0x7fc00000 as u64)
         } else {
           let bits = fp.to_bits();
-          let val = (bits & 0xffffffff) as i32 as i64 as u64;
+          let val = sext_w!(bits & 0xffffffff);
           rd.write(self, val)
         }
       }
@@ -786,26 +790,7 @@ impl RV64Cpu {
         self.csrs.write_mstatus_MPRV(false);
       }
 
-      RV64(WFI) => {
-        // println!("[Valheim] CPU wfi at {:#x} in {:?} mode", pc.0, self.mode);
-        // pub fn debug_dump(cpu: &mut RV64Cpu, begin: VirtAddr, ninstr: u64) {
-        //   let udump_start = begin - VirtAddr(4 * ninstr);
-        //   let udump_end = begin + VirtAddr(4 * ninstr);
-        //   unsafe {
-        //     let mut udump = udump_start;
-        //     while udump != udump_end {
-        //       let kdump = cpu.translate(udump, Reason::Read).unwrap();
-        //       let ptr = cpu.bus.mem.to_phys(kdump).unwrap().0;
-        //       println!("{:#08x} -> {:#08x}: {:02x} {:02x} {:02x} {:02x}  |  {}{}{}{}", udump.0, kdump.0,
-        //                *ptr, *(ptr.wrapping_add(1)), *(ptr.wrapping_add(2)), *(ptr.wrapping_add(3)),
-        //                *ptr as char, *(ptr.wrapping_add(1)) as char, *(ptr.wrapping_add(2)) as char, *(ptr.wrapping_add(3)) as char);
-        //       udump += VirtAddr(4);
-        //     }
-        //   }
-        // }
-        // debug_dump(self, pc, 5);
-        self.wfi = true
-      }
+      RV64(WFI) => self.wfi = true,
 
       // 4.1.11 Supervisor Address Translation and Protection (satp) Register
       // The satp register is considered active when the effective privilege mode is S-mode or U-mode.
