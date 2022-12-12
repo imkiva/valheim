@@ -2,7 +2,7 @@ use crate::isa::data::Fin;
 use crate::isa::rv32::RV32Instr;
 use crate::isa::rv64::RV64Instr;
 use crate::isa::typed::{Instr, Rd, Reg, RoundingMode, Rs1, Rs2, Rs3};
-use crate::isa::typed::Reg::ZERO;
+use crate::isa::typed::Reg::{X, ZERO, F, FCSR, PC};
 
 pub trait Encode32 {
   fn encode32(self) -> u32;
@@ -17,7 +17,7 @@ impl Encode32 for Instr {
     match self {
       Instr::RV32(i) => i.encode32(),
       Instr::RV64(i) => i.encode32(),
-      Instr::NOP => todo!("NOP encode")
+      Instr::NOP => panic!("No nop instruction in 32-bit length encoding"),
     }
   }
 }
@@ -90,35 +90,32 @@ impl Encode32 for RV32Instr {
       RV32Instr::AMOMINU_W(_, _, _, _, _) => todo!(),
       RV32Instr::AMOMAXU_W(_, _, _, _, _) => todo!(),
       // RVF
-      RV32Instr::FLW(_, _, _) => todo!(),
-      RV32Instr::FSW(_, _, _) => todo!(),
-      RV32Instr::FMADD_S(_, _, _, _, _) => todo!(),
-      RV32Instr::FMSUB_S(_, _, _, _, _) => todo!(),
-      RV32Instr::FNMSUB_S(_, _, _, _, _) => todo!(),
-      RV32Instr::FNMADD_S(_, _, _, _, _) => todo!(),
-      RV32Instr::FADD_S(_, _, _, _) => todo!(),
-      RV32Instr::FSUB_S(_, _, _, _) => todo!(),
-      RV32Instr::FMUL_S(_, _, _, _) => todo!(),
-      RV32Instr::FDIV_S(_, _, _, _) => todo!(),
-      RV32Instr::FSQRT_S(_, _, _) => todo!(),
-      RV32Instr::FSGNJ_S(_, _, _) => todo!(),
-      RV32Instr::FSGNJN_S(_, _, _) => todo!(),
-      RV32Instr::FSGNJX_S(_, _, _) => todo!(),
-      RV32Instr::FMIN_S(_, _, _) => todo!(),
-      RV32Instr::FMAX_S(_, _, _) => todo!(),
-      RV32Instr::FCVT_W_S(_, _, _) => todo!(),
-      RV32Instr::FCVT_WU_S(_, _, _) => todo!(),
-      RV32Instr::FMV_X_W(_, _) => todo!(),
-
+      RV32Instr::FLW(rd, rs1, imm) => emit_i_type(0b0000111, 0b010, rd, rs1, imm.decode_sext()),
+      RV32Instr::FSW(rs1, rs2, imm) => emit_s_type(0b0100111, 0b010, rs1, rs2, imm.decode_sext()),
+      RV32Instr::FMADD_S(rd, rs1, rs2, rs3, rm) => emit_r4_type(0b1000011, 0b00, rm.encode32(), rd, rs1, rs2, rs3),
+      RV32Instr::FMSUB_S(rd, rs1, rs2, rs3, rm) => emit_r4_type(0b1000111, 0b00, rm.encode32(), rd, rs1, rs2, rs3),
+      RV32Instr::FNMSUB_S(rd, rs1, rs2, rs3, rm) => emit_r4_type(0b1001011, 0b00, rm.encode32(), rd, rs1, rs2, rs3),
+      RV32Instr::FNMADD_S(rd, rs1, rs2, rs3, rm) => emit_r4_type(0b1001111, 0b00, rm.encode32(), rd, rs1, rs2, rs3),
+      RV32Instr::FADD_S(rd, rs1, rs2, rm) => emit_r_type(0b1010011, 0b0000000, rm.encode32(), rd, rs1, rs2),
+      RV32Instr::FSUB_S(rd, rs1, rs2, rm) => emit_r_type(0b1010011, 0b0000100, rm.encode32(), rd, rs1, rs2),
+      RV32Instr::FMUL_S(rd, rs1, rs2, rm) => emit_r_type(0b1010011, 0b0001000, rm.encode32(), rd, rs1, rs2),
+      RV32Instr::FDIV_S(rd, rs1, rs2, rm) => emit_r_type(0b1010011, 0b0001100, rm.encode32(), rd, rs1, rs2),
+      RV32Instr::FSQRT_S(rd, rs1, rm) => emit_r_type(0b1010011, 0b0101100, rm.encode32(), rd, rs1, Rs2(ZERO)),
+      RV32Instr::FSGNJ_S(rd, rs1, rs2) => emit_r_type(0b1010011, 0b0010000, 0b000, rd, rs1, rs2),
+      RV32Instr::FSGNJN_S(rd, rs1, rs2) => emit_r_type(0b1010011, 0b0010000, 0b001, rd, rs1, rs2),
+      RV32Instr::FSGNJX_S(rd, rs1, rs2) => emit_r_type(0b1010011, 0b0010000, 0b010, rd, rs1, rs2),
+      RV32Instr::FMIN_S(rd, rs1, rs2) => emit_r_type(0b1010011, 0b0010100, 0b000, rd, rs1, rs2),
+      RV32Instr::FMAX_S(rd, rs1, rs2) => emit_r_type(0b1010011, 0b0010100, 0b001, rd, rs1, rs2),
+      RV32Instr::FCVT_W_S(rd, rs1, rm) => emit_r_type(0b1010011, 0b1100000, rm.encode32(), rd, rs1, Rs2(ZERO)),
+      RV32Instr::FCVT_WU_S(rd, rs1, rm) => emit_r_type(0b1010011, 0b1100000, rm.encode32(), rd, rs1, Rs2(X(Fin::new(1)))),
+      RV32Instr::FMV_X_W(rd, rs1) => emit_r_type(0b1010011, 0b1110000, 0b000, rd, rs1, Rs2(ZERO)),
       RV32Instr::FEQ_S(rd, rs1, rs2) => emit_r_type(0b1010011, 0b1010000, 0b010, rd, rs1, rs2),
       RV32Instr::FLT_S(rd, rs1, rs2) => emit_r_type(0b1010011, 0b1010000, 0b001, rd, rs1, rs2),
       RV32Instr::FLE_S(rd, rs1, rs2) => emit_r_type(0b1010011, 0b1010000, 0b000, rd, rs1, rs2),
-
-      RV32Instr::FCLASS_S(_, _) => todo!(),
-      RV32Instr::FCVT_S_W(_, _, _) => todo!(),
-      RV32Instr::FCVT_S_WU(_, _, _) => todo!(),
-      RV32Instr::FMV_W_X(_, _) => todo!(),
-
+      RV32Instr::FCLASS_S(rd, rs1) => emit_r_type(0b1010011, 0b1110000, 0b001, rd, rs1, Rs2(ZERO)),
+      RV32Instr::FCVT_S_W(rd, rs1, rm) => emit_r_type(0b1010011, 0b1101000, rm.encode32(), rd, rs1, Rs2(ZERO)),
+      RV32Instr::FCVT_S_WU(rd, rs1, rm) => emit_r_type(0b1010011, 0b1101000, rm.encode32(), rd, rs1, Rs2(X(Fin::new(1)))),
+      RV32Instr::FMV_W_X(rd, rs1) => emit_r_type(0b1010011, 0b1111000, 0b000, rd, rs1, Rs2(ZERO)),
       // FVD
       RV32Instr::FLD(rd, rs1, imm) => emit_i_type(0b0000111, 0b011, rd, rs1, imm.decode_sext()),
       RV32Instr::FSD(rs1, rs2, imm) => emit_s_type(0b0100111, 0b011, rs1, rs2, imm.decode_sext()),
@@ -136,16 +133,16 @@ impl Encode32 for RV32Instr {
       RV32Instr::FSGNJX_D(rd, rs1, rs2) => emit_r_type(0b1010011, 0b0010001, 0b010, rd, rs1, rs2),
       RV32Instr::FMIN_D(rd, rs1, rs2) => emit_r_type(0b1010011, 0b0010101, 0b000, rd, rs1, rs2),
       RV32Instr::FMAX_D(rd, rs1, rs2) => emit_r_type(0b1010011, 0b0010101, 0b001, rd, rs1, rs2),
-      RV32Instr::FCVT_S_D(rd, rs1, rm) => emit_r_type(0b1010011, 0b0100000, rm.encode32(), rd, rs1, Rs2(Reg::X(Fin::new(1)))),
+      RV32Instr::FCVT_S_D(rd, rs1, rm) => emit_r_type(0b1010011, 0b0100000, rm.encode32(), rd, rs1, Rs2(X(Fin::new(1)))),
       RV32Instr::FCVT_D_S(rd, rs1, rm) => emit_r_type(0b1010011, 0b0100001, rm.encode32(), rd, rs1, Rs2(ZERO)),
       RV32Instr::FEQ_D(rd, rs1, rs2) => emit_r_type(0b1010011, 0b1010001, 0b010, rd, rs1, rs2),
       RV32Instr::FLT_D(rd, rs1, rs2) => emit_r_type(0b1010011, 0b1010001, 0b001, rd, rs1, rs2),
       RV32Instr::FLE_D(rd, rs1, rs2) => emit_r_type(0b1010011, 0b1010001, 0b000, rd, rs1, rs2),
       RV32Instr::FCLASS_D(rd, rs1) => emit_r_type(0b1010011, 0b1110001, 0b001, rd, rs1, Rs2(ZERO)),
       RV32Instr::FCVT_W_D(rd, rs1, rm) => emit_r_type(0b1010011, 0b1100001, rm.encode32(), rd, rs1, Rs2(ZERO)),
-      RV32Instr::FCVT_WU_D(rd, rs1, rm) => emit_r_type(0b1010011, 0b1100001, rm.encode32(), rd, rs1, Rs2(Reg::X(Fin::new(1)))),
+      RV32Instr::FCVT_WU_D(rd, rs1, rm) => emit_r_type(0b1010011, 0b1100001, rm.encode32(), rd, rs1, Rs2(X(Fin::new(1)))),
       RV32Instr::FCVT_D_W(rd, rs1, rm) => emit_r_type(0b1010011, 0b1101001, rm.encode32(), rd, rs1, Rs2(ZERO)),
-      RV32Instr::FCVT_D_WU(rd, rs1, rm) => emit_r_type(0b1010011, 0b1101001, rm.encode32(), rd, rs1, Rs2(Reg::X(Fin::new(1)))),
+      RV32Instr::FCVT_D_WU(rd, rs1, rm) => emit_r_type(0b1010011, 0b1101001, rm.encode32(), rd, rs1, Rs2(X(Fin::new(1)))),
     }
   }
 }
@@ -215,11 +212,11 @@ impl Encode32 for RV64Instr {
 impl Encode32 for Reg {
   fn encode32(self) -> u32 {
     match self {
-      Reg::ZERO => 0,
-      Reg::X(x) => x.value(),
-      Reg::F(f) => f.value(),
-      Reg::PC => panic!(),
-      Reg::FCSR => panic!(),
+      ZERO => 0,
+      X(x) => x.value(),
+      F(f) => f.value(),
+      PC => panic!("No direct pc access in RISC-V instruction encoding"),
+      FCSR => panic!("No direct fcsr access in RISC-V instruction encoding"),
     }
   }
 }

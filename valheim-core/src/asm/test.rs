@@ -7,13 +7,13 @@ mod tests {
   use crate::isa::typed::Reg::{F, X};
 
   #[test]
-  fn xlb() {
+  fn xlb1() {
     let x = Instr::decode32(0xA221A253).unwrap();
     println!("{:?}", x);
   }
 
   #[test]
-  fn xlb2222() {
+  fn xlb2() {
     let x = vec![
       (RV32Instr::FEQ_S(Rd(X(Fin::new(4))), Rs1(F(Fin::new(3))), Rs2(F(Fin::new(2)))), "FEQ_S"),
       (RV32Instr::FEQ_S(Rd(X(Fin::new(4))), Rs1(F(Fin::new(3))), Rs2(F(Fin::new(2)))), "FEQ_S"),
