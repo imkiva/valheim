@@ -4,26 +4,26 @@ use crate::isa::rv64::RV64Instr;
 use crate::isa::typed::{Instr, Rd, Reg, RoundingMode, Rs1, Rs2, Rs3};
 use crate::isa::typed::Reg::ZERO;
 
-pub trait Encode {
-  fn encode(self) -> u32;
+pub trait Encode32 {
+  fn encode32(self) -> u32;
 }
 
-pub trait EncodeCompressed {
-  fn encode_compressed(self) -> u16;
+pub trait Encode16 {
+  fn encode16(self) -> u16;
 }
 
-impl Encode for Instr {
-  fn encode(self) -> u32 {
+impl Encode32 for Instr {
+  fn encode32(self) -> u32 {
     match self {
-      Instr::RV32(i) => i.encode(),
-      Instr::RV64(i) => i.encode(),
+      Instr::RV32(i) => i.encode32(),
+      Instr::RV64(i) => i.encode32(),
       Instr::NOP => todo!("NOP encode")
     }
   }
 }
 
-impl Encode for RV32Instr {
-  fn encode(self) -> u32 {
+impl Encode32 for RV32Instr {
+  fn encode32(self) -> u32 {
     match self {
       // RVI
       RV32Instr::LUI(_, _) => todo!(),
@@ -118,71 +118,38 @@ impl Encode for RV32Instr {
       RV32Instr::FMV_W_X(_, _) => todo!(),
 
       // FVD
-      RV32Instr::FLD(rd, rs1, imm) =>
-        emit_i_type(0b0000111, 0b011, rd, rs1, imm.decode_sext()),
-      RV32Instr::FSD(rs1, rs2, imm) =>
-        emit_s_type(0b0100111, 0b011, rs1, rs2, imm.decode_sext()),
-
-      RV32Instr::FMADD_D(rd, rs1, r2, rs3, rm) =>
-        emit_r4_type(0b1000011, 0b01, rm.encode(), rd, rs1, r2, rs3),
-      RV32Instr::FMSUB_D(rd, rs1, r2, rs3, rm) =>
-        emit_r4_type(0b1000111, 0b01, rm.encode(), rd, rs1, r2, rs3),
-      RV32Instr::FNMSUB_D(rd, rs1, r2, rs3, rm) =>
-        emit_r4_type(0b1001011, 0b01, rm.encode(), rd, rs1, r2, rs3),
-      RV32Instr::FNMADD_D(rd, rs1, r2, rs3, rm) =>
-        emit_r4_type(0b1001111, 0b01, rm.encode(), rd, rs1, r2, rs3),
-
-      RV32Instr::FADD_D(rd, rs1, rs2, rm) =>
-        emit_r_type(0b1010011, 0b0000001, rm.encode(), rd, rs1, rs2),
-      RV32Instr::FSUB_D(rd, rs1, rs2, rm) =>
-        emit_r_type(0b1010011, 0b0000101, rm.encode(), rd, rs1, rs2),
-      RV32Instr::FMUL_D(rd, rs1, rs2, rm) =>
-        emit_r_type(0b1010011, 0b0001001, rm.encode(), rd, rs1, rs2),
-      RV32Instr::FDIV_D(rd, rs1, rs2, rm) =>
-        emit_r_type(0b1010011, 0b0001101, rm.encode(), rd, rs1, rs2),
-
-      RV32Instr::FSQRT_D(rd, rs1, rm) =>
-        emit_r_type(0b1010011, 0b0101101, rm.encode(), rd, rs1, Rs2(ZERO)),
-      RV32Instr::FSGNJ_D(rd, rs1, rs2) =>
-        emit_r_type(0b1010011, 0b0010001, 0b000, rd, rs1, rs2),
-      RV32Instr::FSGNJN_D(rd, rs1, rs2) =>
-        emit_r_type(0b1010011, 0b0010001, 0b001, rd, rs1, rs2),
-      RV32Instr::FSGNJX_D(rd, rs1, rs2) =>
-        emit_r_type(0b1010011, 0b0010001, 0b010, rd, rs1, rs2),
-
-      RV32Instr::FMIN_D(rd, rs1, rs2) =>
-        emit_r_type(0b1010011, 0b0010101, 0b000, rd, rs1, rs2),
-      RV32Instr::FMAX_D(rd, rs1, rs2) =>
-        emit_r_type(0b1010011, 0b0010101, 0b001, rd, rs1, rs2),
-
-      RV32Instr::FCVT_S_D(rd, rs1, rm) =>
-        emit_r_type(0b1010011, 0b0100000, rm.encode(), rd, rs1, Rs2(Reg::X(Fin::new(1)))),
-      RV32Instr::FCVT_D_S(rd, rs1, rm) =>
-        emit_r_type(0b1010011, 0b0100001, rm.encode(), rd, rs1, Rs2(ZERO)),
-
-      RV32Instr::FEQ_D(rd, rs1, rs2) =>
-        emit_r_type(0b1010011, 0b1010001, 0b010, rd, rs1, rs2),
-      RV32Instr::FLT_D(rd, rs1, rs2) =>
-        emit_r_type(0b1010011, 0b1010001, 0b001, rd, rs1, rs2),
-      RV32Instr::FLE_D(rd, rs1, rs2) =>
-        emit_r_type(0b1010011, 0b1010001, 0b000, rd, rs1, rs2),
-
-      RV32Instr::FCLASS_D(rd, rs1) =>
-        emit_r_type(0b1010011, 0b1110001, 0b001, rd, rs1, Rs2(ZERO)),
-      RV32Instr::FCVT_W_D(rd, rs1, rm) =>
-        emit_r_type(0b1010011, 0b1100001, rm.encode(), rd, rs1, Rs2(ZERO)),
-      RV32Instr::FCVT_WU_D(rd, rs1, rm) =>
-        emit_r_type(0b1010011, 0b1100001, rm.encode(), rd, rs1, Rs2(Reg::X(Fin::new(1)))),
-      RV32Instr::FCVT_D_W(rd, rs1, rm) =>
-        emit_r_type(0b1010011, 0b1101001, rm.encode(), rd, rs1, Rs2(ZERO)),
-      RV32Instr::FCVT_D_WU(rd, rs1, rm) =>
-        emit_r_type(0b1010011, 0b1101001, rm.encode(), rd, rs1, Rs2(Reg::X(Fin::new(1)))),
+      RV32Instr::FLD(rd, rs1, imm) => emit_i_type(0b0000111, 0b011, rd, rs1, imm.decode_sext()),
+      RV32Instr::FSD(rs1, rs2, imm) => emit_s_type(0b0100111, 0b011, rs1, rs2, imm.decode_sext()),
+      RV32Instr::FMADD_D(rd, rs1, r2, rs3, rm) => emit_r4_type(0b1000011, 0b01, rm.encode32(), rd, rs1, r2, rs3),
+      RV32Instr::FMSUB_D(rd, rs1, r2, rs3, rm) => emit_r4_type(0b1000111, 0b01, rm.encode32(), rd, rs1, r2, rs3),
+      RV32Instr::FNMSUB_D(rd, rs1, r2, rs3, rm) => emit_r4_type(0b1001011, 0b01, rm.encode32(), rd, rs1, r2, rs3),
+      RV32Instr::FNMADD_D(rd, rs1, r2, rs3, rm) => emit_r4_type(0b1001111, 0b01, rm.encode32(), rd, rs1, r2, rs3),
+      RV32Instr::FADD_D(rd, rs1, rs2, rm) => emit_r_type(0b1010011, 0b0000001, rm.encode32(), rd, rs1, rs2),
+      RV32Instr::FSUB_D(rd, rs1, rs2, rm) => emit_r_type(0b1010011, 0b0000101, rm.encode32(), rd, rs1, rs2),
+      RV32Instr::FMUL_D(rd, rs1, rs2, rm) => emit_r_type(0b1010011, 0b0001001, rm.encode32(), rd, rs1, rs2),
+      RV32Instr::FDIV_D(rd, rs1, rs2, rm) => emit_r_type(0b1010011, 0b0001101, rm.encode32(), rd, rs1, rs2),
+      RV32Instr::FSQRT_D(rd, rs1, rm) => emit_r_type(0b1010011, 0b0101101, rm.encode32(), rd, rs1, Rs2(ZERO)),
+      RV32Instr::FSGNJ_D(rd, rs1, rs2) => emit_r_type(0b1010011, 0b0010001, 0b000, rd, rs1, rs2),
+      RV32Instr::FSGNJN_D(rd, rs1, rs2) => emit_r_type(0b1010011, 0b0010001, 0b001, rd, rs1, rs2),
+      RV32Instr::FSGNJX_D(rd, rs1, rs2) => emit_r_type(0b1010011, 0b0010001, 0b010, rd, rs1, rs2),
+      RV32Instr::FMIN_D(rd, rs1, rs2) => emit_r_type(0b1010011, 0b0010101, 0b000, rd, rs1, rs2),
+      RV32Instr::FMAX_D(rd, rs1, rs2) => emit_r_type(0b1010011, 0b0010101, 0b001, rd, rs1, rs2),
+      RV32Instr::FCVT_S_D(rd, rs1, rm) => emit_r_type(0b1010011, 0b0100000, rm.encode32(), rd, rs1, Rs2(Reg::X(Fin::new(1)))),
+      RV32Instr::FCVT_D_S(rd, rs1, rm) => emit_r_type(0b1010011, 0b0100001, rm.encode32(), rd, rs1, Rs2(ZERO)),
+      RV32Instr::FEQ_D(rd, rs1, rs2) => emit_r_type(0b1010011, 0b1010001, 0b010, rd, rs1, rs2),
+      RV32Instr::FLT_D(rd, rs1, rs2) => emit_r_type(0b1010011, 0b1010001, 0b001, rd, rs1, rs2),
+      RV32Instr::FLE_D(rd, rs1, rs2) => emit_r_type(0b1010011, 0b1010001, 0b000, rd, rs1, rs2),
+      RV32Instr::FCLASS_D(rd, rs1) => emit_r_type(0b1010011, 0b1110001, 0b001, rd, rs1, Rs2(ZERO)),
+      RV32Instr::FCVT_W_D(rd, rs1, rm) => emit_r_type(0b1010011, 0b1100001, rm.encode32(), rd, rs1, Rs2(ZERO)),
+      RV32Instr::FCVT_WU_D(rd, rs1, rm) => emit_r_type(0b1010011, 0b1100001, rm.encode32(), rd, rs1, Rs2(Reg::X(Fin::new(1)))),
+      RV32Instr::FCVT_D_W(rd, rs1, rm) => emit_r_type(0b1010011, 0b1101001, rm.encode32(), rd, rs1, Rs2(ZERO)),
+      RV32Instr::FCVT_D_WU(rd, rs1, rm) => emit_r_type(0b1010011, 0b1101001, rm.encode32(), rd, rs1, Rs2(Reg::X(Fin::new(1)))),
     }
   }
 }
 
-impl Encode for RV64Instr {
-  fn encode(self) -> u32 {
+impl Encode32 for RV64Instr {
+  fn encode32(self) -> u32 {
     match self {
       RV64Instr::LWU(_, _, _) => todo!(),
       RV64Instr::LD(_, _, _) => todo!(),
@@ -243,8 +210,8 @@ impl Encode for RV64Instr {
   }
 }
 
-impl Encode for Reg {
-  fn encode(self) -> u32 {
+impl Encode32 for Reg {
+  fn encode32(self) -> u32 {
     match self {
       Reg::ZERO => 0,
       Reg::X(x) => x.value(),
@@ -255,32 +222,32 @@ impl Encode for Reg {
   }
 }
 
-impl Encode for Rd {
-  fn encode(self) -> u32 {
-    self.0.encode()
+impl Encode32 for Rd {
+  fn encode32(self) -> u32 {
+    self.0.encode32()
   }
 }
 
-impl Encode for Rs1 {
-  fn encode(self) -> u32 {
-    self.0.encode()
+impl Encode32 for Rs1 {
+  fn encode32(self) -> u32 {
+    self.0.encode32()
   }
 }
 
-impl Encode for Rs2 {
-  fn encode(self) -> u32 {
-    self.0.encode()
+impl Encode32 for Rs2 {
+  fn encode32(self) -> u32 {
+    self.0.encode32()
   }
 }
 
-impl Encode for Rs3 {
-  fn encode(self) -> u32 {
-    self.0.encode()
+impl Encode32 for Rs3 {
+  fn encode32(self) -> u32 {
+    self.0.encode32()
   }
 }
 
-impl Encode for RoundingMode {
-  fn encode(self) -> u32 {
+impl Encode32 for RoundingMode {
+  fn encode32(self) -> u32 {
     match self {
       RoundingMode::RNE => 0b000,
       RoundingMode::RTZ => 0b001,
@@ -296,10 +263,10 @@ impl Encode for RoundingMode {
 fn emit_r_type(opcode: u32, funct7: u32, funct3: u32, rd: Rd, rs1: Rs1, rs2: Rs2) -> u32 {
   // 31:25 = funct7, 24:20 = rs2, 19:15 = rs1, 14:12 = funct3, 11:7 = rd, 6:0 = opcode
   (opcode & 0b1111111)
-    | ((rd.encode() & 0b11111) << 7)
+    | ((rd.encode32() & 0b11111) << 7)
     | ((funct3 & 0b111) << 12)
-    | ((rs1.encode() & 0b11111) << 15)
-    | ((rs2.encode() & 0b11111) << 20)
+    | ((rs1.encode32() & 0b11111) << 15)
+    | ((rs2.encode32() & 0b11111) << 20)
     | ((funct7 & 0b1111111) << 25)
 }
 
@@ -307,9 +274,9 @@ fn emit_r_type(opcode: u32, funct7: u32, funct3: u32, rd: Rd, rs1: Rs1, rs2: Rs2
 fn emit_i_type(opcode: u32, funct3: u32, rd: Rd, rs1: Rs1, imm: i32) -> u32 {
   // 31:20 = imm, 19:15 = rs1, 14:12 = funct3, 11:7 = rd, 6:0 = opcode
   (opcode & 0b1111111)
-    | ((rd.encode() & 0b11111) << 7)
+    | ((rd.encode32() & 0b11111) << 7)
     | ((funct3 & 0b111) << 12)
-    | ((rs1.encode() & 0b11111) << 15)
+    | ((rs1.encode32() & 0b11111) << 15)
     | ((imm as u32 & 0b111111111111) << 20)
 }
 
@@ -319,8 +286,8 @@ fn emit_s_type(opcode: u32, funct3: u32, rs1: Rs1, rs2: Rs2, imm: i32) -> u32 {
   (opcode & 0b1111111)
     | ((imm as u32 & 0b11111) << 7)
     | ((funct3 & 0b111) << 12)
-    | ((rs1.encode() & 0b11111) << 15)
-    | ((rs2.encode() & 0b11111) << 20)
+    | ((rs1.encode32() & 0b11111) << 15)
+    | ((rs2.encode32() & 0b11111) << 20)
     | ((imm as u32 & 0b111111100000) << 20)
 }
 
@@ -328,10 +295,10 @@ fn emit_s_type(opcode: u32, funct3: u32, rs1: Rs1, rs2: Rs2, imm: i32) -> u32 {
 fn emit_r4_type(opcode: u32, funct2: u32, funct3: u32, rd: Rd, rs1: Rs1, rs2: Rs2, rs3: Rs3) -> u32 {
   // 31:27 = rs3, 26:25 = funct2, 24:20 = rs2, 19:15 = rs1, 14:12 = funct3, 11:7 = rd, 6:0 = opcode
   (opcode & 0b1111111)
-    | ((rd.encode() & 0b11111) << 7)
+    | ((rd.encode32() & 0b11111) << 7)
     | ((funct3 & 0b111) << 12)
-    | ((rs1.encode() & 0b11111) << 15)
-    | ((rs2.encode() & 0b11111) << 20)
+    | ((rs1.encode32() & 0b11111) << 15)
+    | ((rs2.encode32() & 0b11111) << 20)
     | ((funct2 & 0b11) << 25)
-    | ((rs3.encode() & 0b11111) << 27)
+    | ((rs3.encode32() & 0b11111) << 27)
 }
