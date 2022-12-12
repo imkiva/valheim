@@ -13,6 +13,23 @@ mod tests {
   }
 
   #[test]
+  fn xlb2222() {
+    let x = vec![
+      (RV32Instr::FEQ_S(Rd(X(Fin::new(4))), Rs1(F(Fin::new(3))), Rs2(F(Fin::new(2)))), "FEQ_S"),
+      (RV32Instr::FEQ_S(Rd(X(Fin::new(4))), Rs1(F(Fin::new(3))), Rs2(F(Fin::new(2)))), "FEQ_S"),
+      (RV32Instr::FEQ_S(Rd(X(Fin::new(4))), Rs1(F(Fin::new(3))), Rs2(F(Fin::new(2)))), "FEQ_S"),
+      (RV32Instr::FEQ_S(Rd(X(Fin::new(4))), Rs1(F(Fin::new(3))), Rs2(F(Fin::new(2)))), "FEQ_S"),
+      (RV32Instr::FLT_S(Rd(X(Fin::new(4))), Rs1(F(Fin::new(3))), Rs2(F(Fin::new(2)))), "FLT_S"),
+      (RV32Instr::FLT_S(Rd(X(Fin::new(4))), Rs1(F(Fin::new(3))), Rs2(F(Fin::new(2)))), "FLT_S"),
+      (RV32Instr::FLE_S(Rd(X(Fin::new(4))), Rs1(F(Fin::new(3))), Rs2(F(Fin::new(2)))), "FLE_S"),
+      (RV32Instr::FLE_S(Rd(X(Fin::new(4))), Rs1(F(Fin::new(3))), Rs2(F(Fin::new(2)))), "FLE_S"),
+    ];
+    for (instr, name) in x {
+      println!("{} = {:#X}", name, instr.encode32());
+    }
+  }
+
+  #[test]
   fn xlb_step1() {
     let v = vec![
       (0x21F253, "FADD_S"),

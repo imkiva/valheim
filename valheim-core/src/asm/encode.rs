@@ -109,9 +109,11 @@ impl Encode32 for RV32Instr {
       RV32Instr::FCVT_W_S(_, _, _) => todo!(),
       RV32Instr::FCVT_WU_S(_, _, _) => todo!(),
       RV32Instr::FMV_X_W(_, _) => todo!(),
-      RV32Instr::FEQ_S(_, _, _) => todo!(),
-      RV32Instr::FLT_S(_, _, _) => todo!(),
-      RV32Instr::FLE_S(_, _, _) => todo!(),
+
+      RV32Instr::FEQ_S(rd, rs1, rs2) => emit_r_type(0b1010011, 0b1010000, 0b010, rd, rs1, rs2),
+      RV32Instr::FLT_S(rd, rs1, rs2) => emit_r_type(0b1010011, 0b1010000, 0b001, rd, rs1, rs2),
+      RV32Instr::FLE_S(rd, rs1, rs2) => emit_r_type(0b1010011, 0b1010000, 0b000, rd, rs1, rs2),
+
       RV32Instr::FCLASS_S(_, _) => todo!(),
       RV32Instr::FCVT_S_W(_, _, _) => todo!(),
       RV32Instr::FCVT_S_WU(_, _, _) => todo!(),
