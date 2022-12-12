@@ -8,10 +8,6 @@ pub trait Encode32 {
   fn encode32(self) -> u32;
 }
 
-pub trait Encode16 {
-  fn encode16(self) -> u16;
-}
-
 impl Encode32 for Instr {
   fn encode32(self) -> u32 {
     match self {
@@ -26,43 +22,44 @@ impl Encode32 for RV32Instr {
   fn encode32(self) -> u32 {
     match self {
       // RVI
-      RV32Instr::LUI(_, _) => todo!(),
-      RV32Instr::AUIPC(_, _) => todo!(),
-      RV32Instr::JAL(_, _) => todo!(),
-      RV32Instr::JALR(_, _, _) => todo!(),
-      RV32Instr::BEQ(_, _, _) => todo!(),
-      RV32Instr::BNE(_, _, _) => todo!(),
-      RV32Instr::BLT(_, _, _) => todo!(),
-      RV32Instr::BGE(_, _, _) => todo!(),
-      RV32Instr::BLTU(_, _, _) => todo!(),
-      RV32Instr::BGEU(_, _, _) => todo!(),
-      RV32Instr::LB(_, _, _) => todo!(),
-      RV32Instr::LH(_, _, _) => todo!(),
-      RV32Instr::LW(_, _, _) => todo!(),
-      RV32Instr::LBU(_, _, _) => todo!(),
-      RV32Instr::LHU(_, _, _) => todo!(),
-      RV32Instr::SB(_, _, _) => todo!(),
-      RV32Instr::SH(_, _, _) => todo!(),
-      RV32Instr::SW(_, _, _) => todo!(),
-      RV32Instr::ADDI(_, _, _) => todo!(),
-      RV32Instr::SLTI(_, _, _) => todo!(),
-      RV32Instr::SLTIU(_, _, _) => todo!(),
-      RV32Instr::XORI(_, _, _) => todo!(),
-      RV32Instr::ORI(_, _, _) => todo!(),
-      RV32Instr::ANDI(_, _, _) => todo!(),
-      RV32Instr::SLLI(_, _, _) => todo!(),
-      RV32Instr::SRLI(_, _, _) => todo!(),
-      RV32Instr::SRAI(_, _, _) => todo!(),
-      RV32Instr::ADD(_, _, _) => todo!(),
-      RV32Instr::SUB(_, _, _) => todo!(),
-      RV32Instr::SLL(_, _, _) => todo!(),
-      RV32Instr::SLT(_, _, _) => todo!(),
-      RV32Instr::SLTU(_, _, _) => todo!(),
-      RV32Instr::XOR(_, _, _) => todo!(),
-      RV32Instr::SRL(_, _, _) => todo!(),
-      RV32Instr::SRA(_, _, _) => todo!(),
-      RV32Instr::OR(_, _, _) => todo!(),
-      RV32Instr::AND(_, _, _) => todo!(),
+      RV32Instr::LUI(rd, imm) => emit_u_type(0b0110111, rd, imm.decode()),
+      RV32Instr::AUIPC(rd, imm) => emit_u_type(0b0010111, rd, imm.decode()),
+      RV32Instr::JAL(rd, imm) => emit_j_type(0b1101111, rd, imm.decode_sext()),
+      RV32Instr::JALR(rd, rs1, imm) => emit_i_type(0b1100111, 0b000, rd, rs1, imm.decode_sext()),
+      RV32Instr::BEQ(rs1, rs2, imm) => emit_b_type(0b1100011, 0b000, rs1, rs2, imm.decode_sext()),
+      RV32Instr::BNE(rs1, rs2, imm) => emit_b_type(0b1100011, 0b001, rs1, rs2, imm.decode_sext()),
+      RV32Instr::BLT(rs1, rs2, imm) => emit_b_type(0b1100011, 0b100, rs1, rs2, imm.decode_sext()),
+      RV32Instr::BGE(rs1, rs2, imm) => emit_b_type(0b1100011, 0b101, rs1, rs2, imm.decode_sext()),
+      RV32Instr::BLTU(rs1, rs2, imm) => emit_b_type(0b1100011, 0b110, rs1, rs2, imm.decode_sext()),
+      RV32Instr::BGEU(rs1, rs2, imm) => emit_b_type(0b1100011, 0b111, rs1, rs2, imm.decode_sext()),
+      RV32Instr::LB(rd, rs1, imm) => emit_i_type(0b0000011, 0b000, rd, rs1, imm.decode_sext()),
+      RV32Instr::LH(rd, rs1, imm) => emit_i_type(0b0000011, 0b001, rd, rs1, imm.decode_sext()),
+      RV32Instr::LW(rd, rs1, imm) => emit_i_type(0b0000011, 0b010, rd, rs1, imm.decode_sext()),
+      RV32Instr::LBU(rd, rs1, imm) => emit_i_type(0b0000011, 0b100, rd, rs1, imm.decode_sext()),
+      RV32Instr::LHU(rd, rs1, imm) => emit_i_type(0b0000011, 0b101, rd, rs1, imm.decode_sext()),
+      RV32Instr::SB(rs1, rs2, imm) => emit_s_type(0b0100011, 0b000, rs1, rs2, imm.decode_sext()),
+      RV32Instr::SH(rs1, rs2, imm) => emit_s_type(0b0100011, 0b001, rs1, rs2, imm.decode_sext()),
+      RV32Instr::SW(rs1, rs2, imm) => emit_s_type(0b0100011, 0b010, rs1, rs2, imm.decode_sext()),
+      RV32Instr::ADDI(rd, rs1, imm) => emit_i_type(0b0010011, 0b000, rd, rs1, imm.decode_sext()),
+      RV32Instr::SLTI(rd, rs1, imm) => emit_i_type(0b0010011, 0b010, rd, rs1, imm.decode_sext()),
+      RV32Instr::SLTIU(rd, rs1, imm) => emit_i_type(0b0010011, 0b011, rd, rs1, imm.decode_sext()),
+      RV32Instr::XORI(rd, rs1, imm) => emit_i_type(0b0010011, 0b100, rd, rs1, imm.decode_sext()),
+      RV32Instr::ORI(rd, rs1, imm) => emit_i_type(0b0010011, 0b110, rd, rs1, imm.decode_sext()),
+      RV32Instr::ANDI(rd, rs1, imm) => emit_i_type(0b0010011, 0b111, rd, rs1, imm.decode_sext()),
+      RV32Instr::SLLI(rd, rs1, shamt5) => emit_r_type(0b0010011, 0b0000000, 0b001, rd, rs1, Rs2(X(Fin::new(shamt5.0 as u32)))),
+      RV32Instr::SRLI(rd, rs1, shamt5) => emit_r_type(0b0010011, 0b0000000, 0b101, rd, rs1, Rs2(X(Fin::new(shamt5.0 as u32)))),
+      RV32Instr::SRAI(rd, rs1, shamt5) => emit_r_type(0b0010011, 0b0100000, 0b101, rd, rs1, Rs2(X(Fin::new(shamt5.0 as u32)))),
+      RV32Instr::ADD(rd, rs1, rs2) => emit_r_type(0b0110011, 0b0000000, 0b000, rd, rs1, rs2),
+      RV32Instr::SUB(rd, rs1, rs2) => emit_r_type(0b0110011, 0b0100000, 0b000, rd, rs1, rs2),
+      RV32Instr::SLL(rd, rs1, rs2) => emit_r_type(0b0110011, 0b0000000, 0b001, rd, rs1, rs2),
+      RV32Instr::SLT(rd, rs1, rs2) => emit_r_type(0b0110011, 0b0000000, 0b010, rd, rs1, rs2),
+      RV32Instr::SLTU(rd, rs1, rs2) => emit_r_type(0b0110011, 0b0000000, 0b011, rd, rs1, rs2),
+      RV32Instr::XOR(rd, rs1, rs2) => emit_r_type(0b0110011, 0b0000000, 0b100, rd, rs1, rs2),
+      RV32Instr::SRL(rd, rs1, rs2) => emit_r_type(0b0110011, 0b0000000, 0b101, rd, rs1, rs2),
+      RV32Instr::SRA(rd, rs1, rs2) => emit_r_type(0b0110011, 0b0100000, 0b101, rd, rs1, rs2),
+      RV32Instr::OR(rd, rs1, rs2) => emit_r_type(0b0110011, 0b0000000, 0b110, rd, rs1, rs2),
+      RV32Instr::AND(rd, rs1, rs2) => emit_r_type(0b0110011, 0b0000000, 0b111, rd, rs1, rs2),
+
       RV32Instr::FENCE(_, _, _, _, _) => todo!(),
       RV32Instr::FENCE_TSO => todo!(),
       RV32Instr::PAUSE => todo!(),
@@ -258,6 +255,8 @@ impl Encode32 for RoundingMode {
   }
 }
 
+// Copilot wrote these `emit_*_type`, thank you for saving my life!
+
 /// Convert RISC-V R-type instruction to u32
 fn emit_r_type(opcode: u32, funct7: u32, funct3: u32, rd: Rd, rs1: Rs1, rs2: Rs2) -> u32 {
   // 31:25 = funct7, 24:20 = rs2, 19:15 = rs1, 14:12 = funct3, 11:7 = rd, 6:0 = opcode
@@ -302,9 +301,43 @@ fn emit_r4_type(opcode: u32, funct2: u32, funct3: u32, rd: Rd, rs1: Rs1, rs2: Rs
     | ((rs3.encode32() & 0b11111) << 27)
 }
 
+/// Convert RISC-V U-type instruction to u32
+fn emit_u_type(opcode: u32, rd: Rd, imm: u32) -> u32 {
+  // 31:12 = imm, 11:7 = rd, 6:0 = opcode
+  (opcode & 0b1111111)
+    | ((rd.encode32() & 0b11111) << 7)
+    | ((imm as u32 & 0b11111111111111111111) << 12)
+}
+
+/// Convert RISC-V B-type instruction to u32
+fn emit_b_type(opcode: u32, funct3: u32, rs1: Rs1, rs2: Rs2, imm: i32) -> u32 {
+  // 31:31 = imm[12], 30:25 = imm[10:5], 24:20 = rs2, 19:15 = rs1, 14:12 = funct3, 11:8 = imm[4:1], 7:7 = imm[11], 6:0 = opcode
+  (opcode & 0b1111111)
+    | ((imm as u32 & 0b1) << 7)
+    | ((imm as u32 & 0b11110) << 7)
+    | ((funct3 & 0b111) << 12)
+    | ((rs1.encode32() & 0b11111) << 15)
+    | ((rs2.encode32() & 0b11111) << 20)
+    | ((imm as u32 & 0b11111100000) << 20)
+    | ((imm as u32 & 0b100000000000) << 19)
+    | ((imm as u32 & 0b111111000000000000000) << 12)
+}
+
+/// Convert RISC-V J-type instruction to u32
+fn emit_j_type(opcode: u32, rd: Rd, imm: i32) -> u32 {
+  // 31:31 = imm[20], 30:21 = imm[10:1], 20:20 = imm[11], 19:12 = imm[19:12], 11:7 = rd, 6:0 = opcode
+  (opcode & 0b1111111)
+    | ((rd.encode32() & 0b11111) << 7)
+    | ((imm as u32 & 0b11111111) << 12)
+    | ((imm as u32 & 0b111111110000000000000) << 12)
+    | ((imm as u32 & 0b100000000000000000000) << 11)
+    | ((imm as u32 & 0b1000000000000000000000) << 9)
+    | ((imm as u32 & 0b11111100000000000000000000000000) >> 11)
+}
+
 #[cfg(test)]
 mod tests {
-  use crate::asm::encode::Encode32;
+  use crate::asm::encode32::Encode32;
   use crate::isa::data::Fin;
   use crate::isa::rv32::RV32Instr;
   use crate::isa::typed::{Instr, Rd, RoundingMode, Rs1, Rs2, Rs3};

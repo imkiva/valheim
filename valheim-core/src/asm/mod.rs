@@ -1,12 +1,15 @@
 #![allow(non_upper_case_globals)]
 
-use crate::asm::encode::{Encode16, Encode32};
+use crate::asm::encode32::Encode32;
+use crate::asm::encode16::Encode16;
 use crate::cpu::data::Either;
 use crate::isa::data::Fin;
-use crate::isa::rv32::RV32Instr::LUI;
-use crate::isa::typed::{Imm32, Reg};
+use crate::isa::rv32::RV32Instr::*;
+use crate::isa::rv64::RV64Instr::*;
+use crate::isa::typed::Reg;
 
-pub mod encode;
+pub mod encode32;
+pub mod encode16;
 pub mod traits;
 
 pub const zero: Reg = Reg::ZERO;
