@@ -181,16 +181,17 @@ impl Encode32 for RV64Instr {
       RV64Instr::AMOMAX_D(_, _, _, _, _) => todo!(),
       RV64Instr::AMOMINU_D(_, _, _, _, _) => todo!(),
       RV64Instr::AMOMAXU_D(_, _, _, _, _) => todo!(),
-      // RV64F & D
-      RV64Instr::FCVT_L_S(_, _, _) => todo!(),
-      RV64Instr::FCVT_LU_S(_, _, _) => todo!(),
-      RV64Instr::FCVT_S_L(_, _, _) => todo!(),
-      RV64Instr::FCVT_S_LU(_, _, _) => todo!(),
-      RV64Instr::FCVT_L_D(_, _, _) => todo!(),
-      RV64Instr::FCVT_LU_D(_, _, _) => todo!(),
+      // RV64F
+      RV64Instr::FCVT_L_S(rd, rs1, rm) => emit_r_type(0b1010011, 0b1100000, rm.encode32(), rd, rs1, Rs2(X(Fin::new(0b00010)))),
+      RV64Instr::FCVT_LU_S(rd, rs1, rm) => emit_r_type(0b1010011, 0b1100000, rm.encode32(), rd, rs1, Rs2(X(Fin::new(0b00011)))),
+      RV64Instr::FCVT_S_L(rd, rs1, rm) => emit_r_type(0b1010011, 0b1101000, rm.encode32(), rd, rs1, Rs2(X(Fin::new(0b00010)))),
+      RV64Instr::FCVT_S_LU(rd, rs1, rm) => emit_r_type(0b1010011, 0b1101000, rm.encode32(), rd, rs1, Rs2(X(Fin::new(0b00011)))),
+      // RV64D
+      RV64Instr::FCVT_L_D(rd, rs1, rm) => emit_r_type(0b1010011, 0b1100001, rm.encode32(), rd, rs1, Rs2(X(Fin::new(0b00010)))),
+      RV64Instr::FCVT_LU_D(rd, rs1, rm) => emit_r_type(0b1010011, 0b1100001, rm.encode32(), rd, rs1, Rs2(X(Fin::new(0b00011)))),
       RV64Instr::FMV_X_D(_, _) => todo!(),
-      RV64Instr::FCVT_D_L(_, _, _) => todo!(),
-      RV64Instr::FCVT_D_LU(_, _, _) => todo!(),
+      RV64Instr::FCVT_D_L(rd, rs1, rm) => emit_r_type(0b1010011, 0b1101001, rm.encode32(), rd, rs1, Rs2(X(Fin::new(0b00010)))),
+      RV64Instr::FCVT_D_LU(rd, rs1, rm) => emit_r_type(0b1010011, 0b1101001, rm.encode32(), rd, rs1, Rs2(X(Fin::new(0b00011)))),
       RV64Instr::FMV_D_X(_, _) => todo!(),
       // RV32/RV64 Zicsr
       RV64Instr::CSRRW(_, _, _) => todo!(),
