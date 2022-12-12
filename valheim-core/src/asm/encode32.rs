@@ -66,14 +66,14 @@ impl Encode32 for RV32Instr {
       RV32Instr::ECALL => todo!(),
       RV32Instr::EBREAK => todo!(),
       // RVM
-      RV32Instr::MUL(_, _, _) => todo!(),
-      RV32Instr::MULH(_, _, _) => todo!(),
-      RV32Instr::MULHSU(_, _, _) => todo!(),
-      RV32Instr::MULHU(_, _, _) => todo!(),
-      RV32Instr::DIV(_, _, _) => todo!(),
-      RV32Instr::DIVU(_, _, _) => todo!(),
-      RV32Instr::REM(_, _, _) => todo!(),
-      RV32Instr::REMU(_, _, _) => todo!(),
+      RV32Instr::MUL(rd, rs1, rs2) => emit_r_type(0b0110011, 0b0000001, 0b000, rd, rs1, rs2),
+      RV32Instr::MULH(rd, rs1, rs2) => emit_r_type(0b0110011, 0b0000001, 0b001, rd, rs1, rs2),
+      RV32Instr::MULHSU(rd, rs1, rs2) => emit_r_type(0b0110011, 0b0000001, 0b010, rd, rs1, rs2),
+      RV32Instr::MULHU(rd, rs1, rs2) => emit_r_type(0b0110011, 0b0000001, 0b011, rd, rs1, rs2),
+      RV32Instr::DIV(rd, rs1, rs2) => emit_r_type(0b0110011, 0b0000001, 0b100, rd, rs1, rs2),
+      RV32Instr::DIVU(rd, rs1, rs2) => emit_r_type(0b0110011, 0b0000001, 0b101, rd, rs1, rs2),
+      RV32Instr::REM(rd, rs1, rs2) => emit_r_type(0b0110011, 0b0000001, 0b110, rd, rs1, rs2),
+      RV32Instr::REMU(rd, rs1, rs2) => emit_r_type(0b0110011, 0b0000001, 0b111, rd, rs1, rs2),
       // RVA
       RV32Instr::LR_W(_, _, _, _) => todo!(),
       RV32Instr::SC_W(_, _, _, _, _) => todo!(),
@@ -147,6 +147,7 @@ impl Encode32 for RV32Instr {
 impl Encode32 for RV64Instr {
   fn encode32(self) -> u32 {
     match self {
+      // RV64I
       RV64Instr::LWU(_, _, _) => todo!(),
       RV64Instr::LD(_, _, _) => todo!(),
       RV64Instr::SD(_, _, _) => todo!(),
@@ -162,11 +163,13 @@ impl Encode32 for RV64Instr {
       RV64Instr::SLLW(_, _, _) => todo!(),
       RV64Instr::SRLW(_, _, _) => todo!(),
       RV64Instr::SRAW(_, _, _) => todo!(),
-      RV64Instr::MULW(_, _, _) => todo!(),
-      RV64Instr::DIVW(_, _, _) => todo!(),
-      RV64Instr::DIVUW(_, _, _) => todo!(),
-      RV64Instr::REMW(_, _, _) => todo!(),
-      RV64Instr::REMUW(_, _, _) => todo!(),
+      // RV64M
+      RV64Instr::MULW(rd, rs1, rs2) => emit_r_type(0b0111011, 0b0000001, 0b000, rd, rs1, rs2),
+      RV64Instr::DIVW(rd, rs1, rs2) => emit_r_type(0b0111011, 0b0000001, 0b100, rd, rs1, rs2),
+      RV64Instr::DIVUW(rd, rs1, rs2) => emit_r_type(0b0111011, 0b0000001, 0b101, rd, rs1, rs2),
+      RV64Instr::REMW(rd, rs1, rs2) => emit_r_type(0b0111011, 0b0000001, 0b110, rd, rs1, rs2),
+      RV64Instr::REMUW(rd, rs1, rs2) => emit_r_type(0b0111011, 0b0000001, 0b111, rd, rs1, rs2),
+      // RV64A
       RV64Instr::LR_D(_, _, _, _) => todo!(),
       RV64Instr::SC_D(_, _, _, _, _) => todo!(),
       RV64Instr::AMOSWAP_D(_, _, _, _, _) => todo!(),
@@ -178,6 +181,7 @@ impl Encode32 for RV64Instr {
       RV64Instr::AMOMAX_D(_, _, _, _, _) => todo!(),
       RV64Instr::AMOMINU_D(_, _, _, _, _) => todo!(),
       RV64Instr::AMOMAXU_D(_, _, _, _, _) => todo!(),
+      // RV64F & D
       RV64Instr::FCVT_L_S(_, _, _) => todo!(),
       RV64Instr::FCVT_LU_S(_, _, _) => todo!(),
       RV64Instr::FCVT_S_L(_, _, _) => todo!(),
@@ -188,6 +192,7 @@ impl Encode32 for RV64Instr {
       RV64Instr::FCVT_D_L(_, _, _) => todo!(),
       RV64Instr::FCVT_D_LU(_, _, _) => todo!(),
       RV64Instr::FMV_D_X(_, _) => todo!(),
+      // RV32/RV64 Zicsr
       RV64Instr::CSRRW(_, _, _) => todo!(),
       RV64Instr::CSRRS(_, _, _) => todo!(),
       RV64Instr::CSRRC(_, _, _) => todo!(),
