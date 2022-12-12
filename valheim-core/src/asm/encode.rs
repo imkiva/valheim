@@ -301,3 +301,50 @@ fn emit_r4_type(opcode: u32, funct2: u32, funct3: u32, rd: Rd, rs1: Rs1, rs2: Rs
     | ((funct2 & 0b11) << 25)
     | ((rs3.encode32() & 0b11111) << 27)
 }
+
+#[cfg(test)]
+mod tests {
+  use crate::asm::encode::Encode32;
+  use crate::isa::data::Fin;
+  use crate::isa::rv32::RV32Instr;
+  use crate::isa::typed::{Instr, Rd, RoundingMode, Rs1, Rs2, Rs3};
+  use crate::isa::typed::Reg::{F, X};
+
+  #[test]
+  pub fn xlb_step2() {
+    let x = vec![
+      (RV32Instr::FADD_D(Rd(F(Fin::new(4))), Rs1(F(Fin::new(3))), Rs2(F(Fin::new(2))), RoundingMode::DYN), "FADD_D"),
+      (RV32Instr::FSUB_D(Rd(F(Fin::new(4))), Rs1(F(Fin::new(3))), Rs2(F(Fin::new(2))), RoundingMode::DYN), "FSUB_D"),
+      (RV32Instr::FMUL_D(Rd(F(Fin::new(4))), Rs1(F(Fin::new(3))), Rs2(F(Fin::new(2))), RoundingMode::DYN), "FMUL_D"),
+      (RV32Instr::FDIV_D(Rd(F(Fin::new(4))), Rs1(F(Fin::new(3))), Rs2(F(Fin::new(2))), RoundingMode::DYN), "FDIV_D"),
+      (RV32Instr::FSGNJ_D(Rd(F(Fin::new(4))), Rs1(F(Fin::new(3))), Rs2(F(Fin::new(2)))), "FSGNJ_D"),
+      (RV32Instr::FSGNJN_D(Rd(F(Fin::new(4))), Rs1(F(Fin::new(3))), Rs2(F(Fin::new(2)))), "FSGNJN_D"),
+      (RV32Instr::FSGNJX_D(Rd(F(Fin::new(4))), Rs1(F(Fin::new(3))), Rs2(F(Fin::new(2)))), "FSGNJX_D"),
+      (RV32Instr::FSGNJX_D(Rd(F(Fin::new(4))), Rs1(F(Fin::new(3))), Rs2(F(Fin::new(2)))), "FSGNJX_D"),
+      (RV32Instr::FMIN_D(Rd(F(Fin::new(4))), Rs1(F(Fin::new(3))), Rs2(F(Fin::new(2)))), "FMIN_D"),
+      (RV32Instr::FMIN_D(Rd(F(Fin::new(4))), Rs1(F(Fin::new(3))), Rs2(F(Fin::new(2)))), "FMIN_D"),
+      (RV32Instr::FMIN_D(Rd(F(Fin::new(4))), Rs1(F(Fin::new(3))), Rs2(F(Fin::new(2)))), "FMIN_D"),
+      (RV32Instr::FMAX_D(Rd(F(Fin::new(4))), Rs1(F(Fin::new(3))), Rs2(F(Fin::new(2)))), "FMAX_D"),
+      (RV32Instr::FMAX_D(Rd(F(Fin::new(4))), Rs1(F(Fin::new(3))), Rs2(F(Fin::new(2)))), "FMAX_D"),
+      (RV32Instr::FMAX_D(Rd(F(Fin::new(4))), Rs1(F(Fin::new(3))), Rs2(F(Fin::new(2)))), "FMAX_D"),
+      (RV32Instr::FEQ_D(Rd(X(Fin::new(4))), Rs1(F(Fin::new(3))), Rs2(F(Fin::new(2)))), "FEQ_D"),
+      (RV32Instr::FEQ_D(Rd(X(Fin::new(4))), Rs1(F(Fin::new(3))), Rs2(F(Fin::new(2)))), "FEQ_D"),
+      (RV32Instr::FEQ_D(Rd(X(Fin::new(4))), Rs1(F(Fin::new(3))), Rs2(F(Fin::new(2)))), "FEQ_D"),
+      (RV32Instr::FEQ_D(Rd(X(Fin::new(4))), Rs1(F(Fin::new(3))), Rs2(F(Fin::new(2)))), "FEQ_D"),
+      (RV32Instr::FLT_D(Rd(X(Fin::new(4))), Rs1(F(Fin::new(3))), Rs2(F(Fin::new(2)))), "FLT_D"),
+      (RV32Instr::FLT_D(Rd(X(Fin::new(4))), Rs1(F(Fin::new(3))), Rs2(F(Fin::new(2)))), "FLT_D"),
+      (RV32Instr::FLE_D(Rd(X(Fin::new(4))), Rs1(F(Fin::new(3))), Rs2(F(Fin::new(2)))), "FLE_D"),
+      (RV32Instr::FLE_D(Rd(X(Fin::new(4))), Rs1(F(Fin::new(3))), Rs2(F(Fin::new(2)))), "FLE_D"),
+      (RV32Instr::FMADD_D(Rd(F(Fin::new(4))), Rs1(F(Fin::new(3))), Rs2(F(Fin::new(2))), Rs3(F(Fin::new(8))), RoundingMode::DYN), "FMADD_D"),
+      (RV32Instr::FMSUB_D(Rd(F(Fin::new(4))), Rs1(F(Fin::new(3))), Rs2(F(Fin::new(2))), Rs3(F(Fin::new(8))), RoundingMode::DYN), "FMSUB_D"),
+      (RV32Instr::FNMSUB_D(Rd(F(Fin::new(4))), Rs1(F(Fin::new(3))), Rs2(F(Fin::new(2))), Rs3(F(Fin::new(8))), RoundingMode::DYN), "FNMSUB_D"),
+      (RV32Instr::FNMADD_D(Rd(F(Fin::new(4))), Rs1(F(Fin::new(3))), Rs2(F(Fin::new(2))), Rs3(F(Fin::new(8))), RoundingMode::DYN), "FNMADD_D"),
+    ];
+
+    for (i, n) in x {
+      let asm = i.encode32();
+      let ii = Instr::decode32(asm).unwrap();
+      assert_eq!(Instr::RV32(i), ii);
+    }
+  }
+}
