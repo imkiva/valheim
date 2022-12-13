@@ -3,6 +3,10 @@ use std::sync::Arc;
 
 use memmap2::MmapMut;
 
+use valheim_asm::isa::data::Fin;
+use valheim_asm::isa::rv64::CSRAddr;
+use valheim_asm::isa::typed::{Imm32, Reg};
+
 use crate::cpu::bus::VIRT_MROM_BASE;
 use crate::cpu::irq::Exception;
 use crate::cpu::RV64Cpu;
@@ -10,9 +14,6 @@ use crate::device::ns16550a::Uart16550a;
 use crate::dtb::generate_device_tree_rom;
 use crate::interp::naive::NaiveInterpreter;
 use crate::interp::RV64Interpreter;
-use crate::isa::data::Fin;
-use crate::isa::rv64::CSRAddr;
-use crate::isa::typed::{Imm32, Reg};
 use crate::memory::VirtAddr;
 
 const RV64_PC_RESET: u64 = 0x80000000;

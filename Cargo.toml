@@ -1,5 +1,6 @@
 [workspace]
 members = [
+  "valheim-asm",
   "valheim-core",
   "valheim-cli",
   "xtask"

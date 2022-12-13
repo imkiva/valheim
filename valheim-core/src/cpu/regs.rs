@@ -1,4 +1,5 @@
-use crate::isa::typed::Reg;
+use valheim_asm::isa::typed::Reg;
+
 use crate::memory::VirtAddr;
 
 #[derive(Debug, Clone, Copy)]

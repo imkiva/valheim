@@ -3,19 +3,20 @@ use std::cmp::Ordering;
 use rustc_apfloat::{Float, Status, StatusAnd};
 use rustc_apfloat::ieee::{Double, Single};
 
+use valheim_asm::isa::compressed::untyped::Bytecode16;
+use valheim_asm::isa::rv32::RV32Instr;
+use valheim_asm::isa::rv32::RV32Instr::*;
+use valheim_asm::isa::rv64::RV64Instr;
+use valheim_asm::isa::rv64::RV64Instr::*;
+use valheim_asm::isa::typed::{Imm32, Instr, Rd, Reg, Rs1, Rs2, Rs3};
+use valheim_asm::isa::typed::Instr::{RV32, RV64};
+use valheim_asm::isa::untyped::Bytecode;
+
 use crate::cpu::{PrivilegeMode, RV64Cpu};
 use crate::cpu::csr::CSRMap::{FCSR, FCSR_DZ_MASK, FCSR_NV_MASK, FCSR_NX_MASK, FCSR_OF_MASK, FCSR_UF_MASK, FFLAGS, MEPC, SATP, SEPC};
 use crate::cpu::data::Either;
 use crate::cpu::irq::Exception;
 use crate::debug::trace::{InstrTrace, Trace};
-use crate::isa::compressed::untyped::Bytecode16;
-use crate::isa::rv32::RV32Instr;
-use crate::isa::rv32::RV32Instr::*;
-use crate::isa::rv64::RV64Instr;
-use crate::isa::rv64::RV64Instr::*;
-use crate::isa::typed::{Imm32, Instr, Rd, Reg, Rs1, Rs2, Rs3};
-use crate::isa::typed::Instr::{RV32, RV64};
-use crate::isa::untyped::Bytecode;
 use crate::memory::VirtAddr;
 
 macro_rules! expr {
@@ -614,7 +615,7 @@ impl RV64Cpu {
           }
           rd.write_fp(self, val)
         }
-      },
+      }
 
       RV32(FSGNJ_S(rd, rs1, rs2)) => rd.write_fp(self, rs1.read_fp(self).copysign(rs2.read_fp(self))),
       RV32(FSGNJ_D(rd, rs1, rs2)) => rd.write_fp(self, rs1.read_fp(self).copysign(rs2.read_fp(self))),
@@ -709,7 +710,7 @@ impl RV64Cpu {
         } else {
           rd.write(self, rs1.to_bits())
         }
-      },
+      }
       RV64(FMV_D_X(rd, rs1)) => rd.write_fp(self, f64::from_bits(rs1.read(self))),
 
       // 13.7 Single-Precision Floating-Point Conversion and Move Instructions
@@ -816,9 +817,19 @@ impl RV64Cpu {
   }
 }
 
+trait ReadReg {
+  fn read(&self, cpu: &RV64Cpu) -> u64;
+  fn read_fp(&self, cpu: &RV64Cpu) -> f64;
+}
+
+trait WriteReg {
+  fn write(&self, cpu: &mut RV64Cpu, val: u64);
+  fn write_fp(&self, cpu: &mut RV64Cpu, val: f64);
+}
+
 macro_rules! impl_read {
   ($ty:ident) => {
-    impl $ty {
+    impl ReadReg for $ty {
       #[inline(always)]
       fn read(&self, cpu: &RV64Cpu) -> u64 {
         cpu.read_reg(self.0).expect("internal error")
@@ -836,12 +847,12 @@ impl_read!(Rs1);
 impl_read!(Rs2);
 impl_read!(Rs3);
 
-impl Rd {
+impl WriteReg for Rd {
   #[inline(always)]
   fn write(&self, cpu: &mut RV64Cpu, val: u64) {
     cpu.write_reg(self.0, val);
   }
-
+  #[inline(always)]
   fn write_fp(&self, cpu: &mut RV64Cpu, val: f64) {
     cpu.write_reg_fp(self.0, val);
   }

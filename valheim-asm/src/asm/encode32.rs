@@ -413,7 +413,7 @@ mod tests {
       (RV32Instr::FNMADD_D(Rd(F(Fin::new(4))), Rs1(F(Fin::new(3))), Rs2(F(Fin::new(2))), Rs3(F(Fin::new(8))), RoundingMode::DYN), "FNMADD_D"),
     ];
 
-    for (i, n) in x {
+    for (i, _) in x {
       let asm = i.encode32();
       let ii = Instr::decode32(asm).unwrap();
       assert_eq!(Instr::RV32(i), ii);

@@ -1,9 +1,12 @@
+#![allow(unused_variables)]
+
 use std::cell::RefCell;
 
+use valheim_asm::isa::compressed::untyped::Bytecode16;
+use valheim_asm::isa::typed::{Instr, Reg};
+use valheim_asm::isa::untyped::Bytecode;
+
 use crate::cpu::regs::Regs;
-use crate::isa::compressed::untyped::Bytecode16;
-use crate::isa::typed::{Instr, Reg};
-use crate::isa::untyped::Bytecode;
 use crate::memory::VirtAddr;
 
 #[derive(Debug, Clone)]
@@ -66,6 +69,7 @@ impl Journal {
 
   pub fn flush(&self) {
     #[cfg(feature = "trace")] {
+      use std::io::Write;
       self.trace_file.as_ref()
         .and_then(|filename| std::fs::OpenOptions::new().create(true).write(true).append(true).open(filename).ok())
         .map(|mut file| {
@@ -74,7 +78,7 @@ impl Journal {
           });
           let _ = file.flush();
           let _ = file.sync_all();
-          std::mem::drop(file);
+          drop(file);
         });
       self.traces.borrow_mut().clear();
     }

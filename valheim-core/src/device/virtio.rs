@@ -1,4 +1,5 @@
 // TODO: rewrite this file.
+#![allow(dead_code)]
 
 use memmap2::MmapMut;
 use crate::cpu::bus::VIRTIO_BASE;

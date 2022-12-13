@@ -1,10 +1,11 @@
 use std::cell::RefCell;
 use std::fmt::Debug;
 
+use valheim_asm::isa::typed::Reg;
+
 use crate::cpu::bus::{RV64_MEMORY_BASE, RV64_MEMORY_SIZE};
 use crate::cpu::mmu::VMMode;
 use crate::debug::trace::{Journal, RegTrace, Trace};
-use crate::isa::typed::Reg;
 use crate::memory::VirtAddr;
 
 pub mod regs;

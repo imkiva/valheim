@@ -1,8 +1,11 @@
+#![allow(dead_code)]
+
+use valheim_asm::isa::rv64::CSRAddr;
+
 use crate::cpu::csr::CSRMap::{MEIP_MASK, MISA, MSIP_MASK, MSTATUS, MTIP_MASK, SEIP_MASK, SSIP_MASK, SSTATUS, STIP_MASK};
 use crate::cpu::irq::Exception;
 use crate::cpu::mmu::{SATP64_MODE_MASK, SATP64_MODE_SHIFT, VM_V20211203_SV64};
 use crate::cpu::PrivilegeMode;
-use crate::isa::rv64::CSRAddr;
 
 pub const MXLEN: usize = 64;
 pub const CSR_MAX: usize = 1 << 12;
@@ -320,7 +323,7 @@ impl CSRRegs {
         let fcsr = self.csrs[FCSR as usize];
         let fcsr = (fcsr & !(0b111 << 5)) | (val << 5);
         self.csrs[FCSR as usize] = fcsr;
-      },
+      }
       FFLAGS => {
         let val = val & 0b11111;
         let fcsr = self.csrs[FCSR as usize];

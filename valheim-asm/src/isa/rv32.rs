@@ -1,4 +1,3 @@
-use crate::isa::data::Fin;
 use crate::isa::typed::{AQ, Imm32, Rd, RL, RoundingMode, Rs1, Rs2, Rs3, Shamt};
 
 /// typed RV32 instructions

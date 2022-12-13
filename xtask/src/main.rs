@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::path::{Path, PathBuf};
 use std::process::exit;
 
@@ -16,7 +18,7 @@ fn main() -> Result<(), Error> {
   }
 }
 
-fn run_riscv_tests(_argv: Vec<String>) -> Result<(), xshell::Error> {
+fn run_riscv_tests(_argv: Vec<String>) -> Result<(), Error> {
   let sh = Shell::new()?;
   let testing_dir = project_root().join("valheim-testing");
   let test_source_dir = testing_dir.join("riscv-tests");
@@ -45,7 +47,7 @@ fn run_riscv_tests(_argv: Vec<String>) -> Result<(), xshell::Error> {
   Ok(())
 }
 
-fn run_one(test_name: &str, elf: PathBuf) -> Result<(), xshell::Error> {
+fn run_one(test_name: &str, elf: PathBuf) -> Result<(), Error> {
   let sh = Shell::new()?;
   let emulator = binary_dir("debug").join("valheim-cli");
   let bin = elf.parent().unwrap().join(format!("{}.bin", elf.file_name().unwrap().to_str().unwrap()));

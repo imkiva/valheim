@@ -2,10 +2,8 @@
 
 use crate::asm::encode32::Encode32;
 use crate::asm::encode16::Encode16;
-use crate::cpu::data::Either;
 use crate::isa::data::Fin;
 use crate::isa::rv32::RV32Instr::*;
-use crate::isa::rv64::RV64Instr::*;
 use crate::isa::typed::Reg;
 
 pub mod encode32;
@@ -47,16 +45,14 @@ pub const t6: Reg = Reg::X(Fin::new(31));
 
 #[derive(Default)]
 pub struct Assembler {
-  pub code: Vec<Either<u32, u16>>,
+  pub code: Vec<u8>,
 }
 
 impl Assembler {
-  pub fn emit32<T: Encode32>(&mut self, code: T) {
-    self.code.push(Either::Left(code.encode32()));
+  pub fn emit32<T: Encode32>(&mut self, _code: T) {
   }
 
-  pub fn emit16<T: Encode16>(&mut self, code: T) {
-    self.code.push(Either::Right(code.encode16()));
+  pub fn emit16<T: Encode16>(&mut self, _code: T) {
   }
 
   pub fn lui(&mut self, rd: Reg, imm: i32) {
