@@ -1,7 +1,7 @@
 #![allow(non_upper_case_globals)]
 
-use crate::asm::encode32::Encode32;
 use crate::asm::encode16::Encode16;
+use crate::asm::encode32::Encode32;
 use crate::isa::data::Fin;
 use crate::isa::rv32::RV32Instr::*;
 use crate::isa::typed::Reg;
@@ -43,17 +43,33 @@ pub const t4: Reg = Reg::X(Fin::new(29));
 pub const t5: Reg = Reg::X(Fin::new(30));
 pub const t6: Reg = Reg::X(Fin::new(31));
 
-#[derive(Default)]
+#[derive(Debug, Clone, Copy)]
+pub struct Offset(pub usize);
+
+#[derive(Debug, Clone)]
 pub struct Assembler {
+  pub base: Offset,
   pub code: Vec<u8>,
+  pub backfill: Vec<(usize, u32)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Label {
+  pub offset: Offset,
+  pub name: Option<String>,
 }
 
 impl Assembler {
-  pub fn emit32<T: Encode32>(&mut self, _code: T) {
+  pub fn new(base: usize) -> Assembler {
+    Assembler {
+      base: Offset(base),
+      code: Vec::new(),
+      backfill: Vec::new(),
+    }
   }
 
-  pub fn emit16<T: Encode16>(&mut self, _code: T) {
-  }
+  pub fn emit32<T: Encode32>(&mut self, _code: T) {}
+  pub fn emit16<T: Encode16>(&mut self, _code: T) {}
 
   pub fn lui(&mut self, rd: Reg, imm: i32) {
     self.emit32(LUI(rd.into(), imm.into()));
@@ -66,7 +82,7 @@ mod test {
 
   #[test]
   fn test() {
-    let mut asm = Assembler::default();
+    let mut asm = Assembler::new(0x8000);
     asm.lui(ra, 114514);
   }
 }
