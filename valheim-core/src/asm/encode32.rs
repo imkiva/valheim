@@ -196,10 +196,10 @@ impl Encode32 for RV64Instr {
       // RV64D
       RV64Instr::FCVT_L_D(rd, rs1, rm) => emit_r_type(0b1010011, 0b1100001, rm.encode32(), rd, rs1, Rs2(X(Fin::new(0b00010)))),
       RV64Instr::FCVT_LU_D(rd, rs1, rm) => emit_r_type(0b1010011, 0b1100001, rm.encode32(), rd, rs1, Rs2(X(Fin::new(0b00011)))),
-      RV64Instr::FMV_X_D(_, _) => todo!(),
+      RV64Instr::FMV_X_D(rd, rs1) => emit_r_type(0b1010011, 0b1111001, 0b000, rd, rs1, Rs2(ZERO)),
       RV64Instr::FCVT_D_L(rd, rs1, rm) => emit_r_type(0b1010011, 0b1101001, rm.encode32(), rd, rs1, Rs2(X(Fin::new(0b00010)))),
       RV64Instr::FCVT_D_LU(rd, rs1, rm) => emit_r_type(0b1010011, 0b1101001, rm.encode32(), rd, rs1, Rs2(X(Fin::new(0b00011)))),
-      RV64Instr::FMV_D_X(_, _) => todo!(),
+      RV64Instr::FMV_D_X(rd, rs1) => emit_r_type(0b1010011, 0b1111001, 0b000, rd, rs1, Rs2(ZERO)),
       // RV32/RV64 Zicsr
       RV64Instr::CSRRW(rd, rs1, csr) => emit_i_type(0b1110011, 0b001, rd, rs1, csr.value() as i32),
       RV64Instr::CSRRS(rd, rs1, csr) => emit_i_type(0b1110011, 0b010, rd, rs1, csr.value() as i32),
