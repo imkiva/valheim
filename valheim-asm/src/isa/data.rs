@@ -3,7 +3,7 @@
 pub struct Fin<const MAX: u32>(u32);
 
 impl<const MAX: u32> Fin<MAX> {
-  pub fn new(value: u32) -> Self {
+  pub const fn new(value: u32) -> Self {
     assert!(value < MAX);
     Self(value)
   }

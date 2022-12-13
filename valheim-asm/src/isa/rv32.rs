@@ -1,4 +1,3 @@
-use crate::isa::data::Fin;
 use crate::isa::typed::{AQ, Imm32, Rd, RL, RoundingMode, Rs1, Rs2, Rs3, Shamt};
 
 /// typed RV32 instructions
@@ -130,8 +129,8 @@ pub enum RV32Instr {
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct FenceFm(pub Fin<16>);
+pub struct FenceFm(pub u32);
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct FencePred(pub Fin<16>);
+pub struct FencePred(pub u32);
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct FenceSucc(pub Fin<16>);
+pub struct FenceSucc(pub u32);

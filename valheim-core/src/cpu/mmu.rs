@@ -34,11 +34,6 @@ pub const PTE_G: u64 = 5; /* Global */
 pub const PTE_A: u64 = 6; /* Accessed */
 pub const PTE_D: u64 = 7; /* Dirty */
 
-// Page table PPN shift amount
-const PTE_PPN_SHIFT: u64 = 10;
-// Page table PPN mask
-const PTE_PPN_MASK: u64 = 0x3FFFFFFFFFFC00;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum VMMode {

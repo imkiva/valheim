@@ -8,7 +8,6 @@ extern crate core;
 #[macro_use]
 extern crate derive_more;
 pub mod cpu;
-pub mod isa;
 pub mod memory;
 pub mod interp;
 pub mod device;

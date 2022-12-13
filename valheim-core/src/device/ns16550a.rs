@@ -117,11 +117,11 @@ impl Device for Uart16550a {
     Ok(())
   }
 
-  fn dma_read(&self, addr: VirtAddr) -> Option<&Memory> {
+  fn dma_read(&self, _addr: VirtAddr) -> Option<&Memory> {
     None
   }
 
-  fn dma_write(&self, addr: VirtAddr) -> Option<&mut Memory> {
+  fn dma_write(&self, _addr: VirtAddr) -> Option<&mut Memory> {
     None
   }
 
