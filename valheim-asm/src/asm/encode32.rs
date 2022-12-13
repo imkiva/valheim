@@ -215,7 +215,7 @@ impl Encode32 for RV64Instr {
       RV64Instr::WFI => 0b0001000_00010_00000_000_00000_1110011,
       RV64Instr::SFENCE_VMA(rs1, rs2) => emit_r(0b1110011, 0b0001001, 0b000, Rd(ZERO), rs1, rs2),
       RV64Instr::SINVAL_VMA(rs1, rs2) => emit_r(0b1110011, 0b0001011, 0b000, Rd(ZERO), rs1, rs2),
-      RV64Instr::SFENCE_W_INVAL =>  0b0001100_00000_00000_000_00000_1110011,
+      RV64Instr::SFENCE_W_INVAL => 0b0001100_00000_00000_000_00000_1110011,
       RV64Instr::SFENCE_INVAL_IR => 0b0001100_00001_00000_000_00000_1110011,
     }
   }
@@ -345,21 +345,20 @@ fn emit_u(opcode: u32, rd: Rd, imm: u32) -> u32 {
   // 31:12 = imm, 11:7 = rd, 6:0 = opcode
   (opcode & 0b1111111)
     | ((rd.encode32() & 0b11111) << 7)
-    | ((imm as u32 & 0b11111111111111111111) << 12)
+    | (imm as u32 & (0b11111111111111111111 << 12))
 }
 
 /// Convert RISC-V B-type instruction to u32
 fn emit_b(opcode: u32, funct3: u32, rs1: Rs1, rs2: Rs2, imm: i32) -> u32 {
   // 31:31 = imm[12], 30:25 = imm[10:5], 24:20 = rs2, 19:15 = rs1, 14:12 = funct3, 11:8 = imm[4:1], 7:7 = imm[11], 6:0 = opcode
   (opcode & 0b1111111)
-    | ((imm as u32 & 0b1) << 7)
-    | ((imm as u32 & 0b11110) << 7)
     | ((funct3 & 0b111) << 12)
     | ((rs1.encode32() & 0b11111) << 15)
     | ((rs2.encode32() & 0b11111) << 20)
-    | ((imm as u32 & 0b11111100000) << 20)
-    | ((imm as u32 & 0b100000000000) << 19)
-    | ((imm as u32 & 0b111111000000000000000) << 12)
+    | (imm as u32 & (0b1 << 11)) >> 4           // 7:7 = imm[11]
+    | (imm as u32 & (0b1111 << 1)) << 7         // 11:8 = imm[4:1]
+    | (imm as u32 & (0b111111 << 5)) << 20      // 30:25 = imm[10:5]
+    | (imm as u32 & (0b1 << 12)) << 19          // 31:31 = imm[12]
 }
 
 /// Convert RISC-V J-type instruction to u32
@@ -367,11 +366,10 @@ fn emit_j(opcode: u32, rd: Rd, imm: i32) -> u32 {
   // 31:31 = imm[20], 30:21 = imm[10:1], 20:20 = imm[11], 19:12 = imm[19:12], 11:7 = rd, 6:0 = opcode
   (opcode & 0b1111111)
     | ((rd.encode32() & 0b11111) << 7)
-    | ((imm as u32 & 0b11111111) << 12)
-    | ((imm as u32 & 0b111111110000000000000) << 12)
-    | ((imm as u32 & 0b100000000000000000000) << 11)
-    | ((imm as u32 & 0b1000000000000000000000) << 9)
-    | ((imm as u32 & 0b11111100000000000000000000000000) >> 11)
+    | (imm as u32 & (0b1 << 11)) << 9              // 20:20 = imm[11]
+    | (imm as u32 & (0b1111111111 << 1)) << 20     // 30:21 = imm[10:1]
+    | (imm as u32 & (0b1 << 20)) << 11             // 31:31 = imm[20]
+    | (imm as u32 & (0b11111111 << 12))            // 19:12 = imm[19:12]
 }
 
 #[cfg(test)]

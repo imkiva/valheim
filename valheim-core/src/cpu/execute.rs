@@ -13,7 +13,7 @@ use valheim_asm::isa::untyped::Bytecode;
 use valheim_asm::isa::untyped16::Bytecode16;
 
 use crate::cpu::{PrivilegeMode, RV64Cpu};
-use crate::cpu::csr::CSRMap::{FCSR, FCSR_DZ_MASK, FCSR_NV_MASK, FCSR_NX_MASK, FCSR_OF_MASK, FCSR_UF_MASK, FFLAGS, MEPC, SATP, SEPC};
+use crate::cpu::csr::CSRMap::{FCSR_DZ_MASK, FCSR_NV_MASK, FCSR_NX_MASK, FCSR_OF_MASK, FCSR_UF_MASK, FFLAGS, MEPC, SATP, SEPC};
 use crate::cpu::data::Either;
 use crate::cpu::irq::Exception;
 use crate::debug::trace::{InstrTrace, Trace};
