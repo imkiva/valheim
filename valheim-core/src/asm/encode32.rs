@@ -1,7 +1,7 @@
 use crate::isa::data::Fin;
 use crate::isa::rv32::RV32Instr;
 use crate::isa::rv64::RV64Instr;
-use crate::isa::typed::{Instr, Rd, Reg, RoundingMode, Rs1, Rs2, Rs3};
+use crate::isa::typed::{AQ, Instr, Rd, Reg, RL, RoundingMode, Rs1, Rs2, Rs3};
 use crate::isa::typed::Reg::{F, FCSR, PC, X, ZERO};
 
 pub trait Encode32 {
@@ -82,17 +82,17 @@ impl Encode32 for RV32Instr {
       RV32Instr::REM(rd, rs1, rs2) => emit_r_type(0b0110011, 0b0000001, 0b110, rd, rs1, rs2),
       RV32Instr::REMU(rd, rs1, rs2) => emit_r_type(0b0110011, 0b0000001, 0b111, rd, rs1, rs2),
       // RVA
-      RV32Instr::LR_W(_, _, _, _) => todo!(),
-      RV32Instr::SC_W(_, _, _, _, _) => todo!(),
-      RV32Instr::AMOSWAP_W(_, _, _, _, _) => todo!(),
-      RV32Instr::AMOADD_W(_, _, _, _, _) => todo!(),
-      RV32Instr::AMOXOR_W(_, _, _, _, _) => todo!(),
-      RV32Instr::AMOAND_W(_, _, _, _, _) => todo!(),
-      RV32Instr::AMOOR_W(_, _, _, _, _) => todo!(),
-      RV32Instr::AMOMIN_W(_, _, _, _, _) => todo!(),
-      RV32Instr::AMOMAX_W(_, _, _, _, _) => todo!(),
-      RV32Instr::AMOMINU_W(_, _, _, _, _) => todo!(),
-      RV32Instr::AMOMAXU_W(_, _, _, _, _) => todo!(),
+      RV32Instr::LR_W(rd, rs1, aq, rl) => emit_r_amo_type(0b0101111, 0b00010, 0b010, aq, rl, rd, rs1, Rs2(ZERO)),
+      RV32Instr::SC_W(rd, rs1, rs2, aq, rl) => emit_r_amo_type(0b0101111, 0b00011, 0b010, aq, rl, rd, rs1, rs2),
+      RV32Instr::AMOSWAP_W(rd, rs1, rs2, aq, rl) => emit_r_amo_type(0b0101111, 0b00001, 0b010, aq, rl, rd, rs1, rs2),
+      RV32Instr::AMOADD_W(rd, rs1, rs2, aq, rl) => emit_r_amo_type(0b0101111, 0b00000, 0b010, aq, rl, rd, rs1, rs2),
+      RV32Instr::AMOXOR_W(rd, rs1, rs2, aq, rl) => emit_r_amo_type(0b0101111, 0b00100, 0b010, aq, rl, rd, rs1, rs2),
+      RV32Instr::AMOAND_W(rd, rs1, rs2, aq, rl) => emit_r_amo_type(0b0101111, 0b01100, 0b010, aq, rl, rd, rs1, rs2),
+      RV32Instr::AMOOR_W(rd, rs1, rs2, aq, rl) => emit_r_amo_type(0b0101111, 0b01000, 0b010, aq, rl, rd, rs1, rs2),
+      RV32Instr::AMOMIN_W(rd, rs1, rs2, aq, rl) => emit_r_amo_type(0b0101111, 0b10000, 0b010, aq, rl, rd, rs1, rs2),
+      RV32Instr::AMOMAX_W(rd, rs1, rs2, aq, rl) => emit_r_amo_type(0b0101111, 0b10100, 0b010, aq, rl, rd, rs1, rs2),
+      RV32Instr::AMOMINU_W(rd, rs1, rs2, aq, rl) => emit_r_amo_type(0b0101111, 0b11000, 0b010, aq, rl, rd, rs1, rs2),
+      RV32Instr::AMOMAXU_W(rd, rs1, rs2, aq, rl) => emit_r_amo_type(0b0101111, 0b11100, 0b010, aq, rl, rd, rs1, rs2),
       // RVF
       RV32Instr::FLW(rd, rs1, imm) => emit_i_type(0b0000111, 0b010, rd, rs1, imm.decode_sext()),
       RV32Instr::FSW(rs1, rs2, imm) => emit_s_type(0b0100111, 0b010, rs1, rs2, imm.decode_sext()),
@@ -177,17 +177,17 @@ impl Encode32 for RV64Instr {
       RV64Instr::REMW(rd, rs1, rs2) => emit_r_type(0b0111011, 0b0000001, 0b110, rd, rs1, rs2),
       RV64Instr::REMUW(rd, rs1, rs2) => emit_r_type(0b0111011, 0b0000001, 0b111, rd, rs1, rs2),
       // RV64A
-      RV64Instr::LR_D(_, _, _, _) => todo!(),
-      RV64Instr::SC_D(_, _, _, _, _) => todo!(),
-      RV64Instr::AMOSWAP_D(_, _, _, _, _) => todo!(),
-      RV64Instr::AMOADD_D(_, _, _, _, _) => todo!(),
-      RV64Instr::AMOXOR_D(_, _, _, _, _) => todo!(),
-      RV64Instr::AMOAND_D(_, _, _, _, _) => todo!(),
-      RV64Instr::AMOOR_D(_, _, _, _, _) => todo!(),
-      RV64Instr::AMOMIN_D(_, _, _, _, _) => todo!(),
-      RV64Instr::AMOMAX_D(_, _, _, _, _) => todo!(),
-      RV64Instr::AMOMINU_D(_, _, _, _, _) => todo!(),
-      RV64Instr::AMOMAXU_D(_, _, _, _, _) => todo!(),
+      RV64Instr::LR_D(rd, rs1, aq, rl) => emit_r_amo_type(0b0101111, 0b00010, 0b011, aq, rl, rd, rs1, Rs2(ZERO)),
+      RV64Instr::SC_D(rd, rs1, rs2, aq, rl) => emit_r_amo_type(0b0101111, 0b00011, 0b011, aq, rl, rd, rs1, rs2),
+      RV64Instr::AMOSWAP_D(rd, rs1, rs2, aq, rl) => emit_r_amo_type(0b0101111, 0b00001, 0b011, aq, rl, rd, rs1, rs2),
+      RV64Instr::AMOADD_D(rd, rs1, rs2, aq, rl) => emit_r_amo_type(0b0101111, 0b00000, 0b011, aq, rl, rd, rs1, rs2),
+      RV64Instr::AMOXOR_D(rd, rs1, rs2, aq, rl) => emit_r_amo_type(0b0101111, 0b00100, 0b011, aq, rl, rd, rs1, rs2),
+      RV64Instr::AMOAND_D(rd, rs1, rs2, aq, rl) => emit_r_amo_type(0b0101111, 0b01100, 0b011, aq, rl, rd, rs1, rs2),
+      RV64Instr::AMOOR_D(rd, rs1, rs2, aq, rl) => emit_r_amo_type(0b0101111, 0b01000, 0b011, aq, rl, rd, rs1, rs2),
+      RV64Instr::AMOMIN_D(rd, rs1, rs2, aq, rl) => emit_r_amo_type(0b0101111, 0b10000, 0b011, aq, rl, rd, rs1, rs2),
+      RV64Instr::AMOMAX_D(rd, rs1, rs2, aq, rl) => emit_r_amo_type(0b0101111, 0b10100, 0b011, aq, rl, rd, rs1, rs2),
+      RV64Instr::AMOMINU_D(rd, rs1, rs2, aq, rl) => emit_r_amo_type(0b0101111, 0b11000, 0b011, aq, rl, rd, rs1, rs2),
+      RV64Instr::AMOMAXU_D(rd, rs1, rs2, aq, rl) => emit_r_amo_type(0b0101111, 0b11100, 0b011, aq, rl, rd, rs1, rs2),
       // RV64F
       RV64Instr::FCVT_L_S(rd, rs1, rm) => emit_r_type(0b1010011, 0b1100000, rm.encode32(), rd, rs1, Rs2(X(Fin::new(0b00010)))),
       RV64Instr::FCVT_LU_S(rd, rs1, rm) => emit_r_type(0b1010011, 0b1100000, rm.encode32(), rd, rs1, Rs2(X(Fin::new(0b00011)))),
@@ -292,6 +292,19 @@ fn emit_r_shamt6_type(opcode: u32, funct6: u32, funct3: u32, rd: Rd, rs1: Rs1, s
     | ((rs1.encode32() & 0b11111) << 15)
     | ((shamt6 & 0b111111) << 20)
     | ((funct6 & 0b111111) << 26)
+}
+
+/// Convert RISC-V R-type (aq, rl, used by RVA) instruction to u32
+fn emit_r_amo_type(opcode: u32, funct5: u32, funct3: u32, aq: AQ, rl: RL, rd: Rd, rs1: Rs1, rs2: Rs2) -> u32 {
+  // 31:27 = funct7, 26 = aq, 25 = rl, 24:20 = rs2, 19:15 = rs1, 14:12 = funct3, 11:7 = rd, 6:0 = opcode
+  (opcode & 0b1111111)
+    | ((rd.encode32() & 0b11111) << 7)
+    | ((funct3 & 0b111) << 12)
+    | ((rs1.encode32() & 0b11111) << 15)
+    | ((rs2.encode32() & 0b11111) << 20)
+    | ((rl.0 as u32) << 25)
+    | ((aq.0 as u32) << 26)
+    | ((funct5 & 0b1111111) << 27)
 }
 
 /// Convert RISC-V I-type instruction to u32
