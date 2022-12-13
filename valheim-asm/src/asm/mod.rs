@@ -1,6 +1,7 @@
 #![allow(non_upper_case_globals)]
 
 use std::collections::HashMap;
+
 use bytebuffer::{ByteBuffer, Endian};
 
 use crate::asm::encode16::Encode16;
@@ -50,21 +51,29 @@ pub const t6: Reg = Reg::X(Fin::new(31));
 pub struct Assembler {
   pub base: usize,
   pub code: ByteBuffer,
-  pub labels: HashMap<Label, Box<dyn FnOnce(Label, Current) -> Instr>>,
+  pub label_id: usize,
+  pub labels: HashMap<LabelId, Label>,
+  pub backfills: HashMap<LabelId, (Current, Box<dyn FnOnce(Label, Current) -> Instr>)>,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct Label {
   /// The label position
-  pub position: usize,
-  /// The label name, like `main`
-  pub name: Option<String>,
+  pub position: isize,
 }
 
 #[derive(Debug, Copy, Clone)]
-pub struct Current(pub usize);
+pub struct Current {
+  /// Current position
+  pub position: isize,
+}
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub struct LabelId {
+  pub idx: usize,
+}
+
+#[derive(Debug, Copy, Clone)]
 pub enum Compare {
   EQ,
   NE,
@@ -80,31 +89,43 @@ impl Assembler {
     let mut asm = Assembler {
       base,
       code: ByteBuffer::new(),
+      backfills: HashMap::new(),
       labels: HashMap::new(),
+      label_id: 0,
     };
     asm.code.set_endian(Endian::LittleEndian);
     asm
   }
 
   pub fn current(&self) -> Current {
-    Current(self.code.get_wpos())
+    Current { position: self.code.get_wpos() as isize }
   }
 
-  pub fn current_label(&mut self, name: Option<String>) -> Label {
-    Label {
-      position: self.current().0,
-      name,
-    }
+  pub fn new_label(&mut self) -> LabelId {
+    let id = LabelId { idx: self.label_id };
+    self.label_id += 1;
+    id
   }
 
-  pub fn emit_with_label(&mut self, label: Label, f: Box<dyn FnOnce(Label, Current) -> Instr>) {
-    self.labels.insert(label, f);
+  pub fn emit_label(&mut self, id: LabelId) {
+    let label = Label { position: self.current().position };
+    self.labels.insert(id, label);
   }
 
-  pub fn finalize_label(&mut self, label: Label) {
-    if let Some(f) = self.labels.remove(&label) {
-      let instr = f(label, self.current());
-      self.emit32(instr);
+  pub fn backfill(&mut self, id: LabelId, compute: Box<dyn FnOnce(Label, Current) -> Instr>) {
+    self.backfills.insert(id, (self.current(), compute));
+    self.code.write_u32(0); // the placeholder
+  }
+
+  pub fn freeze(&mut self) {
+    for (id, label) in self.labels.iter() {
+      if let Some((their, compute)) = self.backfills.remove(id) {
+        let instr = compute(label.clone(), their);
+        let current = self.current();
+        self.code.set_wpos(their.position as usize);
+        self.code.write_u32(instr.encode32());
+        self.code.set_wpos(current.position as usize);
+      }
     }
   }
 

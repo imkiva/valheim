@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use crate::asm::{Assembler, Compare, Label, ra, zero};
+use crate::asm::{Assembler, Compare, Current, Label, LabelId, ra, zero};
 use crate::isa::rv32::RV32Instr::*;
 use crate::isa::rv64::RV64Instr::*;
 use crate::isa::typed::{Instr, Reg};
@@ -19,14 +19,6 @@ impl Assembler {
     self.addi(zero, zero, 0);
   }
 
-  pub fn jump_offset(&mut self, offset: i32) {
-    self.jal_rv(zero, offset);
-  }
-
-  pub fn jump_reg(&mut self, rs: Reg) {
-    self.jalr_rv(zero, rs, 0);
-  }
-
   pub fn ret(&mut self) {
     self.jalr_rv(zero, ra, 0);
   }
@@ -40,10 +32,18 @@ impl Assembler {
     self.jalr_rv(ra, rs, 0);
   }
 
-  pub fn branch(&mut self, cond: Compare, rs1: Reg, rs2: Reg, label: Label) {
-    self.emit_with_label(label, Box::new(move |label, current| {
-      let offset = (current.0 - label.position) as isize;
-      b_rv_(cond, rs1, rs2, offset as i32)
+  pub fn branch(&mut self, cond: Compare, rs1: Reg, rs2: Reg, id: LabelId) {
+    self.backfill(id, Box::new(move |label, current| {
+      let offset = offset(label, current);
+      b_rv_(cond, rs1, rs2, offset)
+      // TODO: check offset range, and select different instructions
+    }));
+  }
+
+  pub fn jump(&mut self, id: LabelId) {
+    self.backfill(id, Box::new(move |label, current| {
+      let offset = offset(label, current);
+      jal_rv_(zero, offset >> 1)
       // TODO: check offset range, and select different instructions
     }));
   }
@@ -113,11 +113,15 @@ impl Assembler {
   }
 
   pub fn jal_rv(&mut self, rd: Reg, offset: i32) {
-    self.emit32(JAL(rd.into(), offset.into()));
+    self.emit32(jal_rv_(rd, offset));
   }
 
   pub fn jalr_rv(&mut self, rd: Reg, rs: Reg, offset: i32) {
     self.emit32(JALR(rd.into(), rs.into(), offset.into()));
+  }
+
+  pub fn b_rv(&mut self, cond: Compare, rs1: Reg, rs2: Reg, offset: i32) {
+    self.emit32(b_rv_(cond, rs1, rs2, offset));
   }
 
   pub fn addi_rv(&mut self, rd: Reg, rs: Reg, imm: i32) {
@@ -137,7 +141,12 @@ impl Assembler {
   }
 }
 
+fn offset(label: Label, current: Current) -> i32 {
+  (label.position - current.position) as i32
+}
+
 fn b_rv_(cmp: Compare, rs1: Reg, rs2: Reg, offset: i32) -> Instr {
+  let offset = offset >> 1;
   match cmp {
     Compare::EQ => Instr::RV32(BEQ(rs1.into(), rs2.into(), offset.into())),
     Compare::NE => Instr::RV32(BNE(rs1.into(), rs2.into(), offset.into())),
@@ -146,4 +155,8 @@ fn b_rv_(cmp: Compare, rs1: Reg, rs2: Reg, offset: i32) -> Instr {
     Compare::LTU => Instr::RV32(BLTU(rs1.into(), rs2.into(), offset.into())),
     Compare::GEU => Instr::RV32(BGEU(rs1.into(), rs2.into(), offset.into())),
   }
+}
+
+pub fn jal_rv_(rd: Reg, offset: i32) -> Instr {
+  Instr::RV32(JAL(rd.into(), offset.into()))
 }
