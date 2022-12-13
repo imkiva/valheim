@@ -345,7 +345,7 @@ fn emit_u(opcode: u32, rd: Rd, imm: u32) -> u32 {
   // 31:12 = imm, 11:7 = rd, 6:0 = opcode
   (opcode & 0b1111111)
     | ((rd.encode32() & 0b11111) << 7)
-    | ((imm as u32 & 0b11111111111111111111) << 12)
+    | (imm as u32 & (0b11111111111111111111 << 12))
 }
 
 /// Convert RISC-V B-type instruction to u32

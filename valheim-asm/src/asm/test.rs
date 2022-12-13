@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod masm {
   use crate::asm::{a0, Assembler, Compare, t0, t1};
-  use crate::isa::typed::{Imm32, Instr};
+  use crate::isa::typed::Instr;
 
   pub fn decode_encode(di: u32) {
     let d = Instr::decode32(di);
@@ -28,16 +28,8 @@ mod masm {
   }
 
   #[test]
-  pub fn load_negative() {
-    let x: i32 = 1048575;
-    println!("{:#b}", x);
-    let i: Imm32<31, 12> = x.into();
-    println!("{:#b}", i.decode());
-    println!("{:#b}", i.decode_sext());
-    let mut asm = Assembler::new(0);
-    asm.lui_rv(t0, x);
-    let i = Instr::decode32(asm.code.read_u32().unwrap()).unwrap();
-    println!("{:?}", i);
+  pub fn encode_u_type() {
+    decode_encode(0x00110837); // li, x16, 1114112
   }
 
   #[test]
