@@ -1,10 +1,13 @@
 [package]
 name = "valheim-core"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
+repository = "https://github.com/imkiva/valheim"
+description = "RISC-V emulator core"
+license = "MIT"
 
 [dependencies]
-valheim-asm = { path = "../valheim-asm" }
+valheim-asm = { path = "../valheim-asm", version = "0.2.0" }
 memmap2 = "0.5.3"
 derive_more = "0.99.0"
 rustc_apfloat = "0.1.3"

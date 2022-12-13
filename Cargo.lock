@@ -274,14 +274,14 @@ checksum = "8ccb82d61f80a663efe1f787a51b16b5a51e3314d6ac365b08639f52387b33f3"
 
 [[package]]
 name = "valheim-asm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "modular-bitfield",
 ]
 
 [[package]]
 name = "valheim-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "valheim-core",
@@ -289,7 +289,7 @@ dependencies = [
 
 [[package]]
 name = "valheim-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "derive_more",
  "memmap2",

@@ -1,8 +1,11 @@
 [package]
 name = "valheim-cli"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
+repository = "https://github.com/imkiva/valheim"
+description = "RISC-V emulator command-line interface"
+license = "MIT"
 
 [dependencies]
-valheim-core = { path = "../valheim-core" }
+valheim-core = { path = "../valheim-core", version = "0.2.0" }
 clap = { version = "3.1.6", features = ["derive"] }
