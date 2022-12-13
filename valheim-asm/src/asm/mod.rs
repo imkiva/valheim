@@ -1,16 +1,18 @@
 #![allow(non_upper_case_globals)]
 
+use std::collections::HashMap;
 use bytebuffer::{ByteBuffer, Endian};
 
 use crate::asm::encode16::Encode16;
 use crate::asm::encode32::Encode32;
 use crate::isa::data::Fin;
-use crate::isa::typed::Reg;
+use crate::isa::typed::{Instr, Reg};
 
 pub mod encode32;
 pub mod encode16;
 pub mod traits;
 pub mod riscv;
+pub mod test;
 
 pub const zero: Reg = Reg::ZERO;
 pub const ra: Reg = Reg::X(Fin::new(1));
@@ -45,51 +47,64 @@ pub const t4: Reg = Reg::X(Fin::new(29));
 pub const t5: Reg = Reg::X(Fin::new(30));
 pub const t6: Reg = Reg::X(Fin::new(31));
 
-#[derive(Debug, Clone, Copy)]
-pub struct Offset(pub usize);
-
-#[derive(Debug, Clone)]
 pub struct Assembler {
-  pub base: Offset,
+  pub base: usize,
   pub code: ByteBuffer,
+  pub labels: HashMap<Label, Box<dyn FnOnce(Label, Current) -> Instr>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct Label {
   /// The label position
-  pub offset: Offset,
+  pub position: usize,
   /// The label name, like `main`
   pub name: Option<String>,
 }
 
+#[derive(Debug, Copy, Clone)]
+pub struct Current(pub usize);
+
 #[derive(Debug, Clone, Copy)]
 pub enum Compare {
-  EQ, NE, LT, GE, LTU, GEU,
+  EQ,
+  NE,
+  LT,
+  GE,
+  LTU,
+  GEU,
 }
 
 /// Common assembler
 impl Assembler {
   pub fn new(base: usize) -> Assembler {
     let mut asm = Assembler {
-      base: Offset(base),
+      base,
       code: ByteBuffer::new(),
+      labels: HashMap::new(),
     };
     asm.code.set_endian(Endian::LittleEndian);
     asm
   }
 
-  pub fn current(&self) -> Offset {
-    Offset(self.code.get_wpos())
+  pub fn current(&self) -> Current {
+    Current(self.code.get_wpos())
   }
 
-  pub fn emit_label(&mut self) -> Label {
-    self.emit_label_named(None)
-  }
-
-  pub fn emit_label_named(&mut self, name: Option<String>) -> Label {
+  pub fn current_label(&mut self, name: Option<String>) -> Label {
     Label {
-      offset: self.current(),
+      position: self.current().0,
       name,
+    }
+  }
+
+  pub fn emit_with_label(&mut self, label: Label, f: Box<dyn FnOnce(Label, Current) -> Instr>) {
+    self.labels.insert(label, f);
+  }
+
+  pub fn finalize_label(&mut self, label: Label) {
+    if let Some(f) = self.labels.remove(&label) {
+      let instr = f(label, self.current());
+      self.emit32(instr);
     }
   }
 

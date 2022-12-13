@@ -1,9 +1,9 @@
 #![allow(dead_code)]
 
-use crate::asm::{Assembler, Compare, ra, zero};
+use crate::asm::{Assembler, Compare, Label, ra, zero};
 use crate::isa::rv32::RV32Instr::*;
 use crate::isa::rv64::RV64Instr::*;
-use crate::isa::typed::Reg;
+use crate::isa::typed::{Instr, Reg};
 
 /// Pseudo-instructions
 impl Assembler {
@@ -40,56 +40,12 @@ impl Assembler {
     self.jalr_rv(ra, rs, 0);
   }
 
-  pub fn branch(&mut self, cond: Compare, rs1: Reg, rs2: Reg, offset: i32) {
-    self.b_rv(cond, rs1, rs2, offset);
-  }
-
-  pub fn beq(&mut self, rs1: Reg, rs2: Reg, offset: i32) {
-    self.branch(Compare::EQ, rs1, rs2, offset);
-  }
-
-  pub fn bne(&mut self, rs1: Reg, rs2: Reg, offset: i32) {
-    self.branch(Compare::NE, rs1, rs2, offset);
-  }
-
-  pub fn blt(&mut self, rs1: Reg, rs2: Reg, offset: i32) {
-    self.branch(Compare::LT, rs1, rs2, offset);
-  }
-
-  pub fn bge(&mut self, rs1: Reg, rs2: Reg, offset: i32) {
-    self.branch(Compare::GE, rs1, rs2, offset);
-  }
-
-  pub fn bltu(&mut self, rs1: Reg, rs2: Reg, offset: i32) {
-    self.branch(Compare::LTU, rs1, rs2, offset);
-  }
-
-  pub fn bgeu(&mut self, rs1: Reg, rs2: Reg, offset: i32) {
-    self.branch(Compare::GEU, rs1, rs2, offset);
-  }
-
-  pub fn beqz(&mut self, rs: Reg, offset: i32) {
-    self.beq(rs, zero, offset);
-  }
-
-  pub fn bnez(&mut self, rs: Reg, offset: i32) {
-    self.bne(rs, zero, offset);
-  }
-
-  pub fn bltz(&mut self, rs: Reg, offset: i32) {
-    self.blt(rs, zero, offset);
-  }
-
-  pub fn bgez(&mut self, rs: Reg, offset: i32) {
-    self.bge(rs, zero, offset);
-  }
-
-  pub fn bltuz(&mut self, rs: Reg, offset: i32) {
-    self.bltu(rs, zero, offset);
-  }
-
-  pub fn bgeuz(&mut self, rs: Reg, offset: i32) {
-    self.bgeu(rs, zero, offset);
+  pub fn branch(&mut self, cond: Compare, rs1: Reg, rs2: Reg, label: Label) {
+    self.emit_with_label(label, Box::new(move |label, current| {
+      let offset = (current.0 - label.position) as isize;
+      b_rv_(cond, rs1, rs2, offset as i32)
+      // TODO: check offset range, and select different instructions
+    }));
   }
 
   pub fn load_imm(&mut self, rd: Reg, imm: i32) {
@@ -164,17 +120,6 @@ impl Assembler {
     self.emit32(JALR(rd.into(), rs.into(), offset.into()));
   }
 
-  pub fn b_rv(&mut self, cmp: Compare, rs1: Reg, rs2: Reg, offset: i32) {
-    match cmp {
-      Compare::EQ => self.emit32(BEQ(rs1.into(), rs2.into(), offset.into())),
-      Compare::NE => self.emit32(BNE(rs1.into(), rs2.into(), offset.into())),
-      Compare::LT => self.emit32(BLT(rs1.into(), rs2.into(), offset.into())),
-      Compare::GE => self.emit32(BGE(rs1.into(), rs2.into(), offset.into())),
-      Compare::LTU => self.emit32(BLTU(rs1.into(), rs2.into(), offset.into())),
-      Compare::GEU => self.emit32(BGEU(rs1.into(), rs2.into(), offset.into())),
-    }
-  }
-
   pub fn addi_rv(&mut self, rd: Reg, rs: Reg, imm: i32) {
     self.emit32(ADDI(rd.into(), rs.into(), imm.into()));
   }
@@ -189,5 +134,16 @@ impl Assembler {
 
   pub fn add_rv(&mut self, rd: Reg, rs1: Reg, rs2: Reg) {
     self.emit32(ADD(rd.into(), rs1.into(), rs2.into()));
+  }
+}
+
+fn b_rv_(cmp: Compare, rs1: Reg, rs2: Reg, offset: i32) -> Instr {
+  match cmp {
+    Compare::EQ => Instr::RV32(BEQ(rs1.into(), rs2.into(), offset.into())),
+    Compare::NE => Instr::RV32(BNE(rs1.into(), rs2.into(), offset.into())),
+    Compare::LT => Instr::RV32(BLT(rs1.into(), rs2.into(), offset.into())),
+    Compare::GE => Instr::RV32(BGE(rs1.into(), rs2.into(), offset.into())),
+    Compare::LTU => Instr::RV32(BLTU(rs1.into(), rs2.into(), offset.into())),
+    Compare::GEU => Instr::RV32(BGEU(rs1.into(), rs2.into(), offset.into())),
   }
 }
