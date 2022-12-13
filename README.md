@@ -41,6 +41,7 @@ cargo run --release -- --kernel xv6/kernel.bin --disk xv6/fs.img
 
 ![xv6-booting](./pictures/xv6-booting.png)
 
+<!--
 ### Why not using [nemu](https://github.com/NJU-ProjectN/nemu) that was recommended by [一生一芯](https://ysyx.org/) project?
 
 Their Project-N was great, and it is definitely a good study material for students who have less code experience before.
@@ -52,3 +53,4 @@ It is only meaningful to take it as programming exercises for those less-code-ex
 
 Unfortunately and apparently, I am not its target audience --- I am not the one who need extra programming exercise, 
 instead I code a lot, and I have my own project management style. Their project just does not fit my taste.
+-->
