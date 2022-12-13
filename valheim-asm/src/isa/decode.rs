@@ -7,7 +7,6 @@ use crate::isa::rv64::{CSRAddr, UImm};
 use crate::isa::rv64::RV64Instr;
 use crate::isa::typed::{AQ, Imm32, Instr, Rd, Reg, RL, RoundingMode, Rs1, Rs2, Rs3, Shamt};
 use crate::isa::untyped::Bytecode;
-use crate::isa::compressed::untyped::Bytecode16;
 
 impl Instr {
   pub fn try_from(untyped: Bytecode) -> Option<Instr> {
@@ -16,10 +15,6 @@ impl Instr {
 
   pub fn decode32(i: u32) -> Option<Instr> {
     Instr::try_from(Bytecode { repr: i })
-  }
-
-  pub fn decode16(i: u16) -> Option<Instr> {
-    Instr::try_from_compressed(Bytecode16 { repr: i })
   }
 }
 

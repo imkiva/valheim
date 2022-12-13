@@ -1,9 +1,9 @@
-use crate::isa::compressed::untyped::Bytecode16;
 use crate::isa::data::Fin;
 use crate::isa::decode::{fp, gp};
 use crate::isa::rv32::RV32Instr;
 use crate::isa::rv64::RV64Instr;
 use crate::isa::typed::{Imm32, Instr, Rd, Reg, Rs1, Rs2, Shamt};
+use crate::isa::untyped16::Bytecode16;
 use crate::rv32;
 use crate::rv64;
 
@@ -51,6 +51,10 @@ impl Instr {
       (_, 2) => decode_untyped(untyped),
       _ => None,
     }
+  }
+
+  pub fn decode16(i: u16) -> Option<Instr> {
+    Instr::try_from_compressed(Bytecode16 { repr: i })
   }
 }
 

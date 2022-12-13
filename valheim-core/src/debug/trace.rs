@@ -2,9 +2,9 @@
 
 use std::cell::RefCell;
 
-use valheim_asm::isa::compressed::untyped::Bytecode16;
 use valheim_asm::isa::typed::{Instr, Reg};
 use valheim_asm::isa::untyped::Bytecode;
+use valheim_asm::isa::untyped16::Bytecode16;
 
 use crate::cpu::regs::Regs;
 use crate::memory::VirtAddr;

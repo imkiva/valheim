@@ -3,7 +3,6 @@ use std::cmp::Ordering;
 use rustc_apfloat::{Float, Status, StatusAnd};
 use rustc_apfloat::ieee::{Double, Single};
 
-use valheim_asm::isa::compressed::untyped::Bytecode16;
 use valheim_asm::isa::rv32::RV32Instr;
 use valheim_asm::isa::rv32::RV32Instr::*;
 use valheim_asm::isa::rv64::RV64Instr;
@@ -11,6 +10,7 @@ use valheim_asm::isa::rv64::RV64Instr::*;
 use valheim_asm::isa::typed::{Imm32, Instr, Rd, Reg, Rs1, Rs2, Rs3};
 use valheim_asm::isa::typed::Instr::{RV32, RV64};
 use valheim_asm::isa::untyped::Bytecode;
+use valheim_asm::isa::untyped16::Bytecode16;
 
 use crate::cpu::{PrivilegeMode, RV64Cpu};
 use crate::cpu::csr::CSRMap::{FCSR, FCSR_DZ_MASK, FCSR_NV_MASK, FCSR_NX_MASK, FCSR_OF_MASK, FCSR_UF_MASK, FFLAGS, MEPC, SATP, SEPC};
