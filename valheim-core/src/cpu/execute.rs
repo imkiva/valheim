@@ -356,7 +356,6 @@ impl RV64Cpu {
         let dividend = rs1.read(self) as i64;
         let divisor = rs2.read(self) as i64;
         let val = if divisor == 0 {
-          let _ = self.csrs.write_unchecked(FCSR, self.csrs.read_unchecked(FCSR) | FCSR_DZ_MASK);
           u64::MAX
         } else if dividend == i64::MIN && divisor == -1 {
           dividend as u64
@@ -369,7 +368,6 @@ impl RV64Cpu {
         let dividend = rs1.read(self);
         let divisor = rs2.read(self);
         let val = if divisor == 0 {
-          let _ = self.csrs.write_unchecked(FCSR, self.csrs.read_unchecked(FCSR) | FCSR_DZ_MASK);
           u64::MAX
         } else {
           dividend.wrapping_div(divisor)
@@ -408,7 +406,6 @@ impl RV64Cpu {
         let dividend = rs1.read(self) as i32;
         let divisor = rs2.read(self) as i32;
         let val = if divisor == 0 {
-          let _ = self.csrs.write_unchecked(FCSR, self.csrs.read_unchecked(FCSR) | FCSR_DZ_MASK);
           u64::MAX
         } else if dividend == i32::MIN && divisor == -1 {
           dividend as i64 as u64
@@ -421,7 +418,6 @@ impl RV64Cpu {
         let dividend = rs1.read(self) as u32;
         let divisor = rs2.read(self) as u32;
         let val = if divisor == 0 {
-          let _ = self.csrs.write_unchecked(FCSR, self.csrs.read_unchecked(FCSR) | FCSR_DZ_MASK);
           u64::MAX
         } else {
           sext_w!(dividend.wrapping_div(divisor))
