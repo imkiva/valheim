@@ -1,14 +1,16 @@
 #![allow(non_upper_case_globals)]
 
+use bytebuffer::{ByteBuffer, Endian};
+
 use crate::asm::encode16::Encode16;
 use crate::asm::encode32::Encode32;
 use crate::isa::data::Fin;
-use crate::isa::rv32::RV32Instr::*;
 use crate::isa::typed::Reg;
 
 pub mod encode32;
 pub mod encode16;
 pub mod traits;
+pub mod riscv;
 
 pub const zero: Reg = Reg::ZERO;
 pub const ra: Reg = Reg::X(Fin::new(1));
@@ -49,40 +51,53 @@ pub struct Offset(pub usize);
 #[derive(Debug, Clone)]
 pub struct Assembler {
   pub base: Offset,
-  pub code: Vec<u8>,
-  pub backfill: Vec<(usize, u32)>,
+  pub code: ByteBuffer,
 }
 
 #[derive(Debug, Clone)]
 pub struct Label {
+  /// The label position
   pub offset: Offset,
+  /// The label name, like `main`
   pub name: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum Compare {
+  EQ, NE, LT, GE, LTU, GEU,
+}
+
+/// Common assembler
 impl Assembler {
   pub fn new(base: usize) -> Assembler {
-    Assembler {
+    let mut asm = Assembler {
       base: Offset(base),
-      code: Vec::new(),
-      backfill: Vec::new(),
+      code: ByteBuffer::new(),
+    };
+    asm.code.set_endian(Endian::LittleEndian);
+    asm
+  }
+
+  pub fn current(&self) -> Offset {
+    Offset(self.code.get_wpos())
+  }
+
+  pub fn emit_label(&mut self) -> Label {
+    self.emit_label_named(None)
+  }
+
+  pub fn emit_label_named(&mut self, name: Option<String>) -> Label {
+    Label {
+      offset: self.current(),
+      name,
     }
   }
 
-  pub fn emit32<T: Encode32>(&mut self, _code: T) {}
-  pub fn emit16<T: Encode16>(&mut self, _code: T) {}
-
-  pub fn lui(&mut self, rd: Reg, imm: i32) {
-    self.emit32(LUI(rd.into(), imm.into()));
+  pub fn emit32<T: Encode32>(&mut self, code: T) {
+    self.code.write_u32(code.encode32());
   }
-}
 
-#[cfg(test)]
-mod test {
-  use super::*;
-
-  #[test]
-  fn test() {
-    let mut asm = Assembler::new(0x8000);
-    asm.lui(ra, 114514);
+  pub fn emit16<T: Encode16>(&mut self, code: T) {
+    self.code.write_u16(code.encode16());
   }
 }
