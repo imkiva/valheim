@@ -209,14 +209,14 @@ impl Encode32 for RV64Instr {
       RV64Instr::CSRRCI(rd, uimm, csr) => emit_i(0b1110011, 0b111, rd, Rs1(X(Fin::new(uimm.value()))), csr.value() as i32),
       // RV32/RV64 Zifencei
       RV64Instr::FENCE_I(rd, rs1, imm) => emit_i(0b0001111, 0b001, rd, rs1, imm.decode_sext()),
-      // RV32/64 Supervisor
-      RV64Instr::SRET => todo!(),
-      RV64Instr::MRET => todo!(),
-      RV64Instr::WFI => todo!(),
-      RV64Instr::SFENCE_VMA(_, _) => todo!(),
-      RV64Instr::SINVAL_VMA(_, _) => todo!(),
-      RV64Instr::SFENCE_W_INVAL => todo!(),
-      RV64Instr::SFENCE_INVAL_IR => todo!(),
+      // RV32/64 Privileged
+      RV64Instr::SRET => 0b0001000_00010_00000_000_00000_1110011,
+      RV64Instr::MRET => 0b0011000_00010_00000_000_00000_1110011,
+      RV64Instr::WFI => 0b0001000_00010_00000_000_00000_1110011,
+      RV64Instr::SFENCE_VMA(rs1, rs2) => emit_r(0b1110011, 0b0001001, 0b000, Rd(ZERO), rs1, rs2),
+      RV64Instr::SINVAL_VMA(rs1, rs2) => emit_r(0b1110011, 0b0001011, 0b000, Rd(ZERO), rs1, rs2),
+      RV64Instr::SFENCE_W_INVAL =>  0b0001100_00000_00000_000_00000_1110011,
+      RV64Instr::SFENCE_INVAL_IR => 0b0001100_00001_00000_000_00000_1110011,
     }
   }
 }
