@@ -218,9 +218,9 @@ macro_rules! fence {
     let f = $untyped.fence();
     let rd = Rd($reg(f.rd()));
     let rs1 = Rs1($reg(f.rs1()));
-    let succ = FenceSucc(Fin::new(f.succ() as u32));
-    let pred = FencePred(Fin::new(f.pred() as u32));
-    let fm = FenceFm(Fin::new(f.fm() as u32));
+    let succ = FenceSucc(f.succ() as u32);
+    let pred = FencePred(f.pred() as u32);
+    let fm = FenceFm(f.fm() as u32);
     $type!($opcode, rd, rs1, succ, pred, fm)
   }};
 }

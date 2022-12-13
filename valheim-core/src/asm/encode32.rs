@@ -2,7 +2,7 @@ use crate::isa::data::Fin;
 use crate::isa::rv32::RV32Instr;
 use crate::isa::rv64::RV64Instr;
 use crate::isa::typed::{Instr, Rd, Reg, RoundingMode, Rs1, Rs2, Rs3};
-use crate::isa::typed::Reg::{X, ZERO, F, FCSR, PC};
+use crate::isa::typed::Reg::{F, FCSR, PC, X, ZERO};
 
 pub trait Encode32 {
   fn encode32(self) -> u32;
@@ -59,12 +59,19 @@ impl Encode32 for RV32Instr {
       RV32Instr::SRA(rd, rs1, rs2) => emit_r_type(0b0110011, 0b0100000, 0b101, rd, rs1, rs2),
       RV32Instr::OR(rd, rs1, rs2) => emit_r_type(0b0110011, 0b0000000, 0b110, rd, rs1, rs2),
       RV32Instr::AND(rd, rs1, rs2) => emit_r_type(0b0110011, 0b0000000, 0b111, rd, rs1, rs2),
-
-      RV32Instr::FENCE(_, _, _, _, _) => todo!(),
-      RV32Instr::FENCE_TSO => todo!(),
-      RV32Instr::PAUSE => todo!(),
-      RV32Instr::ECALL => todo!(),
-      RV32Instr::EBREAK => todo!(),
+      RV32Instr::FENCE(rd, rs1, succ, pred, fm) => {
+        // 31:28 = fm, 27:24 = pred, 23:20 = succ, 19:15 = rs1, 14:12 = 0b000, 11:7 = rd, 6:0 = opcode
+        0b0001111
+          | ((rd.encode32() & 0b11111) << 7)
+          | ((rs1.encode32() & 0b11111) << 15)
+          | ((succ.0 & 0b1111) << 20)
+          | ((pred.0 & 0b1111) << 24)
+          | ((fm.0 & 0b1111) << 28)
+      }
+      RV32Instr::FENCE_TSO => 0b1000_0011_0011_00000_000_00000_0001111,
+      RV32Instr::PAUSE => 0b0000_0001_0000_00000_000_00000_0001111,
+      RV32Instr::ECALL => 0b000000000000_00000_000_00000_1110011,
+      RV32Instr::EBREAK => 0b000000000001_00000_000_00000_1110011,
       // RVM
       RV32Instr::MUL(rd, rs1, rs2) => emit_r_type(0b0110011, 0b0000001, 0b000, rd, rs1, rs2),
       RV32Instr::MULH(rd, rs1, rs2) => emit_r_type(0b0110011, 0b0000001, 0b001, rd, rs1, rs2),
@@ -151,9 +158,9 @@ impl Encode32 for RV64Instr {
       RV64Instr::LWU(rd, rs1, imm) => emit_i_type(0b0000011, 0b110, rd, rs1, imm.decode_sext()),
       RV64Instr::LD(rd, rs1, imm) => emit_i_type(0b0000011, 0b011, rd, rs1, imm.decode_sext()),
       RV64Instr::SD(rs1, rs2, imm) => emit_s_type(0b0100011, 0b011, rs1, rs2, imm.decode_sext()),
-      RV64Instr::SLLI(_, _, _) => todo!(),
-      RV64Instr::SRLI(_, _, _) => todo!(),
-      RV64Instr::SRAI(_, _, _) => todo!(),
+      RV64Instr::SLLI(rd, rs1, shamt6) => emit_r_shamt6_type(0b0010011, 0b000000, 0b001, rd, rs1, shamt6.0 as u32),
+      RV64Instr::SRLI(rd, rs1, shamt6) => emit_r_shamt6_type(0b0010011, 0b000000, 0b101, rd, rs1, shamt6.0 as u32),
+      RV64Instr::SRAI(rd, rs1, shamt6) => emit_r_shamt6_type(0b0010011, 0b010000, 0b101, rd, rs1, shamt6.0 as u32),
       RV64Instr::ADDIW(rd, rs1, imm) => emit_i_type(0b0011011, 0b000, rd, rs1, imm.decode_sext()),
       RV64Instr::SLLIW(rd, rs1, shamt5) => emit_r_type(0b0011011, 0b0000000, 0b001, rd, rs1, Rs2(X(Fin::new(shamt5.0 as u32)))),
       RV64Instr::SRLIW(rd, rs1, shamt5) => emit_r_type(0b0011011, 0b0000000, 0b101, rd, rs1, Rs2(X(Fin::new(shamt5.0 as u32)))),
@@ -194,13 +201,15 @@ impl Encode32 for RV64Instr {
       RV64Instr::FCVT_D_LU(rd, rs1, rm) => emit_r_type(0b1010011, 0b1101001, rm.encode32(), rd, rs1, Rs2(X(Fin::new(0b00011)))),
       RV64Instr::FMV_D_X(_, _) => todo!(),
       // RV32/RV64 Zicsr
-      RV64Instr::CSRRW(_, _, _) => todo!(),
-      RV64Instr::CSRRS(_, _, _) => todo!(),
-      RV64Instr::CSRRC(_, _, _) => todo!(),
-      RV64Instr::CSRRWI(_, _, _) => todo!(),
-      RV64Instr::CSRRSI(_, _, _) => todo!(),
-      RV64Instr::CSRRCI(_, _, _) => todo!(),
-      RV64Instr::FENCE_I(_, _, _) => todo!(),
+      RV64Instr::CSRRW(rd, rs1, csr) => emit_i_type(0b1110011, 0b001, rd, rs1, csr.value() as i32),
+      RV64Instr::CSRRS(rd, rs1, csr) => emit_i_type(0b1110011, 0b010, rd, rs1, csr.value() as i32),
+      RV64Instr::CSRRC(rd, rs1, csr) => emit_i_type(0b1110011, 0b011, rd, rs1, csr.value() as i32),
+      RV64Instr::CSRRWI(rd, uimm, csr) => emit_i_type(0b1110011, 0b101, rd, Rs1(X(Fin::new(uimm.value()))), csr.value() as i32),
+      RV64Instr::CSRRSI(rd, uimm, csr) => emit_i_type(0b1110011, 0b110, rd, Rs1(X(Fin::new(uimm.value()))), csr.value() as i32),
+      RV64Instr::CSRRCI(rd, uimm, csr) => emit_i_type(0b1110011, 0b111, rd, Rs1(X(Fin::new(uimm.value()))), csr.value() as i32),
+      // RV32/RV64 Zifencei
+      RV64Instr::FENCE_I(rd, rs1, imm) => emit_i_type(0b0001111, 0b001, rd, rs1, imm.decode_sext()),
+      // RV32/64 Supervisor
       RV64Instr::SRET => todo!(),
       RV64Instr::MRET => todo!(),
       RV64Instr::WFI => todo!(),
@@ -272,6 +281,17 @@ fn emit_r_type(opcode: u32, funct7: u32, funct3: u32, rd: Rd, rs1: Rs1, rs2: Rs2
     | ((rs1.encode32() & 0b11111) << 15)
     | ((rs2.encode32() & 0b11111) << 20)
     | ((funct7 & 0b1111111) << 25)
+}
+
+/// Convert RISC-V R-type (shamt 6, used by RV64I: SLLI, SRLI, SRAI) to u32
+fn emit_r_shamt6_type(opcode: u32, funct6: u32, funct3: u32, rd: Rd, rs1: Rs1, shamt6: u32) -> u32 {
+  // 31:26 = funct6, 25:20 = shamt6, 19:15 = rs1, 14:12 = funct3, 11:7 = rd, 6:0 = opcode
+  (opcode & 0b1111111)
+    | ((rd.encode32() & 0b11111) << 7)
+    | ((funct3 & 0b111) << 12)
+    | ((rs1.encode32() & 0b11111) << 15)
+    | ((shamt6 & 0b111111) << 20)
+    | ((funct6 & 0b111111) << 26)
 }
 
 /// Convert RISC-V I-type instruction to u32
