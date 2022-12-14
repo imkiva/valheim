@@ -15,6 +15,7 @@ pub mod csr;
 pub mod data;
 pub mod irq;
 pub mod mmu;
+pub mod test;
 
 #[derive(Debug)]
 pub struct RV64Cpu {
