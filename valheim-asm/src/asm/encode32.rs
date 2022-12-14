@@ -196,7 +196,7 @@ impl Encode32 for RV64Instr {
       // RV64D
       RV64Instr::FCVT_L_D(rd, rs1, rm) => emit_r(0b1010011, 0b1100001, rm.encode32(), rd, rs1, Rs2(X(Fin::new(0b00010)))),
       RV64Instr::FCVT_LU_D(rd, rs1, rm) => emit_r(0b1010011, 0b1100001, rm.encode32(), rd, rs1, Rs2(X(Fin::new(0b00011)))),
-      RV64Instr::FMV_X_D(rd, rs1) => emit_r(0b1010011, 0b1111001, 0b000, rd, rs1, Rs2(ZERO)),
+      RV64Instr::FMV_X_D(rd, rs1) => emit_r(0b1010011, 0b1110001, 0b000, rd, rs1, Rs2(ZERO)),
       RV64Instr::FCVT_D_L(rd, rs1, rm) => emit_r(0b1010011, 0b1101001, rm.encode32(), rd, rs1, Rs2(X(Fin::new(0b00010)))),
       RV64Instr::FCVT_D_LU(rd, rs1, rm) => emit_r(0b1010011, 0b1101001, rm.encode32(), rd, rs1, Rs2(X(Fin::new(0b00011)))),
       RV64Instr::FMV_D_X(rd, rs1) => emit_r(0b1010011, 0b1111001, 0b000, rd, rs1, Rs2(ZERO)),
