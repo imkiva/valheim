@@ -29,6 +29,13 @@ mod fcvt {
         APFloat::D(d) => f64::from_bits(d.to_bits() as u64),
       }
     }
+
+    pub fn is_float(&self) -> bool {
+      match self {
+        APFloat::S(_) => true,
+        APFloat::D(_) => false,
+      }
+    }
   }
 
   pub fn they_are_inverse(f: Reg, x: Reg, f2i: Instr, i2f: Instr, data: APFloat) {
