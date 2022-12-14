@@ -36,18 +36,10 @@ mod fcvt {
     let data = data.to_f64();
     cpu.regs.write_fp(f, data);
     // convert float to int
-    println!("Before execution");
-    cpu.regs.show_one_status(1);
     cpu.execute(VirtAddr(0), f2i, false).unwrap();
-    println!("After execution");
-    cpu.regs.show_one_status(1);
     assert_eq!(data as i64, cpu.regs.read(x).unwrap() as i64);
     // convert int back to float (with floating point part removed)
-    println!("Before execution");
-    cpu.regs.show_one_status(1);
     cpu.execute(VirtAddr(0), i2f, false).unwrap();
-    println!("After execution");
-    cpu.regs.show_one_status(1);
     assert_eq!(data as i64 as f64, cpu.regs.read_fp(f).unwrap());
   }
 
@@ -66,7 +58,7 @@ mod fcvt {
     for (f2i, i2f, data) in tests {
       println!("f2i: {:?}, asm = {:#10X}", f2i, f2i.encode32());
       println!("i2f: {:?}, asm = {:#10X}", i2f, i2f.encode32());
-      // they_are_inverse(f, x, f2i, i2f, data);
+      they_are_inverse(f, x, f2i, i2f, data);
       println!("==============================================")
     }
   }
