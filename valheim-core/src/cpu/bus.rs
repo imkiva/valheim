@@ -153,7 +153,7 @@ impl Bus {
       1 => (unsafe { *std::mem::transmute::<*const T, *const u8>(&val as *const T) }) as u64,
       2 => (unsafe { *std::mem::transmute::<*const T, *const u16>(&val as *const T) }) as u64,
       4 => (unsafe { *std::mem::transmute::<*const T, *const u32>(&val as *const T) }) as u64,
-      8 => (unsafe { *std::mem::transmute::<*const T, *const u64>(&val as *const T) }),
+      8 => (unsafe { *std::mem::transmute::<*const T, *const u64>(&val as *const T) }) as u64,
       _ => panic!("Invalid size for CanIO trait"),
     }
   }
