@@ -1,3 +1,4 @@
+use std::collections::hash_map::Entry;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::Instant;
 
@@ -10,7 +11,9 @@ use valheim_core::memory::VirtAddr;
 
 use crate::block::{BlockBuild, FallbackKind, GuestBlock, GuestInst, MAX_BLOCK_LEN};
 use crate::cranelift::{CompiledBlock, CraneliftBackend, JitError, JitFrame};
-use crate::memory::{exception_from_frame, is_slow_memory_exit, SoftwareTlb};
+use crate::memory::{
+  exception_from_frame, is_deferred_memory_exit, is_slow_memory_exit, SoftwareTlb,
+};
 
 const DEFAULT_HOT_THRESHOLD: u32 = 500;
 // Keep one Cranelift module comfortably below the x86-64 PLT/GOT ±2 GiB relocation limit. The
@@ -63,6 +66,7 @@ impl TlbContext {
 
 struct CachedBlock {
   block: GuestBlock,
+  chainable: bool,
   executions: u32,
   compiled: Option<CompiledBlock>,
   compile_failed: bool,
@@ -173,6 +177,24 @@ impl FastCache {
   }
 }
 
+#[derive(Debug)]
+struct ExecuteOne {
+  outcome: ExecOutcome,
+  can_chain: bool,
+}
+
+impl ExecuteOne {
+  fn stop(outcome: ExecOutcome) -> Self {
+    Self { outcome, can_chain: false }
+  }
+}
+
+struct NativeExecution {
+  outcome: ExecOutcome,
+  pending: Option<GuestInst>,
+  completed_block: bool,
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct JitStats {
   pub hot_threshold: u32,
@@ -221,7 +243,9 @@ pub struct JitExecutor {
   cache: FxHashMap<TbKey, CacheEntry>,
   blocks: Vec<CachedBlock>,
   fast_cache: FastCache,
-  pending_slow_memory: FxHashMap<TbKey, GuestInst>,
+  // Usually empty. A small vector avoids a hash on every TB while still allowing an interrupt
+  // handler to create its own deferred MMIO instruction before an older one resumes.
+  pending_slow_memory: Vec<(TbKey, GuestInst)>,
   hot_threshold: u32,
   max_block_len: usize,
   max_compiled_blocks: usize,
@@ -247,7 +271,7 @@ impl JitExecutor {
       cache: FxHashMap::default(),
       blocks: Vec::new(),
       fast_cache: FastCache::new(),
-      pending_slow_memory: FxHashMap::default(),
+      pending_slow_memory: Vec::new(),
       hot_threshold: DEFAULT_HOT_THRESHOLD,
       max_block_len: MAX_BLOCK_LEN,
       max_compiled_blocks: DEFAULT_MAX_COMPILED_BLOCKS,
@@ -421,18 +445,34 @@ impl JitExecutor {
     cpu: &mut RV64Cpu,
     block: &GuestBlock,
     compiled: CompiledBlock,
-  ) -> (ExecOutcome, Option<GuestInst>) {
+    defer_first_slow: bool,
+  ) -> NativeExecution {
     let xregs = cpu.regs.x.as_mut_ptr();
     let load_tlb = tlb.load_ptr();
     let store_tlb = tlb.store_ptr();
     let tlb_generation = tlb.generation();
     let tlb_stats = tlb.stats_ptr();
     let mut frame = JitFrame::new(cpu, xregs, load_tlb, store_tlb, tlb_generation, tlb_stats);
+    frame.defer_first_memory = defer_first_slow as u32;
     let attempted = unsafe { (compiled.entry)(&mut frame) };
     if let Some(exception) = exception_from_frame(&frame) {
       cpu.write_pc(VirtAddr(frame.fault_pc));
       cpu.instr = frame.raw_instr as u64;
-      return (ExecOutcome::new(attempted, Err(exception)), None);
+      return NativeExecution {
+        outcome: ExecOutcome::new(attempted, Err(exception)),
+        pending: None,
+        completed_block: false,
+      };
+    }
+    if is_deferred_memory_exit(&frame) {
+      debug_assert_eq!(attempted, 1);
+      debug_assert_eq!(block.instructions[0].pc, frame.fault_pc);
+      cpu.write_pc(VirtAddr(frame.fault_pc));
+      return NativeExecution {
+        outcome: ExecOutcome::new(0, Ok(())),
+        pending: None,
+        completed_block: false,
+      };
     }
     if is_slow_memory_exit(&frame) {
       let index = attempted
@@ -441,57 +481,109 @@ impl JitExecutor {
       let inst = block.instructions[index as usize];
       debug_assert_eq!(inst.pc, frame.fault_pc);
       cpu.write_pc(VirtAddr(frame.fault_pc));
-      cpu.instr = frame.raw_instr as u64;
       if index != 0 {
         cpu.instr = block.instructions[index as usize - 1].raw as u64;
-        return (ExecOutcome::new(index, Ok(())), Some(inst));
+        return NativeExecution {
+          outcome: ExecOutcome::new(index, Ok(())),
+          pending: Some(inst),
+          completed_block: false,
+        };
       }
+      if defer_first_slow {
+        return NativeExecution {
+          outcome: ExecOutcome::new(0, Ok(())),
+          pending: Some(inst),
+          completed_block: false,
+        };
+      }
+      cpu.instr = frame.raw_instr as u64;
       let result = cpu.execute(VirtAddr(inst.pc), inst.decoded, inst.len == 2);
-      return (ExecOutcome::new(attempted, result), None);
+      return NativeExecution {
+        outcome: ExecOutcome::new(attempted, result),
+        pending: None,
+        completed_block: false,
+      };
     }
     cpu.write_pc(VirtAddr(frame.next_pc));
     if attempted != 0 {
       cpu.instr = block.instructions[attempted as usize - 1].raw as u64;
     }
-    (ExecOutcome::new(attempted, Ok(())), None)
+    NativeExecution {
+      outcome: ExecOutcome::new(attempted, Ok(())),
+      pending: None,
+      completed_block: true,
+    }
   }
 
   fn fallback_one(
-    &mut self,
+    naive: &mut NaiveInterpreter,
+    stats: &mut JitStats,
+    stats_enabled: bool,
     cpu: &mut RV64Cpu,
     budget: u32,
     kind: FallbackKind,
   ) -> ExecOutcome {
-    if self.stats_enabled {
-      self.stats.fallback_instructions += 1;
+    if stats_enabled {
+      stats.fallback_instructions += 1;
       match kind {
-        FallbackKind::System => self.stats.fallback_system += 1,
-        FallbackKind::FloatingPoint => self.stats.fallback_floating_point += 1,
-        FallbackKind::Other => self.stats.fallback_other += 1,
+        FallbackKind::System => stats.fallback_system += 1,
+        FallbackKind::FloatingPoint => stats.fallback_floating_point += 1,
+        FallbackKind::Other => stats.fallback_other += 1,
       }
     }
-    self.naive.execute(cpu, budget.min(1))
+    naive.execute(cpu, budget.min(1))
+  }
+
+  fn remember_slow_memory(&mut self, cpu: &RV64Cpu, inst: GuestInst) {
+    let pending_key = TbKey::new(cpu);
+    if let Some((_, old)) = self
+      .pending_slow_memory
+      .iter_mut()
+      .find(|(key, _)| *key == pending_key)
+    {
+      *old = inst;
+    } else {
+      self.pending_slow_memory.push((pending_key, inst));
+    }
   }
 }
 
 impl JitExecutor {
-  fn execute_one(&mut self, cpu: &mut RV64Cpu, budget: u32) -> ExecOutcome {
+  fn execute_one(
+    &mut self,
+    cpu: &mut RV64Cpu,
+    budget: u32,
+    native_only: bool,
+  ) -> ExecuteOne {
     if budget == 0 || cpu.wfi {
-      return ExecOutcome::new(0, Ok(()));
+      return ExecuteOne::stop(ExecOutcome::new(0, Ok(())));
     }
 
     self.invalidate_changed_epochs(cpu);
     self.sync_tlb_context(cpu);
     self.rotate_code_cache_if_needed();
     let key = TbKey::new(cpu);
-    if let Some(inst) = self.pending_slow_memory.remove(&key) {
+
+    let pending_index = if self.pending_slow_memory.is_empty() {
+      None
+    } else {
+      self
+        .pending_slow_memory
+        .iter()
+        .position(|(pending_key, _)| *pending_key == key)
+    };
+    if let Some(index) = pending_index {
+      if native_only {
+        return ExecuteOne::stop(ExecOutcome::new(0, Ok(())));
+      }
+      let (_, inst) = self.pending_slow_memory.swap_remove(index);
       if self.stats_enabled {
         self.stats.fallback_instructions += 1;
         self.stats.fallback_memory += 1;
       }
       cpu.instr = inst.raw as u64;
       let result = cpu.execute(VirtAddr(inst.pc), inst.decoded, inst.len == 2);
-      return ExecOutcome::new(1, result);
+      return ExecuteOne::stop(ExecOutcome::new(1, result));
     }
 
     if let Some(block_index) = self.fast_cache.lookup(key) {
@@ -499,87 +591,150 @@ impl JitExecutor {
         .blocks
         .get(block_index)
         .expect("fast-cache block index outlived its arena");
-      if cached.block.instructions.len() <= budget as usize {
+      let block_len = cached.block.instructions.len();
+      if block_len <= budget as usize {
         if self.stats_enabled {
           self.stats.cache_hits += 1;
-          self.stats.native_executions += 1;
+        }
+        if native_only && !cached.chainable {
+          return ExecuteOne::stop(ExecOutcome::new(0, Ok(())));
         }
         let compiled = cached
           .compiled
           .expect("fast cache must only contain compiled blocks");
-        let (outcome, pending) =
-          Self::execute_native(&mut self.tlb, cpu, &cached.block, compiled);
-        if let Some(inst) = pending {
-          self.pending_slow_memory.insert(TbKey::new(cpu), inst);
+        let chainable = cached.chainable;
+        if self.stats_enabled {
+          self.stats.native_executions += 1;
         }
-        return outcome;
+        let native = Self::execute_native(
+          &mut self.tlb,
+          cpu,
+          &cached.block,
+          compiled,
+          native_only,
+        );
+        if let Some(inst) = native.pending {
+          self.remember_slow_memory(cpu, inst);
+        }
+        return ExecuteOne {
+          outcome: native.outcome,
+          can_chain: native.completed_block && chainable,
+        };
+      }
+      if native_only {
+        if self.stats_enabled {
+          self.stats.cache_hits += 1;
+        }
+        return ExecuteOne::stop(ExecOutcome::new(0, Ok(())));
       }
     }
 
     let mut rotate_after_panic = false;
     let outcome = {
-      let block_index = match self.cache.get(&key).copied() {
-        Some(CacheEntry::Block(block_index)) => {
+      let block_index = match self.cache.entry(key) {
+        Entry::Occupied(entry) => {
           if self.stats_enabled {
             self.stats.cache_hits += 1;
           }
-          block_index
-        }
-        Some(CacheEntry::Fallback(kind)) => {
-          if self.stats_enabled {
-            self.stats.cache_hits += 1;
-            self.stats.negative_cache_hits += 1;
+          match *entry.get() {
+            CacheEntry::Block(block_index) => block_index,
+            CacheEntry::Fallback(kind) => {
+              if native_only {
+                return ExecuteOne::stop(ExecOutcome::new(0, Ok(())));
+              }
+              if self.stats_enabled {
+                self.stats.negative_cache_hits += 1;
+              }
+              return ExecuteOne::stop(Self::fallback_one(
+                &mut self.naive,
+                &mut self.stats,
+                self.stats_enabled,
+                cpu,
+                budget,
+                kind,
+              ));
+            }
           }
-          return self.fallback_one(cpu, budget, kind);
         }
-        None => {
+        Entry::Vacant(entry) => {
+          if native_only {
+            return ExecuteOne::stop(ExecOutcome::new(0, Ok(())));
+          }
           if self.stats_enabled {
             self.stats.cache_misses += 1;
           }
           match GuestBlock::translate(cpu, self.max_block_len) {
             BlockBuild::Block(block) => {
+              let chainable = block
+                .instructions
+                .iter()
+                .all(|inst| inst.len != 4 || inst.raw & 0x7f != 0x2f);
               let block_index = self.blocks.len();
               self.blocks.push(CachedBlock {
                 block,
+                chainable,
                 executions: 0,
                 compiled: None,
                 compile_failed: false,
               });
-              self.cache.insert(key, CacheEntry::Block(block_index));
+              entry.insert(CacheEntry::Block(block_index));
               block_index
             }
             BlockBuild::InterpretOne(kind) => {
-              self.cache.insert(key, CacheEntry::Fallback(kind));
+              entry.insert(CacheEntry::Fallback(kind));
               if self.stats_enabled {
                 self.stats.negative_blocks += 1;
               }
-              return self.fallback_one(cpu, budget, kind);
+              return ExecuteOne::stop(Self::fallback_one(
+                &mut self.naive,
+                &mut self.stats,
+                self.stats_enabled,
+                cpu,
+                budget,
+                kind,
+              ));
             }
             BlockBuild::Fault { raw, exception } => {
               if let Some(raw) = raw {
                 cpu.instr = raw as u64;
               }
-              return ExecOutcome::new(1, Err(exception));
+              return ExecuteOne::stop(ExecOutcome::new(1, Err(exception)));
             }
           }
         }
       };
-
       let cached = &mut self.blocks[block_index];
+
       let block_len = cached.block.instructions.len();
       if let Some(compiled) = cached.compiled {
         self.fast_cache.insert(key, block_index);
         if block_len <= budget as usize {
+          let chainable = cached.chainable;
+          if native_only && !chainable {
+            return ExecuteOne::stop(ExecOutcome::new(0, Ok(())));
+          }
           if self.stats_enabled {
             self.stats.native_executions += 1;
           }
-          let (outcome, pending) =
-            Self::execute_native(&mut self.tlb, cpu, &cached.block, compiled);
-          if let Some(inst) = pending {
-            self.pending_slow_memory.insert(TbKey::new(cpu), inst);
+          let native = Self::execute_native(
+            &mut self.tlb,
+            cpu,
+            &cached.block,
+            compiled,
+            native_only,
+          );
+          if let Some(inst) = native.pending {
+            self.remember_slow_memory(cpu, inst);
           }
-          return outcome;
+          return ExecuteOne {
+            outcome: native.outcome,
+            can_chain: native.completed_block && chainable,
+          };
         }
+      }
+
+      if native_only {
+        return ExecuteOne::stop(ExecOutcome::new(0, Ok(())));
       }
 
       if self.stats_enabled {
@@ -621,6 +776,8 @@ impl JitExecutor {
             }
           }
           Err(_) => {
+            // A Cranelift allocator/relocation panic must not terminate the guest. Drop all native
+            // pointers at this dispatcher safe point and continue with decoded execution.
             if self.stats_enabled {
               self.stats.compile_failures += 1;
             }
@@ -635,7 +792,7 @@ impl JitExecutor {
         }
       }
 
-      outcome
+      ExecuteOne::stop(outcome)
     };
 
     if rotate_after_panic {
@@ -659,7 +816,24 @@ impl RV64Executor for JitExecutor {
       return ExecOutcome::new(0, Ok(()));
     }
 
-    let outcome = self.execute_one(cpu, budget);
+    let mut attempted = 0;
+    let result = loop {
+      let step = self.execute_one(cpu, budget - attempted, attempted != 0);
+      attempted += step.outcome.attempted;
+      match step.outcome.result {
+        Err(exception) => break Err(exception),
+        Ok(())
+          if step.outcome.attempted == 0
+            || !step.can_chain
+            || attempted == budget
+            || cpu.wfi =>
+        {
+          break Ok(())
+        }
+        Ok(()) => (),
+      }
+    };
+    let outcome = ExecOutcome::new(attempted, result);
     if self.stats_enabled {
       self.stats.guest_instructions = self
         .stats
@@ -690,7 +864,7 @@ mod tests {
   use valheim_core::cpu::bus::{RV64_MEMORY_BASE, RV64_MEMORY_END, VIRT_MROM_BASE};
   use valheim_core::cpu::irq::Exception;
   use valheim_core::cpu::mmu::{
-    PAGE_SHIFT, PTE_A, PTE_R, PTE_V, PTE_X, SATP64_MODE_SHIFT, VMMode,
+    PAGE_SHIFT, PTE_A, PTE_D, PTE_R, PTE_V, PTE_W, PTE_X, SATP64_MODE_SHIFT, VMMode,
   };
   use valheim_core::cpu::PrivilegeMode;
 
@@ -735,6 +909,14 @@ mod tests {
       )
       .unwrap();
     cpu.sync_pagetable();
+  }
+
+  fn jal_x0(offset: i32) -> u32 {
+    RV32Instr::JAL(
+      Rd(Reg::ZERO),
+      Imm32::<20, 1>::from((offset >> 1) as u32),
+    )
+    .encode32()
   }
 
   #[test]
@@ -832,6 +1014,89 @@ mod tests {
     assert_eq!(jit.stats().dispatches, 1);
     assert_eq!(jit.stats().guest_instructions, 2);
     assert_eq!(jit.stats().native_executions, 0);
+  }
+
+  #[test]
+  fn hot_native_loop_batches_multiple_basic_blocks_within_the_budget() {
+    let mut cpu = RV64Cpu::new(None);
+    let pc = VirtAddr(RV64_MEMORY_BASE);
+    let x1 = Reg::X(Fin::new(1));
+    cpu.bus.write::<u32>(pc, 0x0010_8093).unwrap(); // addi x1, x1, 1
+    cpu
+      .bus
+      .write::<u32>(pc + VirtAddr(4), 0xffdff06f)
+      .unwrap(); // jal x0, -4
+    cpu.write_pc(pc);
+    let mut jit = JitExecutor::new().unwrap().with_hot_threshold(1);
+
+    assert_eq!(jit.execute(&mut cpu, 2), ExecOutcome::new(2, Ok(())));
+    assert_eq!(jit.execute(&mut cpu, 6), ExecOutcome::new(6, Ok(())));
+
+    assert_eq!(cpu.read_reg(x1), Some(4));
+    assert_eq!(cpu.read_pc(), pc);
+    assert_eq!(jit.stats().dispatches, 2);
+    assert_eq!(jit.stats().native_executions, 3);
+    assert_eq!(jit.stats().guest_instructions, 8);
+  }
+
+  #[test]
+  fn native_batch_stops_before_a_cached_system_fallback() {
+    let mut cpu = RV64Cpu::new(None);
+    let source = VirtAddr(RV64_MEMORY_BASE);
+    let target = source + VirtAddr(0x100);
+    let jump = jal_x0((target.0 - source.0) as i32);
+    cpu.bus.write::<u32>(source, jump).unwrap();
+    cpu.bus.write::<u32>(target, 0x0000_0073).unwrap(); // ecall
+    let mut jit = JitExecutor::new().unwrap().with_hot_threshold(1);
+
+    cpu.write_pc(target);
+    assert_eq!(
+      jit.execute(&mut cpu, 1),
+      ExecOutcome::new(1, Err(Exception::MachineEcall))
+    );
+    cpu.write_pc(source);
+    assert_eq!(jit.execute(&mut cpu, 1), ExecOutcome::new(1, Ok(())));
+
+    cpu.write_pc(source);
+    assert_eq!(jit.execute(&mut cpu, 32), ExecOutcome::new(1, Ok(())));
+    assert_eq!(cpu.read_pc(), target);
+    assert_eq!(cpu.instr, jump as u64);
+    assert_eq!(
+      jit.execute(&mut cpu, 32),
+      ExecOutcome::new(1, Err(Exception::MachineEcall))
+    );
+  }
+
+  #[test]
+  fn native_batch_stops_before_an_atomic_target() {
+    let mut cpu = RV64Cpu::new(None);
+    let target = VirtAddr(RV64_MEMORY_BASE);
+    let source = target + VirtAddr(0x100);
+    let data = target + VirtAddr(0x200);
+    let x = |index| Reg::X(Fin::new(index));
+    let amoadd =
+      RV64Instr::AMOADD_D(Rd(x(3)), Rs1(x(1)), Rs2(x(2)), AQ(false), RL(false)).encode32();
+    let jump = jal_x0((target.0 as i64 - source.0 as i64) as i32);
+    cpu.bus.write::<u32>(target, amoadd).unwrap();
+    cpu.bus.write::<u32>(source, jump).unwrap();
+    cpu.write_reg(x(1), data.0);
+    cpu.write_reg(x(2), 7);
+    let mut jit = JitExecutor::new().unwrap().with_hot_threshold(1);
+
+    cpu.bus.write::<u64>(data, 5).unwrap();
+    cpu.write_pc(target);
+    assert_eq!(jit.execute(&mut cpu, 1), ExecOutcome::new(1, Ok(())));
+    cpu.write_pc(source);
+    assert_eq!(jit.execute(&mut cpu, 1), ExecOutcome::new(1, Ok(())));
+
+    cpu.bus.write::<u64>(data, 10).unwrap();
+    cpu.write_pc(source);
+    assert_eq!(jit.execute(&mut cpu, 32), ExecOutcome::new(1, Ok(())));
+    assert_eq!(cpu.read_pc(), target);
+    assert_eq!(cpu.bus.read::<u64>(data), Ok(10));
+
+    assert_eq!(jit.execute(&mut cpu, 32), ExecOutcome::new(1, Ok(())));
+    assert_eq!(cpu.bus.read::<u64>(data), Ok(17));
   }
 
   #[test]
@@ -1266,5 +1531,104 @@ mod tests {
     assert_eq!(cpu.read_reg(x2), Some(0xfeed_face_cafe_beef));
     assert_eq!(cpu.read_pc(), pc + VirtAddr(8));
     assert_eq!(jit.stats().memory_slow_paths, 1);
+  }
+
+  #[test]
+  fn native_batch_defers_a_target_blocks_first_mmio_access() {
+    let mut cpu = RV64Cpu::new(None);
+    let target = VirtAddr(RV64_MEMORY_BASE);
+    let source = target + VirtAddr(0x100);
+    let valid = target + VirtAddr(0x200);
+    let mmio = VirtAddr(VIRT_MROM_BASE + 0x100);
+    let x1 = Reg::X(Fin::new(1));
+    let x2 = Reg::X(Fin::new(2));
+    let jump = jal_x0((target.0 as i64 - source.0 as i64) as i32);
+    cpu.bus.write::<u32>(target, 0x0000_b103).unwrap(); // ld x2, 0(x1)
+    cpu
+      .bus
+      .write::<u32>(target + VirtAddr(4), 0x0000_006f)
+      .unwrap();
+    cpu.bus.write::<u32>(source, jump).unwrap();
+    cpu.bus.write::<u64>(valid, 1).unwrap();
+    cpu.bus.write::<u64>(mmio, 0xfeed_face_cafe_beef).unwrap();
+    let mut jit = JitExecutor::new().unwrap().with_hot_threshold(1);
+
+    cpu.write_reg(x1, valid.0);
+    cpu.write_pc(target);
+    assert_eq!(jit.execute(&mut cpu, 2), ExecOutcome::new(2, Ok(())));
+    cpu.write_pc(source);
+    assert_eq!(jit.execute(&mut cpu, 1), ExecOutcome::new(1, Ok(())));
+
+    cpu.write_reg(x1, mmio.0);
+    cpu.write_pc(source);
+    assert_eq!(jit.execute(&mut cpu, 32), ExecOutcome::new(1, Ok(())));
+    assert_eq!(cpu.read_pc(), target);
+    assert_eq!(cpu.instr, jump as u64);
+    assert_eq!(cpu.read_reg(x2), Some(1));
+
+    assert_eq!(jit.execute(&mut cpu, 32), ExecOutcome::new(1, Ok(())));
+    assert_eq!(cpu.read_pc(), target + VirtAddr(4));
+    assert_eq!(cpu.read_reg(x2), Some(0xfeed_face_cafe_beef));
+    assert_eq!(jit.stats().memory_slow_paths, 1);
+  }
+
+  #[test]
+  fn native_batch_defers_first_tlb_miss_before_sv39_dirty_bit_update() {
+    const GUEST_CODE: VirtAddr = VirtAddr(0x1234_4000);
+    const GUEST_DATA: VirtAddr = VirtAddr(0x1234_5000);
+    const PHYSICAL_CODE: VirtAddr = VirtAddr(RV64_MEMORY_BASE + 0x4000);
+    const PHYSICAL_DATA: VirtAddr = VirtAddr(RV64_MEMORY_BASE + 0x5000);
+
+    let mut cpu = RV64Cpu::new(None);
+    let source = GUEST_CODE + VirtAddr(0x100);
+    let physical_source = PHYSICAL_CODE + VirtAddr(0x100);
+    let jump = jal_x0((GUEST_CODE.0 as i64 - source.0 as i64) as i32);
+    cpu
+      .bus
+      .write::<u32>(PHYSICAL_CODE, 0x0020_b023)
+      .unwrap(); // sd x2, 0(x1)
+    cpu.bus.write::<u32>(physical_source, jump).unwrap();
+
+    let code_flags = (1 << PTE_V) | (1 << PTE_X) | (1 << PTE_A);
+    let data_flags =
+      (1 << PTE_V) | (1 << PTE_R) | (1 << PTE_W) | (1 << PTE_A) | (1 << PTE_D);
+    install_sv39_mapping(&mut cpu, GUEST_CODE, PHYSICAL_CODE, code_flags);
+    let data_leaf = install_sv39_mapping(&mut cpu, GUEST_DATA, PHYSICAL_DATA, data_flags);
+    enable_sv39(&mut cpu);
+
+    let x1 = Reg::X(Fin::new(1));
+    let x2 = Reg::X(Fin::new(2));
+    cpu.write_reg(x1, GUEST_DATA.0);
+    cpu.write_reg(x2, 0x0123_4567_89ab_cdef);
+    let mut jit = JitExecutor::new()
+      .unwrap()
+      .with_hot_threshold(1)
+      .with_max_block_len(1);
+
+    cpu.write_pc(GUEST_CODE);
+    assert_eq!(jit.execute(&mut cpu, 1), ExecOutcome::new(1, Ok(())));
+    cpu.write_pc(source);
+    assert_eq!(jit.execute(&mut cpu, 1), ExecOutcome::new(1, Ok(())));
+
+    let mmio_pte = ((VIRT_MROM_BASE >> PAGE_SHIFT) << 10)
+      | (1 << PTE_V)
+      | (1 << PTE_R)
+      | (1 << PTE_W)
+      | (1 << PTE_A);
+    cpu.bus.write::<u64>(data_leaf, mmio_pte).unwrap();
+    cpu.write_pc(source);
+
+    assert_eq!(jit.execute(&mut cpu, 32), ExecOutcome::new(1, Ok(())));
+    assert_eq!(cpu.read_pc(), GUEST_CODE);
+    assert_eq!(cpu.instr, jump as u64);
+    assert_eq!(cpu.bus.read::<u64>(data_leaf).unwrap() & (1 << PTE_D), 0);
+
+    assert_eq!(jit.execute(&mut cpu, 32), ExecOutcome::new(1, Ok(())));
+    assert_eq!(cpu.read_pc(), GUEST_CODE + VirtAddr(4));
+    assert_ne!(cpu.bus.read::<u64>(data_leaf).unwrap() & (1 << PTE_D), 0);
+    assert_eq!(
+      cpu.bus.read::<u64>(VirtAddr(VIRT_MROM_BASE)),
+      Ok(0x0123_4567_89ab_cdef)
+    );
   }
 }

@@ -14,6 +14,7 @@ const FAULT_STORE_MISALIGNED: u32 = 4;
 const FAULT_LOAD_PAGE: u32 = 5;
 const FAULT_STORE_PAGE: u32 = 6;
 pub const EXIT_SLOW_MEMORY: u32 = 7;
+pub const EXIT_DEFER_MEMORY: u32 = 8;
 
 pub const TLB_ACCESS_READ: u32 = 0;
 pub const TLB_ACCESS_WRITE: u32 = 1;
@@ -206,11 +207,15 @@ pub fn exception_from_frame(frame: &JitFrame) -> Option<Exception> {
     FAULT_STORE_MISALIGNED => Some(Exception::StoreAddressMisaligned(address)),
     FAULT_LOAD_PAGE => Some(Exception::LoadPageFault(address)),
     FAULT_STORE_PAGE => Some(Exception::StorePageFault(address)),
-    EXIT_SLOW_MEMORY => None,
+    EXIT_SLOW_MEMORY | EXIT_DEFER_MEMORY => None,
     _ => Some(Exception::LoadAccessFault(address)),
   }
 }
 
 pub fn is_slow_memory_exit(frame: &JitFrame) -> bool {
   frame.exit_kind == EXIT_SLOW_MEMORY
+}
+
+pub fn is_deferred_memory_exit(frame: &JitFrame) -> bool {
+  frame.exit_kind == EXIT_DEFER_MEMORY
 }

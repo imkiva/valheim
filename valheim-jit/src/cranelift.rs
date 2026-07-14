@@ -17,8 +17,8 @@ use valheim_core::cpu::RV64Cpu;
 use crate::atomic::{jit_atomic, AtomicOp};
 use crate::block::{GuestBlock, GuestInst};
 use crate::memory::{
-  jit_tlb_fill, TlbEntry, TlbStats, EXIT_SLOW_MEMORY, FAULT_NONE, TLB_ACCESS_READ,
-  TLB_ACCESS_WRITE, TLB_INDEX_MASK, WIDTH_16, WIDTH_32, WIDTH_64, WIDTH_8,
+  jit_tlb_fill, TlbEntry, TlbStats, EXIT_DEFER_MEMORY, EXIT_SLOW_MEMORY, FAULT_NONE,
+  TLB_ACCESS_READ, TLB_ACCESS_WRITE, TLB_INDEX_MASK, WIDTH_16, WIDTH_32, WIDTH_64, WIDTH_8,
 };
 
 pub type BlockEntry = unsafe extern "C" fn(*mut JitFrame) -> u32;
@@ -33,6 +33,7 @@ pub struct JitFrame {
   pub raw_instr: u32,
   pub attempted: u32,
   pub exit_kind: u32,
+  pub defer_first_memory: u32,
   pub load_tlb: *mut TlbEntry,
   pub store_tlb: *mut TlbEntry,
   pub tlb_generation: u64,
@@ -58,6 +59,7 @@ impl JitFrame {
       raw_instr: 0,
       attempted: 0,
       exit_kind: 0,
+      defer_first_memory: 0,
       load_tlb,
       store_tlb,
       tlb_generation,
@@ -537,6 +539,29 @@ impl<'a, 'b> Lowering<'a, 'b> {
     self.builder.ins().jump(ready, &[host_page]);
 
     self.builder.switch_to_block(miss_block);
+    if attempted == 1 {
+      let defer = self.builder.ins().load(
+        types::I32,
+        self.frame_flags,
+        self.frame,
+        offset_of!(JitFrame, defer_first_memory) as i32,
+      );
+      let should_defer = self.builder.ins().icmp_imm(IntCC::NotEqual, defer, 0);
+      let defer_exit = self.builder.create_block();
+      let fill = self.builder.create_block();
+      self.builder.set_cold_block(defer_exit);
+      self
+        .builder
+        .ins()
+        .brif(should_defer, defer_exit, &[], fill, &[]);
+
+      self.builder.switch_to_block(defer_exit);
+      self.prepare_memory_access(inst, attempted);
+      self.store_frame_i32(offset_of!(JitFrame, exit_kind), EXIT_DEFER_MEMORY);
+      self.return_memory_exit(attempted);
+
+      self.builder.switch_to_block(fill);
+    }
     self.prepare_memory_access(inst, attempted);
     let access_value = self.builder.ins().iconst(types::I32, access as i64);
     let call = self
