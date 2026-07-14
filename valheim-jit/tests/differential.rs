@@ -430,10 +430,6 @@ fn wfi_is_woken_by_a_machine_timer_interrupt() {
   assert_eq!(machine.cpu.read_pc(), VirtAddr(PROGRAM_PC + 4));
   assert_eq!(machine.cpu.csrs.read_unchecked(TIME), 1);
 
-  assert!(machine.run_next());
-  assert!(machine.cpu.wfi);
-  assert_eq!(machine.cpu.csrs.read_unchecked(TIME), 2);
-
   assert!(!machine.run_next());
   assert!(!machine.cpu.wfi);
   assert_eq!(machine.cpu.read_pc(), VirtAddr(handler));

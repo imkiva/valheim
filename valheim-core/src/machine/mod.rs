@@ -8,6 +8,7 @@ use valheim_asm::isa::rv64::CSRAddr;
 use valheim_asm::isa::typed::{Imm32, Reg};
 
 use crate::cpu::bus::VIRT_MROM_BASE;
+use crate::cpu::csr::CSRMap::{MIE, MTIE_MASK};
 use crate::cpu::irq::Exception;
 use crate::cpu::RV64Cpu;
 use crate::device::ns16550a::Uart16550a;
@@ -102,6 +103,19 @@ impl Machine {
     if let Some(irq) = self.cpu.pending_interrupt() {
       // TODO: can IRQ fail to handle?
       let _ = irq.handle(&mut self.cpu);
+    }
+
+    // A waiting hart cannot make guest-visible progress before a locally enabled interrupt. Skip
+    // idle dispatches up to the next machine-timer deadline, then use the normal interrupt path so
+    // delegation, priority, trap CSRs, and WFI wakeup semantics remain centralized there. Polling
+    // pending interrupts both before and after the jump also preserves asynchronous device events.
+    if self.cpu.wfi && self.cpu.csrs.read_unchecked(MIE) & MTIE_MASK != 0 {
+      if let Some(ticks) = self.cpu.bus.clint.ticks_until_timer() {
+        self.cpu.bus.clint.advance(&mut self.cpu.csrs, ticks);
+        if let Some(irq) = self.cpu.pending_interrupt() {
+          let _ = irq.handle(&mut self.cpu);
+        }
+      }
     }
 
     let budget = self
@@ -226,7 +240,7 @@ mod tests {
 
   use super::*;
   use crate::cpu::bus::CLINT_BASE;
-  use crate::cpu::csr::CSRMap::TIME;
+  use crate::cpu::csr::CSRMap::{MCAUSE, MEPC, MSIE_MASK, MTVEC, TIME};
   use crate::interp::ExecOutcome;
 
   struct RecordingExecutor {
@@ -283,6 +297,111 @@ mod tests {
 
     assert_eq!(machine.dispatch_next(), Ok(()));
     assert_eq!(machine.cpu.csrs.read_unchecked(TIME), 2);
+    assert!(machine.cpu.wfi);
+  }
+
+  #[test]
+  fn waiting_hart_fast_forwards_to_an_enabled_timer_deadline() {
+    let budgets = Arc::new(Mutex::new(Vec::new()));
+    let executor = RecordingExecutor {
+      budgets: budgets.clone(),
+      attempted: 0,
+    };
+    let mut cpu = RV64Cpu::new(None);
+    cpu.wfi = true;
+    cpu.write_pc(VirtAddr(0x8000_0000));
+    cpu.csrs.write_unchecked(MTVEC, 0x8000_0100).unwrap();
+    cpu.csrs.write_unchecked(MIE, MTIE_MASK).unwrap();
+    cpu
+      .bus
+      .clint
+      .write::<u64>(VirtAddr(CLINT_BASE + 0x4000), 100)
+      .unwrap();
+    let mut machine = Machine {
+      cpu,
+      executor: Box::new(executor),
+    };
+
+    assert_eq!(machine.dispatch_next(), Ok(()));
+    assert_eq!(machine.cpu.csrs.read_unchecked(TIME), 100);
+    assert!(!machine.cpu.wfi);
+    assert_eq!(machine.cpu.read_pc(), VirtAddr(0x8000_0100));
+    assert_eq!(machine.cpu.csrs.read_unchecked(MEPC), 0x8000_0000);
+    assert_eq!(machine.cpu.csrs.read_unchecked(MCAUSE), (1_u64 << 63) | 7);
+    assert_eq!(&*budgets.lock().unwrap(), &[32]);
+  }
+
+  #[test]
+  fn waiting_hart_services_an_enabled_software_interrupt_before_the_timer() {
+    let budgets = Arc::new(Mutex::new(Vec::new()));
+    let executor = RecordingExecutor {
+      budgets: budgets.clone(),
+      attempted: 0,
+    };
+    let mut cpu = RV64Cpu::new(None);
+    cpu.wfi = true;
+    cpu.csrs
+      .write_unchecked(MIE, MSIE_MASK | MTIE_MASK)
+      .unwrap();
+    cpu.bus.clint.write::<u32>(VirtAddr(CLINT_BASE), 1).unwrap();
+    cpu
+      .bus
+      .clint
+      .write::<u64>(VirtAddr(CLINT_BASE + 0x4000), 100)
+      .unwrap();
+    let mut machine = Machine {
+      cpu,
+      executor: Box::new(executor),
+    };
+
+    assert_eq!(machine.dispatch_next(), Ok(()));
+    assert_eq!(machine.cpu.csrs.read_unchecked(TIME), 1);
+    assert!(!machine.cpu.wfi);
+    assert_eq!(machine.cpu.csrs.read_unchecked(MCAUSE), (1_u64 << 63) | 3);
+    assert_eq!(&*budgets.lock().unwrap(), &[32]);
+  }
+
+  #[test]
+  fn waiting_hart_does_not_overshoot_a_timer_reached_by_the_initial_tick() {
+    let budgets = Arc::new(Mutex::new(Vec::new()));
+    let mut cpu = RV64Cpu::new(None);
+    cpu.wfi = true;
+    cpu.csrs.write_unchecked(MIE, MTIE_MASK).unwrap();
+    cpu
+      .bus
+      .clint
+      .write::<u64>(VirtAddr(CLINT_BASE + 0x4000), 1)
+      .unwrap();
+    let mut machine = Machine {
+      cpu,
+      executor: Box::new(RecordingExecutor {
+        budgets,
+        attempted: 0,
+      }),
+    };
+
+    assert_eq!(machine.dispatch_next(), Ok(()));
+    assert_eq!(machine.cpu.csrs.read_unchecked(TIME), 1);
+    assert!(!machine.cpu.wfi);
+    assert_eq!(machine.cpu.csrs.read_unchecked(MCAUSE), (1_u64 << 63) | 7);
+  }
+
+  #[test]
+  fn waiting_hart_does_not_fast_forward_to_a_disabled_timer() {
+    let mut cpu = RV64Cpu::new(None);
+    cpu.wfi = true;
+    cpu
+      .bus
+      .clint
+      .write::<u64>(VirtAddr(CLINT_BASE + 0x4000), 100)
+      .unwrap();
+    let mut machine = Machine {
+      cpu,
+      executor: Box::new(NaiveInterpreter::new()),
+    };
+
+    assert_eq!(machine.dispatch_next(), Ok(()));
+    assert_eq!(machine.cpu.csrs.read_unchecked(TIME), 1);
     assert!(machine.cpu.wfi);
   }
 }
