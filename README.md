@@ -2,6 +2,21 @@
 Learning purpose riscv64 (RV64GC) emulator.
 This project is built for [一生一芯](https://ysyx.org/) as a reference implementation.
 
+### Runnable demos
+
+The repository contains three reproducible launchers. Run them from the repository root:
+
+```shell
+./demo/xv6/run.sh
+./demo/rustsbi/run.sh
+./demo/linux/run.sh
+```
+
+The first run downloads the pinned guest sources and toolchains. All downloaded and generated
+files are kept under `target/demo/`; only the minimal static inputs under `demo/` are
+tracked by Git. See each demo's README and [AGENTS.md](AGENTS.md) for prerequisites, pinned
+versions, and expected output.
+
 ### Highlights
 - [Type-safe instructions](valheim-asm/src/isa/typed.rs) which makes the decoding [less error-prone](valheim-asm/src/isa/decode.rs).
 - Full emulation trace (registers, memory, etc.) like persistent data structures, which is useful for debugging the real hardware.
@@ -27,7 +42,7 @@ It's not that hard comparingly, and it's closer to the real-world use case.
 #### Running [RustSBI-QEMU with its test kernel](https://github.com/rustsbi/rustsbi-qemu)
 With the following command:
 ```shell
-cargo run --release -- --kernel tests/test-kernel.bin --bios tests/rustsbi-qemu.bin
+./demo/rustsbi/run.sh
 ```
 
 ![rustsbi-booting](./pictures/rustsbi-booting.jpg)
@@ -35,8 +50,7 @@ cargo run --release -- --kernel tests/test-kernel.bin --bios tests/rustsbi-qemu.
 #### Running [xv6 for RISC-V](https://github.com/mit-pdos/xv6-riscv)
 With the following command:
 ```shell
-$(CROSS)objcopy -O binary xv6/kernel xv6/kernel.bin
-cargo run --release -- --kernel xv6/kernel.bin --disk xv6/fs.img
+./demo/xv6/run.sh
 ```
 
 ![xv6-booting](./pictures/xv6-booting.png)
