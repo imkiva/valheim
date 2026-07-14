@@ -832,6 +832,9 @@ impl RV64Cpu {
     if writes_satp || fences_translation {
       self.translation_epoch = self.translation_epoch.wrapping_add(1);
     }
+    if fences_translation {
+      self.sfence_epoch = self.sfence_epoch.wrapping_add(1);
+    }
     if fences_instructions {
       self.icache_epoch = self.icache_epoch.wrapping_add(1);
     }
@@ -913,6 +916,7 @@ mod tests {
   fn cache_epochs_start_at_zero() {
     let cpu = RV64Cpu::new(None);
     assert_eq!(cpu.translation_epoch, 0);
+    assert_eq!(cpu.sfence_epoch, 0);
     assert_eq!(cpu.icache_epoch, 0);
   }
 
@@ -927,6 +931,7 @@ mod tests {
     );
     assert_eq!(cpu.icache_epoch, 1);
     assert_eq!(cpu.translation_epoch, 0);
+    assert_eq!(cpu.sfence_epoch, 0);
 
     execute_rv64(
       &mut cpu,
@@ -934,6 +939,7 @@ mod tests {
     );
     assert_eq!(cpu.icache_epoch, 1);
     assert_eq!(cpu.translation_epoch, 1);
+    assert_eq!(cpu.sfence_epoch, 1);
   }
 
   #[test]
@@ -949,6 +955,7 @@ mod tests {
       RV64Instr::CSRRW(Rd(Reg::ZERO), Rs1(Reg::ZERO), satp),
     );
     assert_eq!(cpu.translation_epoch, 1);
+    assert_eq!(cpu.sfence_epoch, 0);
     assert_eq!(cpu.icache_epoch, 0);
 
     execute_rv64(
@@ -956,6 +963,7 @@ mod tests {
       RV64Instr::CSRRWI(Rd(Reg::ZERO), UImm(Imm32::from(0)), satp),
     );
     assert_eq!(cpu.translation_epoch, 2);
+    assert_eq!(cpu.sfence_epoch, 0);
     assert_eq!(cpu.icache_epoch, 0);
 
     execute_rv64(
@@ -983,6 +991,7 @@ mod tests {
       RV64Instr::CSRRCI(Rd(Reg::ZERO), UImm(Imm32::from(1)), satp),
     );
     assert_eq!(cpu.translation_epoch, 6);
+    assert_eq!(cpu.sfence_epoch, 0);
     assert_eq!(cpu.icache_epoch, 0);
   }
 
@@ -1066,6 +1075,7 @@ mod tests {
     let mut cpu = RV64Cpu::new(None);
     cpu.write_pc(VirtAddr(RV64_MEMORY_BASE));
     cpu.translation_epoch = u64::MAX;
+    cpu.sfence_epoch = u64::MAX;
     cpu.icache_epoch = u64::MAX;
 
     execute_rv64(
@@ -1079,5 +1089,6 @@ mod tests {
 
     assert_eq!(cpu.icache_epoch, 0);
     assert_eq!(cpu.translation_epoch, 0);
+    assert_eq!(cpu.sfence_epoch, 0);
   }
 }

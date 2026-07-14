@@ -32,6 +32,8 @@ pub struct RV64Cpu {
   pub vmppn: u64,
   /// Generation of address-translation state visible to execution caches.
   pub translation_epoch: u64,
+  /// Generation of explicit SFENCE.VMA operations visible to translated-code caches.
+  pub sfence_epoch: u64,
   /// Generation of instruction bytes visible to execution caches.
   pub icache_epoch: u64,
   /// current cycle instruction
@@ -62,6 +64,7 @@ impl RV64Cpu {
       vmppn: 0,
       vmmode: VMMode::MBARE,
       translation_epoch: 0,
+      sfence_epoch: 0,
       icache_epoch: 0,
       journal: Journal {
         init_regs: regs,
