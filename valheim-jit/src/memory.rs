@@ -49,7 +49,9 @@ pub struct SoftwareTlb {
   load: Box<[TlbEntry; TLB_ENTRY_COUNT]>,
   store: Box<[TlbEntry; TLB_ENTRY_COUNT]>,
   generation: u64,
+  stats_enabled: bool,
   stats: TlbStats,
+  disabled_stats: TlbStats,
 }
 
 impl SoftwareTlb {
@@ -58,7 +60,9 @@ impl SoftwareTlb {
       load: Box::new([TlbEntry::EMPTY; TLB_ENTRY_COUNT]),
       store: Box::new([TlbEntry::EMPTY; TLB_ENTRY_COUNT]),
       generation: 1,
+      stats_enabled: true,
       stats: TlbStats::default(),
+      disabled_stats: TlbStats::default(),
     }
   }
 
@@ -84,7 +88,18 @@ impl SoftwareTlb {
   }
 
   pub fn stats_ptr(&mut self) -> *mut TlbStats {
-    &mut self.stats
+    if self.stats_enabled {
+      &mut self.stats
+    } else {
+      // Keep a valid sink for native blocks compiled while statistics were enabled. The public
+      // builder can be applied to an executor that already owns native code, so returning null
+      // here would make an older block's generated counter updates unsafe.
+      &mut self.disabled_stats
+    }
+  }
+
+  pub fn set_stats_enabled(&mut self, enabled: bool) {
+    self.stats_enabled = enabled;
   }
 
   pub fn stats(&self) -> TlbStats {
@@ -133,8 +148,9 @@ pub unsafe extern "C" fn jit_tlb_fill(frame: *mut JitFrame, address: u64, access
       _ => return Err(Exception::LoadAccessFault(VirtAddr(address))),
     };
     let frame = &mut *frame;
-    frame.tlb_stats.as_mut().unwrap().misses =
-      frame.tlb_stats.as_mut().unwrap().misses.saturating_add(1);
+    if let Some(stats) = frame.tlb_stats.as_mut() {
+      stats.misses = stats.misses.saturating_add(1);
+    }
     let target = (&mut *frame.cpu).translate_to_host(VirtAddr(address), access_type)?;
     match target {
       TranslationTarget::Dram { host_page, .. } => {
@@ -155,12 +171,9 @@ pub unsafe extern "C" fn jit_tlb_fill(frame: *mut JitFrame, address: u64, access
       TranslationTarget::Mmio { .. } => {
         frame.exit_kind = EXIT_SLOW_MEMORY;
         frame.fault_addr = address;
-        frame.tlb_stats.as_mut().unwrap().slow_paths = frame
-          .tlb_stats
-          .as_mut()
-          .unwrap()
-          .slow_paths
-          .saturating_add(1);
+        if let Some(stats) = frame.tlb_stats.as_mut() {
+          stats.slow_paths = stats.slow_paths.saturating_add(1);
+        }
         Ok(0)
       }
     }

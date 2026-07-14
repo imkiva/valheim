@@ -133,7 +133,11 @@ impl CraneliftBackend {
     })
   }
 
-  pub fn compile(&mut self, block: &GuestBlock) -> Result<CompiledBlock, JitError> {
+  pub fn compile(
+    &mut self,
+    block: &GuestBlock,
+    collect_tlb_stats: bool,
+  ) -> Result<CompiledBlock, JitError> {
     let pointer_type = self.module.target_config().pointer_type();
     let mut signature = self.module.make_signature();
     signature.call_conv = CallConv::SystemV;
@@ -185,12 +189,16 @@ impl CraneliftBackend {
         frame,
         offset_of!(JitFrame, tlb_generation) as i32,
       );
-      let tlb_stats = builder.ins().load(
-        pointer_type,
-        flags,
-        frame,
-        offset_of!(JitFrame, tlb_stats) as i32,
-      );
+      let tlb_stats = if collect_tlb_stats {
+        Some(builder.ins().load(
+          pointer_type,
+          flags,
+          frame,
+          offset_of!(JitFrame, tlb_stats) as i32,
+        ))
+      } else {
+        None
+      };
       let mut lowering = Lowering::new(
         &mut builder,
         frame,
@@ -252,7 +260,7 @@ struct Lowering<'a, 'b> {
   load_tlb: Value,
   store_tlb: Value,
   tlb_generation: Value,
-  tlb_stats: Value,
+  tlb_stats: Option<Value>,
   tlb_fill_helper: FuncRef,
   atomic_helper: FuncRef,
   values: [Option<Value>; 32],
@@ -269,7 +277,7 @@ impl<'a, 'b> Lowering<'a, 'b> {
     load_tlb: Value,
     store_tlb: Value,
     tlb_generation: Value,
-    tlb_stats: Value,
+    tlb_stats: Option<Value>,
     tlb_fill_helper: FuncRef,
     atomic_helper: FuncRef,
   ) -> Self {
@@ -413,15 +421,18 @@ impl<'a, 'b> Lowering<'a, 'b> {
   }
 
   fn increment_tlb_stat(&mut self, offset: usize) {
+    let Some(tlb_stats) = self.tlb_stats else {
+      return;
+    };
     let old = self
       .builder
       .ins()
-      .load(types::I64, self.flags, self.tlb_stats, offset as i32);
+      .load(types::I64, self.flags, tlb_stats, offset as i32);
     let new = self.builder.ins().iadd_imm(old, 1);
     self
       .builder
       .ins()
-      .store(self.flags, new, self.tlb_stats, offset as i32);
+      .store(self.flags, new, tlb_stats, offset as i32);
   }
 
   fn tlb_host_address(

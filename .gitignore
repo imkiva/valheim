@@ -11,4 +11,5 @@ tests/
 !valheim-jit/tests/
 valheim-jit/tests/*
 !valheim-jit/tests/differential.rs
+!valheim-jit/tests/memory_fast_path.rs
 .DS_Store

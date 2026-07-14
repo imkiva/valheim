@@ -57,6 +57,7 @@ fn main() -> Result<(), std::io::Error> {
         .with_max_block_len(args.jit_max_block_len)
         .with_max_compiled_blocks(args.jit_max_compiled_blocks)
         .with_max_live_code_bytes(args.jit_max_code_bytes)
+        .with_stats_enabled(args.jit_stats)
         .with_stats_interval(args.jit_stats.then_some(args.jit_stats_interval)),
     ),
     engine => {

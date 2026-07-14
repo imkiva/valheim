@@ -120,6 +120,7 @@ pub struct JitExecutor {
   max_compiled_blocks: usize,
   max_live_code_bytes: u64,
   compiled_in_generation: usize,
+  stats_enabled: bool,
   stats_interval: Option<u64>,
   compilation_samples: Vec<u64>,
   seen_translation_epoch: u64,
@@ -143,6 +144,7 @@ impl JitExecutor {
       max_compiled_blocks: DEFAULT_MAX_COMPILED_BLOCKS,
       max_live_code_bytes: DEFAULT_MAX_LIVE_CODE_BYTES,
       compiled_in_generation: 0,
+      stats_enabled: true,
       stats_interval: None,
       compilation_samples: Vec::new(),
       seen_translation_epoch: 0,
@@ -168,6 +170,12 @@ impl JitExecutor {
 
   pub fn with_max_live_code_bytes(mut self, max_live_code_bytes: u64) -> Self {
     self.max_live_code_bytes = max_live_code_bytes.max(1);
+    self
+  }
+
+  pub fn with_stats_enabled(mut self, enabled: bool) -> Self {
+    self.stats_enabled = enabled;
+    self.tlb.set_stats_enabled(enabled);
     self
   }
 
@@ -210,7 +218,9 @@ impl JitExecutor {
     let Ok(backend) = CraneliftBackend::new() else {
       self.max_compiled_blocks = usize::MAX;
       self.max_live_code_bytes = u64::MAX;
-      self.stats.compile_failures += 1;
+      if self.stats_enabled {
+        self.stats.compile_failures += 1;
+      }
       return false;
     };
 
@@ -253,8 +263,10 @@ impl JitExecutor {
     }
     if arena_full {
       if self.replace_code_backend() {
-        self.stats.module_rotations += 1;
-        self.stats.code_cache_flushes += 1;
+        if self.stats_enabled {
+          self.stats.module_rotations += 1;
+          self.stats.code_cache_flushes += 1;
+        }
       }
       return;
     }
@@ -265,12 +277,16 @@ impl JitExecutor {
         // There is no block chaining, so generations are independent.
         self.retired_backends.push(old);
         self.compiled_in_generation = 0;
-        self.stats.module_rotations += 1;
+        if self.stats_enabled {
+          self.stats.module_rotations += 1;
+        }
       }
       Err(_) => {
         // Keep valid code pointers in the old module. Avoid retrying allocation on every TB.
         self.max_compiled_blocks = usize::MAX;
-        self.stats.compile_failures += 1;
+        if self.stats_enabled {
+          self.stats.compile_failures += 1;
+        }
       }
     }
   }
@@ -336,11 +352,13 @@ impl JitExecutor {
     budget: u32,
     kind: FallbackKind,
   ) -> ExecOutcome {
-    self.stats.fallback_instructions += 1;
-    match kind {
-      FallbackKind::System => self.stats.fallback_system += 1,
-      FallbackKind::FloatingPoint => self.stats.fallback_floating_point += 1,
-      FallbackKind::Other => self.stats.fallback_other += 1,
+    if self.stats_enabled {
+      self.stats.fallback_instructions += 1;
+      match kind {
+        FallbackKind::System => self.stats.fallback_system += 1,
+        FallbackKind::FloatingPoint => self.stats.fallback_floating_point += 1,
+        FallbackKind::Other => self.stats.fallback_other += 1,
+      }
     }
     self.naive.execute(cpu, budget.min(1))
   }
@@ -357,19 +375,25 @@ impl JitExecutor {
     self.rotate_code_cache_if_needed();
     let key = TbKey::new(cpu);
     if let Some(inst) = self.pending_slow_memory.remove(&key) {
-      self.stats.fallback_instructions += 1;
-      self.stats.fallback_memory += 1;
+      if self.stats_enabled {
+        self.stats.fallback_instructions += 1;
+        self.stats.fallback_memory += 1;
+      }
       cpu.instr = inst.raw as u64;
       let result = cpu.execute(VirtAddr(inst.pc), inst.decoded, inst.len == 2);
       return ExecOutcome::new(1, result);
     }
     if let Some(kind) = self.negative_cache.get(&key).copied() {
-      self.stats.cache_hits += 1;
-      self.stats.negative_cache_hits += 1;
+      if self.stats_enabled {
+        self.stats.cache_hits += 1;
+        self.stats.negative_cache_hits += 1;
+      }
       return self.fallback_one(cpu, budget, kind);
     }
     if !self.cache.contains_key(&key) {
-      self.stats.cache_misses += 1;
+      if self.stats_enabled {
+        self.stats.cache_misses += 1;
+      }
       match GuestBlock::translate(cpu, self.max_block_len) {
         BlockBuild::Block(block) => {
           self.cache.insert(
@@ -384,7 +408,9 @@ impl JitExecutor {
         }
         BlockBuild::InterpretOne(kind) => {
           self.negative_cache.insert(key, kind);
-          self.stats.negative_blocks += 1;
+          if self.stats_enabled {
+            self.stats.negative_blocks += 1;
+          }
           return self.fallback_one(cpu, budget, kind);
         }
         BlockBuild::Fault { raw, exception } => {
@@ -395,7 +421,9 @@ impl JitExecutor {
         }
       }
     } else {
-      self.stats.cache_hits += 1;
+      if self.stats_enabled {
+        self.stats.cache_hits += 1;
+      }
     }
 
     let (block_len, compiled) = {
@@ -404,7 +432,9 @@ impl JitExecutor {
     };
     if let Some(compiled) = compiled {
       if block_len <= budget as usize {
-        self.stats.native_executions += 1;
+        if self.stats_enabled {
+          self.stats.native_executions += 1;
+        }
         let (cache, tlb) = (&self.cache, &mut self.tlb);
         let block = &cache.get(&key).expect("native TB is missing").block;
         let (outcome, pending) = Self::execute_native(tlb, cpu, block, compiled);
@@ -415,7 +445,9 @@ impl JitExecutor {
       }
     }
 
-    self.stats.decoded_executions += 1;
+    if self.stats_enabled {
+      self.stats.decoded_executions += 1;
+    }
     let outcome = {
       let block = &self.cache.get(&key).expect("decoded TB is missing").block;
       Self::execute_decoded(cpu, block, budget)
@@ -431,41 +463,51 @@ impl JitExecutor {
         && cached.executions >= self.hot_threshold
     };
     if should_compile {
-      let started = Instant::now();
+      let started = self.stats_enabled.then(Instant::now);
       let result = {
         let (cache, backend) = (&self.cache, &mut self.backend);
         let block = &cache.get(&key).expect("compile TB is missing").block;
-        catch_unwind(AssertUnwindSafe(|| backend.compile(block)))
+        catch_unwind(AssertUnwindSafe(|| {
+          backend.compile(block, self.stats_enabled)
+        }))
       };
       match result {
         Ok(Ok(compiled)) => {
           self.cache.get_mut(&key).unwrap().compiled = Some(compiled);
-          self.stats.compiled_blocks += 1;
-          self.stats.generated_code_bytes = self
-            .stats
-            .generated_code_bytes
-            .saturating_add(compiled.code_size);
           self.compiled_in_generation += 1;
-          self.stats.peak_live_code_bytes = self
-            .stats
-            .peak_live_code_bytes
-            .max(self.live_code_bytes());
+          if self.stats_enabled {
+            self.stats.compiled_blocks += 1;
+            self.stats.generated_code_bytes = self
+              .stats
+              .generated_code_bytes
+              .saturating_add(compiled.code_size);
+            self.stats.peak_live_code_bytes = self
+              .stats
+              .peak_live_code_bytes
+              .max(self.live_code_bytes());
+          }
         }
         Ok(Err(_)) => {
           self.cache.get_mut(&key).unwrap().compile_failed = true;
-          self.stats.compile_failures += 1;
+          if self.stats_enabled {
+            self.stats.compile_failures += 1;
+          }
         }
         Err(_) => {
           // A Cranelift allocator/relocation panic must not terminate the guest. Drop all native
           // pointers at this dispatcher safe point and continue with decoded execution.
-          self.stats.compile_failures += 1;
+          if self.stats_enabled {
+            self.stats.compile_failures += 1;
+          }
           self.compiled_in_generation = self.max_compiled_blocks;
           self.rotate_code_cache_if_needed();
         }
       }
-      let elapsed = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
-      self.stats.compilation_nanos = self.stats.compilation_nanos.saturating_add(elapsed);
-      self.compilation_samples.push(elapsed);
+      if let Some(started) = started {
+        let elapsed = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        self.stats.compilation_nanos = self.stats.compilation_nanos.saturating_add(elapsed);
+        self.compilation_samples.push(elapsed);
+      }
     }
 
     outcome
@@ -474,10 +516,12 @@ impl JitExecutor {
 
 impl RV64Executor for JitExecutor {
   fn execute(&mut self, cpu: &mut RV64Cpu, budget: u32) -> ExecOutcome {
-    self.stats.dispatches = self.stats.dispatches.saturating_add(1);
-    if let Some(interval) = self.stats_interval {
-      if self.stats.dispatches % interval == 0 {
-        eprintln!("[valheim-jit] {:?}", self.stats());
+    if self.stats_enabled {
+      self.stats.dispatches = self.stats.dispatches.saturating_add(1);
+      if let Some(interval) = self.stats_interval {
+        if self.stats.dispatches % interval == 0 {
+          eprintln!("[valheim-jit] {:?}", self.stats());
+        }
       }
     }
     if budget == 0 || cpu.wfi {
@@ -485,14 +529,16 @@ impl RV64Executor for JitExecutor {
     }
 
     let outcome = self.execute_one(cpu, budget);
-    self.stats.guest_instructions = self
-      .stats
-      .guest_instructions
-      .saturating_add(outcome.attempted as u64);
-    if outcome.result.is_ok() {
-      self.stats.successful_exits = self.stats.successful_exits.saturating_add(1);
-    } else {
-      self.stats.exception_exits = self.stats.exception_exits.saturating_add(1);
+    if self.stats_enabled {
+      self.stats.guest_instructions = self
+        .stats
+        .guest_instructions
+        .saturating_add(outcome.attempted as u64);
+      if outcome.result.is_ok() {
+        self.stats.successful_exits = self.stats.successful_exits.saturating_add(1);
+      } else {
+        self.stats.exception_exits = self.stats.exception_exits.saturating_add(1);
+      }
     }
     outcome
   }
