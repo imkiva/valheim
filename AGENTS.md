@@ -55,7 +55,8 @@ Valheim 是一个用 Rust 编写、以学习和参考实现为目的的 RISC-V 6
 
 最后一次完整验证日期：2026-07-14。
 
-- Rust：`nightly-2024-09-05`。根 `rust-toolchain` 只写了不固定版本的 `nightly`，为了复现不要依赖它解析到的最新版本。
+- Valheim Rust：`nightly-2024-09-05`。根 `rust-toolchain` 只写了不固定版本的 `nightly`，为了复现不要依赖它解析到的最新版本。
+- 历史 RustSBI demo Rust：`nightly-2022-02-14`，已安装 target `riscv64imac-unknown-none-elf`。旧源码使用已从现代 Rust 删除的 generator API，不能改用新 nightly。
 - Device Tree Compiler：通过 apt 安装的 `device-tree-compiler 1.6.1-1`。
 - RISC-V bare-metal GNU toolchain：
   `target/try/gcc-riscv64-elf-2022.03.09/`
@@ -98,7 +99,7 @@ sudo apt-get install -y device-tree-compiler
 export PATH="$PWD/target/try/gcc-riscv64-elf-2022.03.09/riscv/bin:$PATH"
 ```
 
-重要：不要随意运行 `cargo clean`。整个 `target/` 被 Git 忽略，而手动安装的约 1.3 GiB 工具链、xv6 checkout、磁盘镜像和启动脚本也都位于 `target/try/`；`cargo clean` 会把它们一起删除。
+重要：不要随意运行 `cargo clean`。整个 `target/` 被 Git 忽略，而手动安装的约 1.3 GiB 工具链、xv6/RustSBI checkout、磁盘镜像和启动脚本也都位于 `target/try/`；`cargo clean` 会把它们一起删除。
 
 ## 构建与常用命令
 
@@ -214,6 +215,12 @@ cargo +nightly-2024-09-05 run \
 ```text
 target/try/
 ├── gcc-riscv64-elf-2022.03.09/  # 多个 demo 可共享的工具链
+├── rustsbi/                      # 历史 RustSBI-QEMU test-kernel
+│   ├── run.sh
+│   ├── single-hart-valheim.patch
+│   ├── source/
+│   ├── artifacts/
+│   └── runtime/last-run.log
 └── xv6/
     ├── run.sh                    # 一键构建并启动
     ├── README.md
@@ -221,7 +228,7 @@ target/try/
     └── runtime/fs.img            # guest 实际读写的磁盘副本
 ```
 
-今后新增 RustSBI、Linux 等 demo 时，使用 `target/try/<demo-name>/`，在该目录内提供可从任意工作目录调用的 `run.sh`。不要把共享 GCC/Rust 工具链嵌套到某个 demo 目录中。每个脚本至少应：
+今后新增 Linux 等 demo 时，使用 `target/try/<demo-name>/`，在该目录内提供可从任意工作目录调用的 `run.sh`。不要把共享 GCC/Rust 工具链嵌套到某个 demo 目录中。每个脚本至少应：
 
 1. 固定并检查上游版本。
 2. 使用相对脚本自身位置计算仓库根目录。
@@ -290,26 +297,51 @@ Valheim 的 xv6 README 演示实际加入于 2022-03-19。当时 xv6-riscv 默�
 
 不要随意把 `source/` 更新到 xv6 最新分支；现代 xv6 会因为 VirtIO version 2 检查而无法在当前 Valheim 上启动。
 
-## RustSBI 与 openEuler Demo 状态
+## 已验证的 RustSBI Demo
 
-根 README 的 RustSBI 示例依赖：
-
-```text
-tests/rustsbi-qemu.bin
-tests/test-kernel.bin
-```
-
-这些文件没有提交到仓库，整个 `tests/` 还被 `.gitignore` 忽略，因此 RustSBI demo 当前不是可复现的一键 demo。拿到匹配的 raw binary 后，当前正确命令形态是：
+这项 demo 是有限运行的 SBI test kernel，不是 shell。从任意目录运行：
 
 ```bash
-cargo +nightly-2024-09-05 start \
-  --kernel tests/test-kernel.bin \
-  --bios tests/rustsbi-qemu.bin
+./target/try/rustsbi/run.sh
 ```
 
-历史 RustSBI-QEMU 测试 kernel 偏向多 hart，而 Valheim 只有一个 hart；即使能看到 BIOS 启动输出，也不要在未验证前声称完整测试或 shell 可用。
+脚本会固定 RustSBI-QEMU 提交、应用有记录的单 hart patch、构建 BIOS 和 test kernel、复用共享 GNU objcopy 转 raw binary、构建 Valheim，然后运行并检查成功行。预期末尾：
 
-openEuler 演示同样没有固定的 BIOS、kernel、rootfs、下载脚本或版本 hash，README 还明确记录串口不能作为 `init` console。它只能作为历史启动成果，当前不能称为开箱即用 demo。
+```text
+>> Hart 0 state return value: 0
+<< Test-kernel: test for hart 0 success, wake another hart
+<< Test-kernel: All hart SBI test SUCCESS, shutdown
+```
+
+完整输出保存在 `target/try/rustsbi/runtime/last-run.log`。2026-07-14 已从项目目录外执行脚本验证：退出码为 0，并检查到上述 success marker。
+
+### RustSBI 历史版本依据
+
+Valheim README 在 2022-03-20 首次加入 RustSBI 截图。当时 RustSBI-QEMU 默认分支 HEAD 是：
+
+```text
+999e3556fcfa1b0900dd797ae2186667af8d2dc6
+```
+
+它是 `v0.1.0-7-g999e355`：包版本仍为 RustSBI-QEMU 0.1.0，但依赖已经是截图中的 RustSBI 0.2.1，并报告 SBI spec 0.3。BIOS ELF 入口为 `0x8000_0000`，test-kernel ELF 入口为 `0x8020_0000`，与 Valheim 的 BIOS/kernel 加载地址完全一致。
+
+构建固定使用 `nightly-2022-02-14`，并复用 `target/try/gcc-riscv64-elf-2022.03.09` 的 GNU objcopy。不要直接改回上游 `cargo make`：旧 xtask 会向 objcopy 传仅适合 `rust-objcopy` 的 `--binary-architecture=riscv64`，GNU Binutils 2.37 会拒绝它；当前脚本直接构建两个 package，再执行兼容的 `objcopy -O binary`。
+
+### 为什么存在单 hart patch
+
+Valheim 原截图不是未修改的上游 test kernel；原始 binary 也从未提交。上游 `999e355` 硬编码测试 hart 1–4，而 Valheim 只声明 hart 0。未修改版本已经实际诊断运行：BASE、time、非法指令转交和 hart 0 查询成功，随后固定停在：
+
+```text
+>> Wake hart 1, sbi return value 0
+```
+
+`target/try/rustsbi/single-hart-valheim.patch` 保留可在 hart 0 上运行的测试，并在 success marker 后执行 `ebreak`。这是退出适配：旧 RustSBI 原本通过 QEMU SiFive test finisher `0x0010_0000` 关机，Valheim 没有该设备。输出仍保留历史截图的 `All hart` 文本，但它只表示适用于单 hart 的测试通过，不能解释为实际测试了 hart 1–4。
+
+当前 firmware 能从 DTB 识别 `cluster0 with 1 cores`。当前 test kernel 打印的 DTB physical address 是 `0x0`，与 2022 截图中的 `0x1020` 不同；这不影响 firmware 已完成的 DTB 解析和现有测试，但属于已记录的历史运行差异，不要误报为逐字节复现。
+
+## openEuler Demo 状态
+
+openEuler 演示没有固定的 BIOS、kernel、rootfs、下载脚本或版本 hash，README 还明确记录串口不能作为 `init` console。它只能作为历史启动成果，当前不能称为开箱即用 demo。
 
 ## 已知陷阱与维护注意事项
 
@@ -321,6 +353,7 @@ openEuler 演示同样没有固定的 BIOS、kernel、rootfs、下载脚本或�
 - `--trace` 默认无效，必须显式启用 feature。
 - 测试和普通运行循环都没有 watchdog/超时，坏 guest 可能永久循环。
 - 当前 VirtIO 是 legacy version 1；必须选择明确支持 legacy VirtIO-MMIO v1 的 guest 驱动，不能只根据 guest 的发布年份判断。
+- RustSBI 历史 test kernel 的 success marker 来自明确记录的单 hart patch；不要声称未修改的上游多 hart HSM 测试在 Valheim 上完整通过。
 - `profiler/profile.sh` 仍引用旧 binary 名称和缺失的测试镜像，并依赖 DTrace；使用前必须修正，不能把它作为已验证流程。
 - Release profile 保留 debug symbols，这是性能分析和符号化所需的有意配置。
 
@@ -339,6 +372,7 @@ cargo +nightly-2024-09-05 build --release --locked --package valheim-cli
 
 ```bash
 RESET_DISK=1 ./target/try/xv6/run.sh
+./target/try/rustsbi/run.sh
 ```
 
 验收不是只看到 kernel banner，而是必须进入 `$` 并至少成功执行一个 guest 命令，例如：
