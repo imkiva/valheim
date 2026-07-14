@@ -1,0 +1,14 @@
+diff --git a/rustsbi-qemu/src/main.rs b/rustsbi-qemu/src/main.rs
+--- a/rustsbi-qemu/src/main.rs
++++ b/rustsbi-qemu/src/main.rs
+@@ -98,5 +98,9 @@ extern "C" fn rust_main(hartid: usize, opqaue: usize) -> ! {
+         println!("[rustsbi] enter supervisor 0x80200000");
+     }
++    // On Valheim this historical build reaches supervisor mode with a1
++    // cleared, even though the firmware parsed the incoming DTB earlier.
++    // Restore Valheim's DRAM DTB pointer explicitly for the boot hart.
++    let supervisor_opaque = if hartid == 0 { 0x87f00000 } else { opqaue };
+     // start SBI environment
+-    execute::execute_supervisor(0x80200000, hartid, opqaue, HSM.clone());
++    execute::execute_supervisor(0x80200000, hartid, supervisor_opaque, HSM.clone());
+ }
