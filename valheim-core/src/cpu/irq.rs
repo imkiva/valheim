@@ -21,6 +21,8 @@ pub enum IRQ {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Exception {
+  InstructionAddressMisaligned(VirtAddr),
+  InstructionAccessFault(VirtAddr),
   IllegalInstruction,
   LoadAccessFault(VirtAddr),
   StoreAccessFault(VirtAddr),
@@ -188,6 +190,8 @@ impl IRQ {
 impl Exception {
   pub fn mcause_mtval(&self, cpu: &RV64Cpu) -> (u64, u64) {
     match self {
+      Exception::InstructionAddressMisaligned(addr) => (0, addr.0),
+      Exception::InstructionAccessFault(addr) => (1, addr.0),
       Exception::IllegalInstruction => (2, cpu.instr),
       Exception::Breakpoint => (3, 0),
       Exception::LoadAddressMisaligned(addr) => (4, addr.0),

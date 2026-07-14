@@ -17,7 +17,7 @@ impl CanIO for i64 {}
 pub struct VirtAddr(pub u64);
 
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
-pub struct PhysAddr(pub *const u8);
+pub struct PhysAddr(pub *mut u8);
 
 impl Debug for VirtAddr {
   fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -48,62 +48,104 @@ impl Memory {
     })
   }
 
+  #[inline(always)]
   pub fn to_phys(&self, virt: VirtAddr) -> Option<PhysAddr> {
-    if cfg!(debug_assertions) && !self.check_virt_bounds(virt) { return None; }
-    let offset = virt - self.memory_base;
-    let ptr = unsafe { self.memory.as_ptr().offset(offset.0 as isize) };
+    self.to_phys_with_width(virt, 1)
+  }
+
+  /// Returns a host pointer only when the complete `[virt, virt + width)` range is mapped.
+  ///
+  /// The pointer remains valid while this `Memory` and its backing mapping are alive. Callers must
+  /// still use unaligned accesses unless they establish a stronger alignment invariant themselves.
+  #[inline(always)]
+  pub fn to_phys_with_width(&self, virt: VirtAddr, width: usize) -> Option<PhysAddr> {
+    let offset = self.offset_for_range(virt, width)?;
+    let ptr = unsafe { self.memory.as_ptr().add(offset) as *mut u8 };
     Some(PhysAddr(ptr))
   }
 
   pub fn to_virt(&self, phys: PhysAddr) -> Option<VirtAddr> {
-    if cfg!(debug_assertions) && !self.check_phys_bounds(phys) { return None; }
-    let offset = phys.0 as usize - self.memory.as_ptr() as usize;
+    if !self.check_phys_bounds(phys, 1) {
+      return None;
+    }
+    let offset = (phys.0 as usize).checked_sub(self.memory.as_ptr() as usize)?;
     Some(self.memory_base + VirtAddr(offset as u64))
   }
 
-  fn check_virt_bounds(&self, virt: VirtAddr) -> bool {
-    virt >= self.memory_base && virt < self.memory_base + VirtAddr(self.memory_size as u64)
+  /// Tests whether the complete `[addr, addr + width)` range belongs to this mapping.
+  #[inline(always)]
+  pub fn contains(&self, addr: VirtAddr, width: usize) -> bool {
+    self.offset_for_range(addr, width).is_some()
   }
 
-  fn check_phys_bounds(&self, phys: PhysAddr) -> bool {
-    let ptr = self.memory.as_ptr() as usize;
-    (phys.0 as usize) >= ptr && (phys.0 as usize) < ptr + self.memory_size
+  #[inline(always)]
+  fn offset_for_range(&self, addr: VirtAddr, width: usize) -> Option<usize> {
+    let Some(offset) = addr.0.checked_sub(self.memory_base.0) else {
+      return None;
+    };
+    let Ok(offset) = usize::try_from(offset) else {
+      return None;
+    };
+    if offset > self.memory_size || width > self.memory_size - offset {
+      return None;
+    }
+    Some(offset)
+  }
+
+  fn check_phys_bounds(&self, phys: PhysAddr, width: usize) -> bool {
+    let base = self.memory.as_ptr() as usize;
+    let Some(offset) = (phys.0 as usize).checked_sub(base) else {
+      return false;
+    };
+    offset <= self.memory_size && width <= self.memory_size - offset
   }
 
   pub fn get_mut<T: CanIO>(&mut self, virt: VirtAddr) -> Option<&mut T> {
-    let phys = self.to_phys(virt)?;
+    let phys = self.to_phys_with_width(virt, std::mem::size_of::<T>())?;
+    if (phys.0 as usize) % std::mem::align_of::<T>() != 0 {
+      return None;
+    }
     unsafe {
       // CanIO trait guarantees that the transmute is safe
-      let ptr = std::mem::transmute::<*const u8, *mut T>(phys.0);
+      let ptr = phys.0.cast::<T>();
       Some(&mut *ptr)
     }
   }
 
   pub fn get<T: CanIO>(&self, virt: VirtAddr) -> Option<&T> {
-    let phys = self.to_phys(virt)?;
+    let phys = self.to_phys_with_width(virt, std::mem::size_of::<T>())?;
+    if (phys.0 as usize) % std::mem::align_of::<T>() != 0 {
+      return None;
+    }
     unsafe {
       // CanIO trait guarantees that the transmute is safe
-      let ptr = std::mem::transmute::<*const u8, *const T>(phys.0);
+      let ptr = phys.0.cast::<T>();
       Some(&*ptr)
     }
   }
 
+  #[inline(always)]
   pub fn read<T: CanIO>(&self, addr: VirtAddr) -> Option<T> {
-    self.get(addr).map(|v| *v)
+    let phys = self.to_phys_with_width(addr, std::mem::size_of::<T>())?;
+    Some(unsafe { phys.0.cast::<T>().read_unaligned() })
   }
 
+  #[inline(always)]
   pub fn write<T: CanIO>(&mut self, addr: VirtAddr, value: T) -> Option<()> {
-    self.get_mut(addr).map(|v| *v = value)
+    let phys = self.to_phys_with_width(addr, std::mem::size_of::<T>())?;
+    unsafe { phys.0.cast::<T>().write_unaligned(value) };
+    Some(())
   }
 
   pub fn load<T: CanIO>(&mut self, offset: usize, mem: &[T]) -> Option<()> {
-    let phys = self.to_phys(VirtAddr(offset as u64))?;
+    let byte_len = mem.len().checked_mul(std::mem::size_of::<T>())?;
+    if byte_len == 0 {
+      return Some(());
+    }
+    let addr = VirtAddr(u64::try_from(offset).ok()?);
+    let phys = self.to_phys_with_width(addr, byte_len)?;
     unsafe {
-      std::ptr::copy_nonoverlapping(
-        mem.as_ptr() as *const u8,
-        phys.0 as *mut u8,
-        mem.len() * std::mem::size_of::<T>(),
-      );
+      std::ptr::copy_nonoverlapping(mem.as_ptr() as *const u8, phys.0, byte_len);
     }
     Some(())
   }
@@ -124,7 +166,7 @@ mod test {
     let mut mem = Memory::new(0x1000, 0x1000).unwrap();
     let addr = mem.memory_base + VirtAddr(0x4);
     let value = 0xCAFEBABE_DEADBEEF as u64;
-    mem.write(addr, value);
+    assert_eq!(mem.write(addr, value), Some(()));
     assert_eq!(mem.read::<u64>(addr), Some(value));
 
     let low_addr = mem.memory_base + VirtAddr(0x4);
@@ -139,5 +181,40 @@ mod test {
     let invalid_addr2 = VirtAddr(0);
     assert_eq!(mem.read::<u32>(invalid_addr1), None);
     assert_eq!(mem.read::<u32>(invalid_addr2), None);
+  }
+
+  #[test]
+  fn memory_checks_the_complete_access_width() {
+    let mut mem = Memory::new(0x1000, 0x1000).unwrap();
+    let last = VirtAddr(0x1fff);
+
+    assert!(mem.contains(last, 1));
+    assert!(!mem.contains(last, 2));
+    assert!(!mem.contains(VirtAddr(0x2000), 1));
+    assert_eq!(mem.write(last, 0xaa_u8), Some(()));
+    assert_eq!(mem.read::<u8>(last), Some(0xaa));
+    assert_eq!(mem.read::<u16>(last), None);
+    assert_eq!(mem.write(last, 0xbbcc_u16), None);
+  }
+
+  #[test]
+  fn memory_supports_unaligned_values_without_references() {
+    let mut mem = Memory::new(0x1000, 0x1000).unwrap();
+    let unaligned = VirtAddr(0x1003);
+    let value = 0x0123_4567_89ab_cdef_u64;
+
+    assert_eq!(mem.write(unaligned, value), Some(()));
+    assert_eq!(mem.read::<u64>(unaligned), Some(value));
+    assert!(mem.get::<u64>(unaligned).is_none());
+    assert!(mem.get_mut::<u64>(unaligned).is_none());
+  }
+
+  #[test]
+  fn memory_load_checks_the_whole_slice() {
+    let mut mem = Memory::new(0x1000, 8).unwrap();
+
+    assert_eq!(mem.load(0x1004, &[1_u8, 2, 3, 4]), Some(()));
+    assert_eq!(mem.read::<u32>(VirtAddr(0x1004)), Some(0x0403_0201));
+    assert_eq!(mem.load(0x1005, &[1_u8, 2, 3, 4]), None);
   }
 }

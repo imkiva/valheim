@@ -13,7 +13,7 @@ use crate::cpu::RV64Cpu;
 use crate::device::ns16550a::Uart16550a;
 use crate::dtb::generate_device_tree_rom;
 use crate::interp::naive::NaiveInterpreter;
-use crate::interp::RV64Interpreter;
+use crate::interp::RV64Executor;
 use crate::memory::VirtAddr;
 
 const RV64_PC_RESET: u64 = 0x80000000;
@@ -22,10 +22,11 @@ const RV64_PC_RESET: u64 = 0x80000000;
 const RV64_DTB_ADDR: u64 = 0x87f00000;
 const DEVICE_TREE_ROM_HEADER_SIZE: usize = 32;
 const DEFAULT_CMDLINE: &str = "root=/dev/vda ro console=ttyS0";
+const MAX_EXECUTOR_BUDGET: u32 = 32;
 
 pub struct Machine {
   pub cpu: RV64Cpu,
-  pub interpreter: Box<dyn RV64Interpreter>,
+  pub executor: Box<dyn RV64Executor>,
 }
 
 macro_rules! csr {
@@ -34,9 +35,17 @@ macro_rules! csr {
 
 impl Machine {
   pub fn new(cmdline: Option<String>, trace: Option<String>) -> Machine {
+    Self::new_with_executor(cmdline, trace, Box::new(NaiveInterpreter::new()))
+  }
+
+  pub fn new_with_executor(
+    cmdline: Option<String>,
+    trace: Option<String>,
+    executor: Box<dyn RV64Executor>,
+  ) -> Machine {
     let mut machine = Machine {
       cpu: RV64Cpu::new(trace),
-      interpreter: Box::new(NaiveInterpreter::new()),
+      executor,
     };
 
     let cmdline = cmdline.unwrap_or(DEFAULT_CMDLINE.to_string());
@@ -71,14 +80,7 @@ impl Machine {
   }
 
   pub fn run_next(&mut self) -> bool {
-    self.cpu.bus.clint.tick(&mut self.cpu.csrs);
-
-    if let Some(irq) = self.cpu.pending_interrupt() {
-      // TODO: can IRQ fail to handle?
-      let _ = irq.handle(&mut self.cpu);
-    }
-
-    match self.interpreter.interp(&mut self.cpu) {
+    match self.dispatch_next() {
       Ok(_) => true,
       // TODO: stop treating breakpoint as good trap
       Err(Exception::Breakpoint) => false,
@@ -92,6 +94,35 @@ impl Machine {
         true
       }
     }
+  }
+
+  fn dispatch_next(&mut self) -> Result<(), Exception> {
+    self.cpu.bus.clint.tick(&mut self.cpu.csrs);
+
+    if let Some(irq) = self.cpu.pending_interrupt() {
+      // TODO: can IRQ fail to handle?
+      let _ = irq.handle(&mut self.cpu);
+    }
+
+    let budget = self
+      .cpu
+      .bus
+      .clint
+      .ticks_until_timer()
+      .unwrap_or(MAX_EXECUTOR_BUDGET as u64)
+      .min(MAX_EXECUTOR_BUDGET as u64) as u32;
+    let outcome = self.executor.execute(&mut self.cpu, budget);
+    assert!(
+      outcome.attempted <= budget,
+      "executor attempted {} instructions with a budget of {}",
+      outcome.attempted,
+      budget,
+    );
+    self.cpu.bus.clint.advance(
+      &mut self.cpu.csrs,
+      outcome.attempted.saturating_sub(1) as u64,
+    );
+    outcome.result
   }
 
   pub fn run_for_test(&mut self, test_name: String) -> i32 {
@@ -122,13 +153,7 @@ impl Machine {
   }
 
   pub fn run_next_for_test(&mut self) -> bool {
-    self.cpu.bus.clint.tick(&mut self.cpu.csrs);
-
-    if let Some(irq) = self.cpu.pending_interrupt() {
-      let _ = irq.handle(&mut self.cpu);
-    }
-
-    match self.interpreter.interp(&mut self.cpu) {
+    match self.dispatch_next() {
       Ok(_) => true,
       // riscv-tests uses ecall to tell test results
       Err(Exception::MachineEcall) => false,
@@ -192,5 +217,72 @@ impl Machine {
     let mmap = unsafe { MmapMut::map_mut(&file) }?;
     self.cpu.bus.virtio.set_image(mmap);
     Ok(())
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use std::sync::{Arc, Mutex};
+
+  use super::*;
+  use crate::cpu::bus::CLINT_BASE;
+  use crate::cpu::csr::CSRMap::TIME;
+  use crate::interp::ExecOutcome;
+
+  struct RecordingExecutor {
+    budgets: Arc<Mutex<Vec<u32>>>,
+    attempted: u32,
+  }
+
+  impl RV64Executor for RecordingExecutor {
+    fn execute(&mut self, _cpu: &mut RV64Cpu, budget: u32) -> ExecOutcome {
+      self.budgets.lock().unwrap().push(budget);
+      ExecOutcome::new(self.attempted.min(budget), Ok(()))
+    }
+  }
+
+  #[test]
+  fn dispatcher_limits_blocks_to_timer_deadline_and_advances_in_bulk() {
+    let budgets = Arc::new(Mutex::new(Vec::new()));
+    let executor = RecordingExecutor {
+      budgets: budgets.clone(),
+      attempted: 32,
+    };
+    let mut machine = Machine {
+      cpu: RV64Cpu::new(None),
+      executor: Box::new(executor),
+    };
+    machine
+      .cpu
+      .bus
+      .clint
+      .write::<u64>(VirtAddr(CLINT_BASE + 0x4000), 5)
+      .unwrap();
+
+    assert_eq!(machine.dispatch_next(), Ok(()));
+    assert_eq!(&*budgets.lock().unwrap(), &[4]);
+    assert_eq!(machine.cpu.csrs.read_unchecked(TIME), 4);
+
+    assert_eq!(machine.dispatch_next(), Ok(()));
+    assert_eq!(&*budgets.lock().unwrap(), &[4, 32]);
+    assert_eq!(machine.cpu.csrs.read_unchecked(TIME), 36);
+  }
+
+  #[test]
+  fn waiting_hart_still_ticks_once_per_dispatch() {
+    let mut cpu = RV64Cpu::new(None);
+    cpu.wfi = true;
+    let mut machine = Machine {
+      cpu,
+      executor: Box::new(NaiveInterpreter::new()),
+    };
+
+    assert_eq!(machine.dispatch_next(), Ok(()));
+    assert_eq!(machine.cpu.csrs.read_unchecked(TIME), 1);
+    assert!(machine.cpu.wfi);
+
+    assert_eq!(machine.dispatch_next(), Ok(()));
+    assert_eq!(machine.cpu.csrs.read_unchecked(TIME), 2);
+    assert!(machine.cpu.wfi);
   }
 }

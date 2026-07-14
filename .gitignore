@@ -8,4 +8,7 @@ flamegraph.svg
 out.stacks
 out.collapsed
 tests/
+!valheim-jit/tests/
+valheim-jit/tests/*
+!valheim-jit/tests/differential.rs
 .DS_Store

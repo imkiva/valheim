@@ -15,3 +15,4 @@ pub mod debug;
 pub mod machine;
 pub mod dtb;
 
+pub const TRACE_ENABLED: bool = cfg!(feature = "trace");

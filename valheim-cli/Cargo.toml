@@ -8,4 +8,5 @@ license = "MIT"
 
 [dependencies]
 valheim-core = { path = "../valheim-core", version = "0.2.0" }
+valheim-jit = { path = "../valheim-jit", version = "0.2.0" }
 clap = { version = "3.1.6", features = ["derive"] }

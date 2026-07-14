@@ -38,6 +38,15 @@ impl Clint {
   }
 
   pub fn tick(&mut self, csrs: &mut CSRRegs) {
+    self.advance(csrs, 1);
+  }
+
+  /// Advance the platform timer by several guest instruction ticks.
+  pub fn advance(&mut self, csrs: &mut CSRRegs, ticks: u64) {
+    if ticks == 0 {
+      return;
+    }
+
     let old_mtime = self.mtime;
     let old_csr_time = csrs.csrs[CSRMap::TIME as usize];
     debug_assert_eq!(old_mtime, old_csr_time);
@@ -45,8 +54,8 @@ impl Clint {
     // 3.2.1 Machine Timer Registers (mtime and mtimecmp)
     // mtime must increment at constant frequency, and the platform must provide a mechanism for determining the period of an mtime tick.
 
-    self.mtime = old_mtime.wrapping_add(1);
-    csrs.csrs[CSRMap::TIME as usize] = old_csr_time.wrapping_add(1);
+    self.mtime = old_mtime.wrapping_add(ticks);
+    csrs.csrs[CSRMap::TIME as usize] = old_csr_time.wrapping_add(ticks);
 
     // 3.2.1 Machine Timer Registers (mtime and mtimecmp)
     // A machine timer interrupt becomes pending whenever mtime contains a value greater than or
@@ -67,6 +76,16 @@ impl Clint {
     } else {
       // clear the interrupt
       let _ = csrs.write_unchecked(MIP, csrs.read_unchecked(MIP) & !MTIP_MASK);
+    }
+  }
+
+  /// Number of ticks until a future timer deadline. A timer that is already
+  /// pending has no future deadline with which to restrict an execution block.
+  pub fn ticks_until_timer(&self) -> Option<u64> {
+    if self.mtimecmp > self.mtime {
+      Some(self.mtimecmp - self.mtime)
+    } else {
+      None
     }
   }
 
@@ -126,5 +145,32 @@ impl Clint {
       _ => return Err(Exception::StoreAccessFault(addr)),
     }
     Ok(())
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::cpu::csr::CSRMap::{MIP, MTIP_MASK, TIME};
+
+  #[test]
+  fn advance_updates_time_and_posts_at_the_deadline() {
+    let mut clint = Clint::new();
+    let mut csrs = CSRRegs::new();
+    clint.write::<u64>(VirtAddr(MTIMECMP), 5).unwrap();
+
+    assert_eq!(clint.ticks_until_timer(), Some(5));
+    clint.advance(&mut csrs, 4);
+    assert_eq!(csrs.read_unchecked(TIME), 4);
+    assert_eq!(clint.ticks_until_timer(), Some(1));
+    assert_eq!(csrs.read_unchecked(MIP) & MTIP_MASK, 0);
+
+    clint.tick(&mut csrs);
+    assert_eq!(csrs.read_unchecked(TIME), 5);
+    assert_eq!(clint.ticks_until_timer(), None);
+    assert_ne!(csrs.read_unchecked(MIP) & MTIP_MASK, 0);
+
+    clint.tick(&mut csrs);
+    assert_eq!(clint.ticks_until_timer(), None);
   }
 }

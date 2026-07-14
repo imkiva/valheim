@@ -1,0 +1,20 @@
+[package]
+name = "valheim-jit"
+version = "0.2.0"
+edition = "2021"
+repository = "https://github.com/imkiva/valheim"
+description = "x86_64 JIT executor for Valheim"
+license = "MIT"
+
+[dependencies]
+valheim-asm = { path = "../valheim-asm", version = "0.2.0" }
+valheim-core = { path = "../valheim-core", version = "0.2.0" }
+cranelift-codegen = "=0.112.3"
+cranelift-frontend = "=0.112.3"
+cranelift-jit = "=0.112.3"
+cranelift-module = "=0.112.3"
+cranelift-native = "=0.112.3"
+rustc-hash = "=2.1.3"
+# Cranelift 0.112 accepts any indexmap 2.x, but recent releases require
+# Edition 2024 and cannot be parsed by this repository's pinned Cargo 1.83.
+indexmap = "=2.2.6"

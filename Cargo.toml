@@ -2,6 +2,7 @@
 members = [
   "valheim-asm",
   "valheim-core",
+  "valheim-jit",
   "valheim-cli",
   "xtask"
 ]

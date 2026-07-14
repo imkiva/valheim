@@ -215,6 +215,17 @@ impl RV64Cpu {
       false => std::mem::size_of::<Bytecode>() as u64,
     };
     let mut next_pc = VirtAddr(pc.0.wrapping_add(delta));
+    let writes_satp = match instr {
+      RV64(CSRRW(_, _, csr)) |
+      RV64(CSRRS(_, _, csr)) |
+      RV64(CSRRC(_, _, csr)) |
+      RV64(CSRRWI(_, _, csr)) |
+      RV64(CSRRSI(_, _, csr)) |
+      RV64(CSRRCI(_, _, csr)) => csr.value() == SATP,
+      _ => false,
+    };
+    let fences_translation = matches!(instr, RV64(SFENCE_VMA(_, _)));
+    let fences_instructions = matches!(instr, RV64(FENCE_I(_, _, _)));
 
     self.journal.trace(|| Trace::Instr(InstrTrace::PrepareExecute(pc, instr)));
     match instr {
@@ -514,36 +525,30 @@ impl RV64Cpu {
         let old = self.csrs.read(csr);
         self.csrs.write(csr, rs1.read(self))?;
         rd.write(self, old);
-        if csr.value() == SATP { self.sync_pagetable(); }
       }
       RV64(CSRRS(rd, rs1, csr)) => {
         let old = self.csrs.read(csr);
         self.csrs.write(csr, old | rs1.read(self))?;
         rd.write(self, old);
-        if csr.value() == SATP { self.sync_pagetable(); }
       }
       RV64(CSRRC(rd, rs1, csr)) => {
         let old = self.csrs.read(csr);
         self.csrs.write(csr, old & (!rs1.read(self)))?;
         rd.write(self, old);
-        if csr.value() == SATP { self.sync_pagetable(); }
       }
       RV64(CSRRWI(rd, imm, csr)) => {
         rd.write(self, self.csrs.read(csr));
         self.csrs.write(csr, imm.value() as u64)?;
-        if csr.value() == SATP { self.sync_pagetable(); }
       }
       RV64(CSRRSI(rd, imm, csr)) => {
         let old = self.csrs.read(csr);
         self.csrs.write(csr, old | imm.value() as u64)?;
         rd.write(self, old);
-        if csr.value() == SATP { self.sync_pagetable(); }
       }
       RV64(CSRRCI(rd, imm, csr)) => {
         let old = self.csrs.read(csr);
         self.csrs.write(csr, old & (!imm.value() as u64))?;
         rd.write(self, old);
-        if csr.value() == SATP { self.sync_pagetable(); }
       }
 
       // RVF, RVD
@@ -804,6 +809,19 @@ impl RV64Cpu {
       RV64(SFENCE_INVAL_IR) => panic!("not implemented at PC = {:?}", pc),
     };
 
+    // Commit cache-visible generations only after the instruction's fallible
+    // work above has completed. Cache implementations may conservatively drop
+    // all entries when either wrapping generation changes.
+    if writes_satp {
+      self.sync_pagetable();
+    }
+    if writes_satp || fences_translation {
+      self.translation_epoch = self.translation_epoch.wrapping_add(1);
+    }
+    if fences_instructions {
+      self.icache_epoch = self.icache_epoch.wrapping_add(1);
+    }
+
     self.journal.trace(|| match is_compressed {
       true => Trace::Instr(InstrTrace::ExecutedCompressed(pc, instr)),
       false => Trace::Instr(InstrTrace::Executed(pc, instr))
@@ -851,5 +869,86 @@ impl WriteReg for Rd {
   #[inline(always)]
   fn write_fp(&self, cpu: &mut RV64Cpu, val: f64) {
     cpu.write_reg_fp(self.0, val);
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use valheim_asm::isa::rv64::{CSRAddr, UImm};
+
+  use crate::cpu::bus::RV64_MEMORY_BASE;
+
+  fn execute_rv64(cpu: &mut RV64Cpu, instr: RV64Instr) {
+    let pc = cpu.read_pc();
+    cpu.execute(pc, Instr::RV64(instr), false).unwrap();
+  }
+
+  #[test]
+  fn cache_epochs_start_at_zero() {
+    let cpu = RV64Cpu::new(None);
+    assert_eq!(cpu.translation_epoch, 0);
+    assert_eq!(cpu.icache_epoch, 0);
+  }
+
+  #[test]
+  fn fence_instructions_bump_their_respective_epochs() {
+    let mut cpu = RV64Cpu::new(None);
+    cpu.write_pc(VirtAddr(RV64_MEMORY_BASE));
+
+    execute_rv64(
+      &mut cpu,
+      RV64Instr::FENCE_I(Rd(Reg::ZERO), Rs1(Reg::ZERO), Imm32::from(0)),
+    );
+    assert_eq!(cpu.icache_epoch, 1);
+    assert_eq!(cpu.translation_epoch, 0);
+
+    execute_rv64(
+      &mut cpu,
+      RV64Instr::SFENCE_VMA(Rs1(Reg::ZERO), Rs2(Reg::ZERO)),
+    );
+    assert_eq!(cpu.icache_epoch, 1);
+    assert_eq!(cpu.translation_epoch, 1);
+  }
+
+  #[test]
+  fn successful_satp_writes_bump_translation_epoch() {
+    let mut cpu = RV64Cpu::new(None);
+    cpu.write_pc(VirtAddr(RV64_MEMORY_BASE));
+    let satp = CSRAddr(Imm32::from(SATP as u32));
+
+    execute_rv64(
+      &mut cpu,
+      RV64Instr::CSRRW(Rd(Reg::ZERO), Rs1(Reg::ZERO), satp),
+    );
+    assert_eq!(cpu.translation_epoch, 1);
+    assert_eq!(cpu.icache_epoch, 0);
+
+    execute_rv64(
+      &mut cpu,
+      RV64Instr::CSRRWI(Rd(Reg::ZERO), UImm(Imm32::from(0)), satp),
+    );
+    assert_eq!(cpu.translation_epoch, 2);
+    assert_eq!(cpu.icache_epoch, 0);
+  }
+
+  #[test]
+  fn epoch_updates_wrap_without_panicking() {
+    let mut cpu = RV64Cpu::new(None);
+    cpu.write_pc(VirtAddr(RV64_MEMORY_BASE));
+    cpu.translation_epoch = u64::MAX;
+    cpu.icache_epoch = u64::MAX;
+
+    execute_rv64(
+      &mut cpu,
+      RV64Instr::FENCE_I(Rd(Reg::ZERO), Rs1(Reg::ZERO), Imm32::from(0)),
+    );
+    execute_rv64(
+      &mut cpu,
+      RV64Instr::SFENCE_VMA(Rs1(Reg::ZERO), Rs2(Reg::ZERO)),
+    );
+
+    assert_eq!(cpu.icache_epoch, 0);
+    assert_eq!(cpu.translation_epoch, 0);
   }
 }

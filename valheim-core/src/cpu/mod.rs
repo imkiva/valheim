@@ -30,6 +30,10 @@ pub struct RV64Cpu {
   pub vmmode: VMMode,
   /// physical page number used in virtual memory translation
   pub vmppn: u64,
+  /// Generation of address-translation state visible to execution caches.
+  pub translation_epoch: u64,
+  /// Generation of instruction bytes visible to execution caches.
+  pub icache_epoch: u64,
   /// current cycle instruction
   pub instr: u64,
 
@@ -57,6 +61,8 @@ impl RV64Cpu {
       wfi: false,
       vmppn: 0,
       vmmode: VMMode::MBARE,
+      translation_epoch: 0,
+      icache_epoch: 0,
       journal: Journal {
         init_regs: regs,
         init_mem_base: VirtAddr(RV64_MEMORY_BASE),

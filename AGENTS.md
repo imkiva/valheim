@@ -4,7 +4,7 @@
 
 ## 项目概览
 
-Valheim 是一个用 Rust 编写、以学习和参考实现为目的的 RISC-V 64 位系统模拟器，项目版本为 `0.2.0`。它作为宿主普通进程运行，采用解释执行方式运行 guest，目标 ISA 是 RV64GC，并实现机器态、监管态和用户态所需的 CSR、异常、中断、分页以及一组 QEMU `virt` 风格设备。
+Valheim 是一个用 Rust 编写、以学习和参考实现为目的的 RISC-V 64 位系统模拟器，项目版本为 `0.2.0`。它作为宿主普通进程运行，可使用朴素解释器或分层 JIT 运行 guest，目标 ISA 是 RV64GC，并实现机器态、监管态和用户态所需的 CSR、异常、中断、分页以及一组 QEMU `virt` 风格设备。
 
 当前实现的重要边界：
 
@@ -12,21 +12,25 @@ Valheim 是一个用 Rust 编写、以学习和参考实现为目的的 RISC-V 6
 - 256 MiB guest RAM；这是为内嵌完整 Debian 13 slim rootfs 的 Linux demo 扩容后的值。
 - guest kernel/BIOS 必须是 raw binary，CLI 不解析 ELF。
 - VirtIO block 是 legacy VirtIO-MMIO version 1，队列长度为 8；现代要求 version 2 的 guest 驱动不兼容。
-- 主执行器是 `NaiveInterpreter`，没有 JIT。
+- CLI 默认执行器是 `NaiveInterpreter`；`--engine jit` 启用 decoded-TB + Cranelift 分层
+  JIT，不支持的 system/F/D 指令精确回退到解释器。
+- JIT-enabled CLI 和完整 workspace 明确只支持 Linux x86_64 System V ABI；
+  `valheim-core` 等不依赖 `valheim-jit` 的 crate 仍可单独构建。
 - UART 直接连接宿主标准输入和标准输出，并实现 Linux 8250 驱动需要的 DLAB、IIR、RX/TX 中断和状态位。
 
 ## Workspace 与模块职责
 
-根 `Cargo.toml` 包含四个成员，但 `default-members = ["xtask"]`。因此裸 `cargo run` 或 `cargo build` 默认操作的是 `xtask`，不是模拟器 CLI。
+根 `Cargo.toml` 包含五个成员，但 `default-members = ["xtask"]`。因此裸 `cargo run` 或 `cargo build` 默认操作的是 `xtask`，不是模拟器 CLI。
 
 | 路径 | 职责 |
 | --- | --- |
 | `valheim-asm/` | RISC-V 指令数据结构、类型安全的寄存器/立即数表示、16/32 位指令解码与编码，以及相关单元测试。 |
 | `valheim-core/` | 模拟器核心：CPU/寄存器、CSR、异常和中断、MMU、指令执行、解释器、内存总线、设备、DTB、运行循环和 trace。 |
-| `valheim-core/src/cpu/` | CPU 状态、执行语义、CSR、MMU、异常/中断和系统总线。 |
-| `valheim-core/src/interp/` | 解释器接口与当前的朴素解释器实现。 |
+| `valheim-core/src/cpu/` | CPU 状态、执行语义、CSR、异常/中断、系统总线，以及解释器/JIT 共用的唯一 `translate_to_host()` 页表与权限逻辑。 |
+| `valheim-core/src/interp/` | 共享 `RV64Executor`/`ExecOutcome` 执行器契约与朴素解释器实现。 |
 | `valheim-core/src/device/` | CLINT、PLIC、NS16550A UART 和 legacy VirtIO block。 |
-| `valheim-core/src/machine/` | 将 CPU、解释器、DTB、UART、kernel、BIOS 和磁盘组合成可运行的虚拟机。 |
+| `valheim-core/src/machine/` | 将 CPU、可注入执行器、DTB、UART、kernel、BIOS 和磁盘组合成可运行的虚拟机。 |
+| `valheim-jit/` | decoded TB/cache/runtime、Cranelift RV64I/M lowering、A 扩展 helper、software TLB 和 DRAM fast path。 |
 | `valheim-cli/` | `valheim-cli` 命令行入口，负责参数解析和加载镜像。 |
 | `xtask/` | 自动构建、转换并运行上游 `riscv-tests`。 |
 | `dts/` | 启动时由 `dtc` 编译的设备树模板。 |
@@ -54,7 +58,7 @@ Valheim 是一个用 Rust 编写、以学习和参考实现为目的的 RISC-V 6
 
 ## 已验证的本机工具环境
 
-最后一次完整验证日期：2026-07-14。
+最后一次完整验证日期：2026-07-15。
 
 - Valheim Rust：`nightly-2024-09-05`。根 `rust-toolchain` 只写了不固定版本的 `nightly`，为了复现不要依赖它解析到的最新版本。
 - 历史 RustSBI demo Rust：`nightly-2022-02-14`，已安装 target `riscv64imac-unknown-none-elf`。旧源码使用已从现代 Rust 删除的 generator API，不能改用新 nightly。
@@ -150,6 +154,14 @@ cargo +nightly-2024-09-05 run \
   --kernel path/to/kernel.bin
 ```
 
+上述命令默认使用 naive；在支持的 Linux x86_64 SysV 宿主上可显式选择 JIT：
+
+```bash
+cargo +nightly-2024-09-05 start \
+  --engine jit \
+  --kernel path/to/kernel.bin
+```
+
 ### CLI 参数
 
 - `--kernel` / `-k`：必填的 raw binary。
@@ -159,6 +171,18 @@ cargo +nightly-2024-09-05 run \
 - `--trace`：指定 trace 追加输出文件，但只有启用 `valheim-core/trace` feature 才生效。
 - `--test`：按 `riscv-tests` 的 ECALL 约定运行并返回测试退出码。
 - `--test-name`：测试输出中使用的名称。
+- `--engine naive|jit`：选择执行器，默认 `naive`。
+- `--jit-hot-threshold`：TB 在 decoded 层成功执行多少次后编译，默认 500，最小 1。
+- `--jit-max-block-len`：每个 TB 的最大 guest 指令数，默认 32，有效范围 1–32。
+- `--jit-max-compiled-blocks`：每个 Cranelift module 的函数上限，默认 4096。
+- `--jit-max-code-bytes`：所有存活 module 的机器码总上限，默认 134217728
+  bytes（128 MiB）；到达上限后在 dispatcher 安全点整体换代。
+- `--jit-stats`：启用 JIT 统计输出。
+- `--jit-stats-interval`：统计输出间隔，默认 1000000 次 dispatcher，只在
+  `--jit-stats` 时生效。
+
+任何 runtime `--trace` 参数或编译期 `valheim-core/trace` feature 都会将请求的 JIT
+强制切换为 naive，并在 stderr 给出提示。
 
 直接运行 raw kernel：
 
@@ -186,16 +210,30 @@ Rust workspace 单元测试：
 cargo +nightly-2024-09-05 test --workspace --locked
 ```
 
-该命令已验证为 14 个测试通过、0 个失败：`valheim-asm` 10 个，`valheim-core` 4 个；后者包含 UART RX/TX 单次中断脉冲回归测试。
+该命令已验证为 89 个测试通过、0 个失败：`valheim-asm` 11 个，
+`valheim-core` 42 个，`valheim-jit` 24 个 unit + 8 个 native/naive integration tests，
+`xtask` 4 个。额外的 trace 语义回归为：
+
+```bash
+cargo +nightly-2024-09-05 test \
+  --locked --package valheim-core --features trace
+```
+
+该命令已验证 43 个测试通过。
 
 完整 RISC-V ISA 测试需要交叉工具链和 `riscv-tests` 子模块：
 
 ```bash
 export PATH="$PWD/target/demo/gcc-riscv64-elf-2022.03.09/riscv/bin:$PATH"
-cargo +nightly-2024-09-05 run-riscv-tests
+cargo +nightly-2024-09-05 run-riscv-tests -- --engine naive
+cargo +nightly-2024-09-05 run-riscv-tests -- --engine jit
 ```
 
-当前启用 96 个 ISA 测试、禁用 11 个浮点相关测试。`xtask` 会构建 debug CLI、配置并安装 `riscv-tests`、用 `objcopy` 将每个 ELF 转成 raw binary，再逐个运行。该流程没有单项超时，guest 卡死会使整个命令一直等待。
+当前启用 96 个 ISA 测试、禁用 11 个浮点相关测试；naive 和 JIT 均已验证
+96/96。`xtask` 默认使用 naive；JIT 测试自动传入 hot threshold 1，以确保覆盖
+native 编译路径。它会构建 debug CLI、配置并安装 `riscv-tests`、用 `objcopy`
+将每个 ELF 转成 raw binary，再逐个运行。该流程没有单项超时，guest 卡死会使
+整个命令一直等待。
 
 子模块 URL 是 GitHub SSH 地址。没有 GitHub SSH key 时使用 HTTPS 覆盖：
 
@@ -219,7 +257,8 @@ cargo +nightly-2024-09-05 run \
   --trace valheim-trace.txt
 ```
 
-不要把 `--features` 放在 `cargo start` alias 后；该 alias 已经包含 Cargo 的 `--`，额外参数会被当作 `valheim-cli` 参数。Trace 文件以追加模式打开。
+不要把 `--features` 放在 `cargo start` alias 后；该 alias 已经包含 Cargo 的 `--`，额外参数会被当作 `valheim-cli` 参数。Trace 文件以追加模式打开。JIT 暂不支持逐指令 trace；
+`--engine jit --trace ...` 或启用 trace feature 的构建会提示并使用 naive。
 
 ## Demo 目录约定
 
@@ -254,6 +293,18 @@ target/demo/                         # Git 忽略；由 run.sh 创建
 
 注意：`target/` 在 `.gitignore` 中，因此只有 `demo/` 中的静态文件会随 Git commit
 保存；脚本的下载与构建产物不应出现在 `git status` 中。
+
+三个 demo 的 `run.sh` 都会把额外参数透传给 `valheim-cli`。无参数时默认 naive；
+Linux x86_64 SysV 宿主上可用以下形式验证 JIT：
+
+```bash
+RESET_DISK=1 ./demo/xv6/run.sh --engine jit
+./demo/rustsbi/run.sh --engine jit
+./demo/linux/run.sh --engine jit
+```
+
+2026-07-15 已实际验证三个 demo 的 naive 和 JIT 两种 engine：xv6 进入 `$` 并执行
+`echo`，RustSBI 输出 success marker，Debian 进入 `debian13#` 并读取版本 `13.6`。
 
 ## 已验证的 xv6 Demo
 
@@ -345,7 +396,11 @@ bash --version
 id
 ```
 
-2026-07-14 已实际验证交互输入输出：`/etc/debian_version` 为 `13.6`，Bash 为 `5.2.37(1)-release`，`coreutils` 为 `9.7-3`，glibc 为 `2.41-12+deb13u3`，`id` 显示 root；超过 80 字节的连续 UART 输出后仍能继续交互。release 解释器在本机进入 shell 通常约需 1–3 分钟；第一次运行还要下载和构建，耗时更长。按宿主 `Ctrl-C` 退出。
+2026-07-14 已实际验证交互输入输出：`/etc/debian_version` 为 `13.6`，Bash 为 `5.2.37(1)-release`，`coreutils` 为 `9.7-3`，glibc 为 `2.41-12+deb13u3`，`id` 显示 root；超过 80 字节的连续 UART 输出后仍能继续交互。第一次运行还要下载和构建，耗时更长。按宿主 `Ctrl-C` 退出。
+
+2026-07-15 在同一 release binary 与已构建 artifact 上，从宿主进程启动到真实行末
+`debian13# ` 各测三次：naive 中位数 69.603 s，JIT 中位数 13.447 s，加速
+5.176×；详细环境、单次数据和 JIT 统计见根 `JIT-PLAN.md`。
 
 固定版本和来源：
 
@@ -431,6 +486,14 @@ openEuler 演示没有固定的 BIOS、kernel、rootfs、下载脚本或版本 h
 - `dtc` 是运行时硬依赖。当前 DTB 生成代码丢弃 stderr 且不检查编译器退出状态，非法 `--cmdline` 可能只表现为损坏的 DTB 或不清楚的启动失败。
 - `--disk` 会 mmap 并原地修改文件。
 - `--trace` 默认无效，必须显式启用 feature。
+- JIT 暂不支持完整逐指令 trace；请求 JIT 同时传 `--trace` 或启用 trace feature
+  时会强制使用 naive。
+- `fetch_mem()` 必须先取首个 16-bit parcel，并且只在确认为 32-bit 指令时取第二个；
+  跨页时两个 parcel 必须分别以 Fetch 权限翻译。不能退回“翻译一次再读 u32”，否则会
+  绕过第二页映射、X 权限及 `PC+2` fault address。
+- 页表 walker 的隐式 PTE read/A-D write 和最终物理 endpoint access fault 必须按原始
+  Fetch/Read/Write 类型报告 guest VA；跨页数据访问应报告实际故障 fragment 的 VA，不能
+  把页表或 endpoint 的物理地址泄漏进 `mtval/stval`。解释器与 JIT slow path 共用该不变量。
 - 测试和普通运行循环都没有 watchdog/超时，坏 guest 可能永久循环。
 - 当前 VirtIO 是 legacy version 1；必须选择明确支持 legacy VirtIO-MMIO v1 的 guest 驱动，不能只根据 guest 的发布年份判断。
 - RustSBI 历史 test kernel 的 success marker 来自明确记录的单 hart patch；不要声称未修改的上游多 hart HSM 测试在 Valheim 上完整通过。
@@ -439,7 +502,9 @@ openEuler 演示没有固定的 BIOS、kernel、rootfs、下载脚本或版本 h
 - Linux demo 使用内建 initramfs，成功不代表现代 Linux 的 VirtIO block 路径已兼容；切换到磁盘 rootfs 前必须单独修复和验证 VirtIO。
 - UART RX/TX 目前以单次事件脉冲适配 Valheim 的简化 PLIC。xv6/Linux 的正常初始化顺序已验证；若字节恰在 PLIC source 10 被 mask 时到达，简化 PLIC 不会在之后 enable 时从 pending 重算 claim，事件可能暂时卡住。完整 level-triggered 语义需要连同 PLIC/SEIP 路径一起修复。
 - DTB 先由 `Machine::new` 放到 `0x87f0_0000`，CLI 随后才加载 BIOS/kernel，当前没有镜像范围与 DTB overlap 检查；现有约 40 MiB Linux Image 安全，但不要传入会延伸到该地址的大型 raw image。
-- `Memory::load` 当前只检查复制起点，bus 的 `*_END` 常量又按 exclusive end 计算却用于 inclusive match；不可信或超大镜像可能越界。修复边界检查前，只使用已校验且尺寸明确的 guest artifact。
+- `Memory` 现已对完整宽度/完整 slice 做 checked 半开区间检查，非对齐读写使用
+  unaligned primitives；bus 也使用完整宽度的半开区间匹配。但 `Machine::load_memory`
+  仍会丢弃 `Memory::load` 的 `Option`，越界镜像会静默地未被加载。
 - `profiler/profile.sh` 仍引用旧 binary 名称和缺失的测试镜像，并依赖 DTrace；使用前必须修正，不能把它作为已验证流程。
 - Release profile 保留 debug symbols，这是性能分析和符号化所需的有意配置。
 
@@ -457,9 +522,20 @@ cargo +nightly-2024-09-05 build --release --locked --package valheim-cli
 修改 CPU、CSR、MMU、异常/中断、总线、UART、PLIC、CLINT、VirtIO、DTB 或 Machine 启动逻辑后，还应运行：
 
 ```bash
-RESET_DISK=1 ./demo/xv6/run.sh
-./demo/rustsbi/run.sh
-./demo/linux/run.sh
+cargo +nightly-2024-09-05 test \
+  --locked --package valheim-core --features trace
+
+export PATH="$PWD/target/demo/gcc-riscv64-elf-2022.03.09/riscv/bin:$PATH"
+cargo +nightly-2024-09-05 run-riscv-tests -- --engine naive
+cargo +nightly-2024-09-05 run-riscv-tests -- --engine jit
+
+RESET_DISK=1 ./demo/xv6/run.sh --engine naive
+./demo/rustsbi/run.sh --engine naive
+./demo/linux/run.sh --engine naive
+
+RESET_DISK=1 ./demo/xv6/run.sh --engine jit
+./demo/rustsbi/run.sh --engine jit
+./demo/linux/run.sh --engine jit
 ```
 
 验收不是只看到 kernel banner。xv6 必须进入 `$`，Linux 必须进入 `debian13#`，并分别至少成功执行一个 guest 命令，例如：

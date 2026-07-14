@@ -212,7 +212,7 @@ impl Encode32 for RV64Instr {
       // RV32/64 Privileged
       RV64Instr::SRET => 0b0001000_00010_00000_000_00000_1110011,
       RV64Instr::MRET => 0b0011000_00010_00000_000_00000_1110011,
-      RV64Instr::WFI => 0b0001000_00010_00000_000_00000_1110011,
+      RV64Instr::WFI => 0b0001000_00101_00000_000_00000_1110011,
       RV64Instr::SFENCE_VMA(rs1, rs2) => emit_r(0b1110011, 0b0001001, 0b000, Rd(ZERO), rs1, rs2),
       RV64Instr::SINVAL_VMA(rs1, rs2) => emit_r(0b1110011, 0b0001011, 0b000, Rd(ZERO), rs1, rs2),
       RV64Instr::SFENCE_W_INVAL => 0b0001100_00000_00000_000_00000_1110011,
@@ -377,8 +377,15 @@ mod tests {
   use crate::asm::encode32::Encode32;
   use crate::isa::data::Fin;
   use crate::isa::rv32::RV32Instr;
+  use crate::isa::rv64::RV64Instr;
   use crate::isa::typed::{Instr, Rd, RoundingMode, Rs1, Rs2, Rs3};
   use crate::isa::typed::Reg::{F, X};
+
+  #[test]
+  fn encodes_wfi_with_its_distinct_privileged_immediate() {
+    assert_eq!(RV64Instr::WFI.encode32(), 0x1050_0073);
+    assert_eq!(Instr::decode32(0x1050_0073), Some(Instr::RV64(RV64Instr::WFI)));
+  }
 
   #[test]
   pub fn xlb_step2() {
