@@ -89,7 +89,6 @@ pub struct CraneliftBackend {
   function_context: FunctionBuilderContext,
   tlb_fill_helper: FuncId,
   atomic_helper: FuncId,
-  code_bytes: u64,
 }
 
 impl CraneliftBackend {
@@ -129,7 +128,6 @@ impl CraneliftBackend {
       function_context: FunctionBuilderContext::new(),
       tlb_fill_helper,
       atomic_helper,
-      code_bytes: 0,
     })
   }
 
@@ -240,7 +238,6 @@ impl CraneliftBackend {
       .compiled_code()
       .map(|code| code.code_info().total_size as u64)
       .unwrap_or(0);
-    self.code_bytes = self.code_bytes.saturating_add(code_size);
     self.module.clear_context(&mut self.context);
     self
       .module
@@ -249,10 +246,6 @@ impl CraneliftBackend {
     let pointer = self.module.get_finalized_function(function_id);
     let entry = unsafe { transmute::<*const u8, BlockEntry>(pointer) };
     Ok(CompiledBlock { entry, code_size })
-  }
-
-  pub fn code_bytes(&self) -> u64 {
-    self.code_bytes
   }
 
   /// Releases every native function in this module at a dispatcher safe point.

@@ -17,6 +17,7 @@ const DEFAULT_HOT_THRESHOLD: u32 = 500;
 // generated memory/TLB side exits make each function substantially larger than a pure ALU TB.
 const DEFAULT_MAX_COMPILED_BLOCKS: usize = 4 * 1024;
 const DEFAULT_MAX_LIVE_CODE_BYTES: u64 = 128 * 1024 * 1024;
+const FAST_CACHE_SET_COUNT: usize = 4 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct TbKey {
@@ -67,6 +68,111 @@ struct CachedBlock {
   compile_failed: bool,
 }
 
+#[derive(Clone, Copy)]
+enum CacheEntry {
+  Block(usize),
+  Fallback(FallbackKind),
+}
+
+#[derive(Clone, Copy)]
+struct FastCacheWay {
+  key: TbKey,
+  block_index: usize,
+}
+
+#[derive(Clone, Copy)]
+struct FastCacheSet {
+  generation: u64,
+  ways: [Option<FastCacheWay>; 2],
+  next_way: u8,
+}
+
+impl FastCacheSet {
+  const EMPTY: Self = Self {
+    generation: 0,
+    ways: [None, None],
+    next_way: 0,
+  };
+}
+
+/// A small compiled-TB front cache. The authoritative map stores stable indices into the block
+/// arena, so this cache never owns guest blocks or native function pointers. Invalidating its
+/// generation before clearing the arena makes stale indices unreachable without an O(n) sweep.
+struct FastCache {
+  sets: Box<[FastCacheSet]>,
+  generation: u64,
+}
+
+impl FastCache {
+  fn new() -> Self {
+    debug_assert!(FAST_CACHE_SET_COUNT.is_power_of_two());
+    Self {
+      sets: vec![FastCacheSet::EMPTY; FAST_CACHE_SET_COUNT].into_boxed_slice(),
+      generation: 1,
+    }
+  }
+
+  #[inline(always)]
+  fn set_index(key: TbKey) -> usize {
+    let mut hash = (key.pc >> 1)
+      ^ key.satp
+      ^ key.satp.rotate_right(23)
+      ^ key.translation_epoch.rotate_left(11)
+      ^ key.icache_epoch.rotate_left(37)
+      ^ (key.privilege as u64).wrapping_mul(0x9e37_79b9);
+    hash ^= hash >> 32;
+    hash as usize & (FAST_CACHE_SET_COUNT - 1)
+  }
+
+  #[inline(always)]
+  fn lookup(&self, key: TbKey) -> Option<usize> {
+    let set = &self.sets[Self::set_index(key)];
+    if set.generation != self.generation {
+      return None;
+    }
+    if let Some(way) = set.ways[0] {
+      if way.key == key {
+        return Some(way.block_index);
+      }
+    }
+    if let Some(way) = set.ways[1] {
+      if way.key == key {
+        return Some(way.block_index);
+      }
+    }
+    None
+  }
+
+  #[inline(always)]
+  fn insert(&mut self, key: TbKey, block_index: usize) {
+    let set = &mut self.sets[Self::set_index(key)];
+    if set.generation != self.generation {
+      *set = FastCacheSet {
+        generation: self.generation,
+        ..FastCacheSet::EMPTY
+      };
+    }
+    let way = FastCacheWay { key, block_index };
+    for slot in &mut set.ways {
+      if slot.map(|old| old.key == key).unwrap_or(true) {
+        *slot = Some(way);
+        return;
+      }
+    }
+    let replacement = set.next_way as usize;
+    set.ways[replacement] = Some(way);
+    set.next_way ^= 1;
+  }
+
+  fn invalidate(&mut self) {
+    self.generation = self.generation.wrapping_add(1);
+    if self.generation == 0 {
+      self.sets.fill(FastCacheSet::EMPTY);
+      self.generation = 1;
+    }
+  }
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct JitStats {
   pub hot_threshold: u32,
@@ -112,14 +218,16 @@ pub struct JitExecutor {
   retired_backends: Vec<CraneliftBackend>,
   tlb: SoftwareTlb,
   tlb_context: Option<TlbContext>,
-  cache: FxHashMap<TbKey, CachedBlock>,
-  negative_cache: FxHashMap<TbKey, FallbackKind>,
+  cache: FxHashMap<TbKey, CacheEntry>,
+  blocks: Vec<CachedBlock>,
+  fast_cache: FastCache,
   pending_slow_memory: FxHashMap<TbKey, GuestInst>,
   hot_threshold: u32,
   max_block_len: usize,
   max_compiled_blocks: usize,
   max_live_code_bytes: u64,
   compiled_in_generation: usize,
+  live_code_bytes: u64,
   stats_enabled: bool,
   stats_interval: Option<u64>,
   compilation_samples: Vec<u64>,
@@ -137,13 +245,15 @@ impl JitExecutor {
       tlb: SoftwareTlb::new(),
       tlb_context: None,
       cache: FxHashMap::default(),
-      negative_cache: FxHashMap::default(),
+      blocks: Vec::new(),
+      fast_cache: FastCache::new(),
       pending_slow_memory: FxHashMap::default(),
       hot_threshold: DEFAULT_HOT_THRESHOLD,
       max_block_len: MAX_BLOCK_LEN,
       max_compiled_blocks: DEFAULT_MAX_COMPILED_BLOCKS,
       max_live_code_bytes: DEFAULT_MAX_LIVE_CODE_BYTES,
       compiled_in_generation: 0,
+      live_code_bytes: 0,
       stats_enabled: true,
       stats_interval: None,
       compilation_samples: Vec::new(),
@@ -196,7 +306,7 @@ impl JitExecutor {
     stats.tlb_misses = tlb.misses;
     stats.memory_slow_paths = tlb.slow_paths;
     stats.memory_faults = tlb.faults;
-    stats.live_code_bytes = self.live_code_bytes();
+    stats.live_code_bytes = self.live_code_bytes;
     if !self.compilation_samples.is_empty() {
       let mut samples = self.compilation_samples.clone();
       samples.sort_unstable();
@@ -207,11 +317,11 @@ impl JitExecutor {
     stats
   }
 
-  fn live_code_bytes(&self) -> u64 {
-    self.retired_backends.iter().fold(
-      self.backend.code_bytes(),
-      |total, backend| total.saturating_add(backend.code_bytes()),
-    )
+  fn clear_block_cache(&mut self) {
+    // Make every front-cache index unreachable before dropping its arena element.
+    self.fast_cache.invalidate();
+    self.cache.clear();
+    self.blocks.clear();
   }
 
   fn replace_code_backend(&mut self) -> bool {
@@ -224,13 +334,14 @@ impl JitExecutor {
       return false;
     };
 
-    self.cache.clear();
+    self.clear_block_cache();
     let current = std::mem::replace(&mut self.backend, backend);
     unsafe { current.free_memory() };
     for retired in self.retired_backends.drain(..) {
       unsafe { retired.free_memory() };
     }
     self.compiled_in_generation = 0;
+    self.live_code_bytes = 0;
     true
   }
 
@@ -238,8 +349,7 @@ impl JitExecutor {
     if self.seen_translation_epoch != cpu.translation_epoch
       || self.seen_icache_epoch != cpu.icache_epoch
     {
-      self.cache.clear();
-      self.negative_cache.clear();
+      self.clear_block_cache();
       self.pending_slow_memory.clear();
       self.replace_code_backend();
       self.seen_translation_epoch = cpu.translation_epoch;
@@ -257,7 +367,7 @@ impl JitExecutor {
 
   fn rotate_code_cache_if_needed(&mut self) {
     let module_full = self.compiled_in_generation >= self.max_compiled_blocks;
-    let arena_full = self.live_code_bytes() >= self.max_live_code_bytes;
+    let arena_full = self.live_code_bytes >= self.max_live_code_bytes;
     if !module_full && !arena_full {
       return;
     }
@@ -383,61 +493,22 @@ impl JitExecutor {
       let result = cpu.execute(VirtAddr(inst.pc), inst.decoded, inst.len == 2);
       return ExecOutcome::new(1, result);
     }
-    if let Some(kind) = self.negative_cache.get(&key).copied() {
-      if self.stats_enabled {
-        self.stats.cache_hits += 1;
-        self.stats.negative_cache_hits += 1;
-      }
-      return self.fallback_one(cpu, budget, kind);
-    }
-    if !self.cache.contains_key(&key) {
-      if self.stats_enabled {
-        self.stats.cache_misses += 1;
-      }
-      match GuestBlock::translate(cpu, self.max_block_len) {
-        BlockBuild::Block(block) => {
-          self.cache.insert(
-            key,
-            CachedBlock {
-              block,
-              executions: 0,
-              compiled: None,
-              compile_failed: false,
-            },
-          );
-        }
-        BlockBuild::InterpretOne(kind) => {
-          self.negative_cache.insert(key, kind);
-          if self.stats_enabled {
-            self.stats.negative_blocks += 1;
-          }
-          return self.fallback_one(cpu, budget, kind);
-        }
-        BlockBuild::Fault { raw, exception } => {
-          if let Some(raw) = raw {
-            cpu.instr = raw as u64;
-          }
-          return ExecOutcome::new(1, Err(exception));
-        }
-      }
-    } else {
-      if self.stats_enabled {
-        self.stats.cache_hits += 1;
-      }
-    }
 
-    let (block_len, compiled) = {
-      let cached = self.cache.get(&key).expect("newly inserted TB is missing");
-      (cached.block.instructions.len(), cached.compiled)
-    };
-    if let Some(compiled) = compiled {
-      if block_len <= budget as usize {
+    if let Some(block_index) = self.fast_cache.lookup(key) {
+      let cached = self
+        .blocks
+        .get(block_index)
+        .expect("fast-cache block index outlived its arena");
+      if cached.block.instructions.len() <= budget as usize {
         if self.stats_enabled {
+          self.stats.cache_hits += 1;
           self.stats.native_executions += 1;
         }
-        let (cache, tlb) = (&self.cache, &mut self.tlb);
-        let block = &cache.get(&key).expect("native TB is missing").block;
-        let (outcome, pending) = Self::execute_native(tlb, cpu, block, compiled);
+        let compiled = cached
+          .compiled
+          .expect("fast cache must only contain compiled blocks");
+        let (outcome, pending) =
+          Self::execute_native(&mut self.tlb, cpu, &cached.block, compiled);
         if let Some(inst) = pending {
           self.pending_slow_memory.insert(TbKey::new(cpu), inst);
         }
@@ -445,71 +516,131 @@ impl JitExecutor {
       }
     }
 
-    if self.stats_enabled {
-      self.stats.decoded_executions += 1;
-    }
+    let mut rotate_after_panic = false;
     let outcome = {
-      let block = &self.cache.get(&key).expect("decoded TB is missing").block;
-      Self::execute_decoded(cpu, block, budget)
-    };
+      let block_index = match self.cache.get(&key).copied() {
+        Some(CacheEntry::Block(block_index)) => {
+          if self.stats_enabled {
+            self.stats.cache_hits += 1;
+          }
+          block_index
+        }
+        Some(CacheEntry::Fallback(kind)) => {
+          if self.stats_enabled {
+            self.stats.cache_hits += 1;
+            self.stats.negative_cache_hits += 1;
+          }
+          return self.fallback_one(cpu, budget, kind);
+        }
+        None => {
+          if self.stats_enabled {
+            self.stats.cache_misses += 1;
+          }
+          match GuestBlock::translate(cpu, self.max_block_len) {
+            BlockBuild::Block(block) => {
+              let block_index = self.blocks.len();
+              self.blocks.push(CachedBlock {
+                block,
+                executions: 0,
+                compiled: None,
+                compile_failed: false,
+              });
+              self.cache.insert(key, CacheEntry::Block(block_index));
+              block_index
+            }
+            BlockBuild::InterpretOne(kind) => {
+              self.cache.insert(key, CacheEntry::Fallback(kind));
+              if self.stats_enabled {
+                self.stats.negative_blocks += 1;
+              }
+              return self.fallback_one(cpu, budget, kind);
+            }
+            BlockBuild::Fault { raw, exception } => {
+              if let Some(raw) = raw {
+                cpu.instr = raw as u64;
+              }
+              return ExecOutcome::new(1, Err(exception));
+            }
+          }
+        }
+      };
 
-    let should_compile = {
-      let cached = self.cache.get_mut(&key).expect("executed TB is missing");
+      let cached = &mut self.blocks[block_index];
+      let block_len = cached.block.instructions.len();
+      if let Some(compiled) = cached.compiled {
+        self.fast_cache.insert(key, block_index);
+        if block_len <= budget as usize {
+          if self.stats_enabled {
+            self.stats.native_executions += 1;
+          }
+          let (outcome, pending) =
+            Self::execute_native(&mut self.tlb, cpu, &cached.block, compiled);
+          if let Some(inst) = pending {
+            self.pending_slow_memory.insert(TbKey::new(cpu), inst);
+          }
+          return outcome;
+        }
+      }
+
+      if self.stats_enabled {
+        self.stats.decoded_executions += 1;
+      }
+      let outcome = Self::execute_decoded(cpu, &cached.block, budget);
+
       cached.executions = cached.executions.saturating_add(1);
-      outcome.result.is_ok()
+      let should_compile = outcome.result.is_ok()
         && outcome.attempted as usize == block_len
         && cached.compiled.is_none()
         && !cached.compile_failed
-        && cached.executions >= self.hot_threshold
-    };
-    if should_compile {
-      let started = self.stats_enabled.then(Instant::now);
-      let result = {
-        let (cache, backend) = (&self.cache, &mut self.backend);
-        let block = &cache.get(&key).expect("compile TB is missing").block;
-        catch_unwind(AssertUnwindSafe(|| {
-          backend.compile(block, self.stats_enabled)
-        }))
-      };
-      match result {
-        Ok(Ok(compiled)) => {
-          self.cache.get_mut(&key).unwrap().compiled = Some(compiled);
-          self.compiled_in_generation += 1;
-          if self.stats_enabled {
-            self.stats.compiled_blocks += 1;
-            self.stats.generated_code_bytes = self
-              .stats
-              .generated_code_bytes
-              .saturating_add(compiled.code_size);
-            self.stats.peak_live_code_bytes = self
-              .stats
-              .peak_live_code_bytes
-              .max(self.live_code_bytes());
+        && cached.executions >= self.hot_threshold;
+      if should_compile {
+        let started = self.stats_enabled.then(Instant::now);
+        let result = catch_unwind(AssertUnwindSafe(|| {
+          self.backend.compile(&cached.block, self.stats_enabled)
+        }));
+        match result {
+          Ok(Ok(compiled)) => {
+            cached.compiled = Some(compiled);
+            self.fast_cache.insert(key, block_index);
+            self.compiled_in_generation += 1;
+            self.live_code_bytes = self.live_code_bytes.saturating_add(compiled.code_size);
+            if self.stats_enabled {
+              self.stats.compiled_blocks += 1;
+              self.stats.generated_code_bytes = self
+                .stats
+                .generated_code_bytes
+                .saturating_add(compiled.code_size);
+              self.stats.peak_live_code_bytes =
+                self.stats.peak_live_code_bytes.max(self.live_code_bytes);
+            }
+          }
+          Ok(Err(_)) => {
+            cached.compile_failed = true;
+            if self.stats_enabled {
+              self.stats.compile_failures += 1;
+            }
+          }
+          Err(_) => {
+            if self.stats_enabled {
+              self.stats.compile_failures += 1;
+            }
+            self.compiled_in_generation = self.max_compiled_blocks;
+            rotate_after_panic = true;
           }
         }
-        Ok(Err(_)) => {
-          self.cache.get_mut(&key).unwrap().compile_failed = true;
-          if self.stats_enabled {
-            self.stats.compile_failures += 1;
-          }
-        }
-        Err(_) => {
-          // A Cranelift allocator/relocation panic must not terminate the guest. Drop all native
-          // pointers at this dispatcher safe point and continue with decoded execution.
-          if self.stats_enabled {
-            self.stats.compile_failures += 1;
-          }
-          self.compiled_in_generation = self.max_compiled_blocks;
-          self.rotate_code_cache_if_needed();
+        if let Some(started) = started {
+          let elapsed = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+          self.stats.compilation_nanos = self.stats.compilation_nanos.saturating_add(elapsed);
+          self.compilation_samples.push(elapsed);
         }
       }
-      if let Some(started) = started {
-        let elapsed = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
-        self.stats.compilation_nanos = self.stats.compilation_nanos.saturating_add(elapsed);
-        self.compilation_samples.push(elapsed);
-      }
-    }
 
+      outcome
+    };
+
+    if rotate_after_panic {
+      self.rotate_code_cache_if_needed();
+    }
     outcome
   }
 }
@@ -604,6 +735,53 @@ mod tests {
       )
       .unwrap();
     cpu.sync_pagetable();
+  }
+
+  #[test]
+  fn compiled_front_cache_is_two_way_and_generation_guarded() {
+    let mut keys = Vec::new();
+    let first = TbKey {
+      pc: RV64_MEMORY_BASE,
+      privilege: PrivilegeMode::Machine as u8,
+      satp: 0,
+      translation_epoch: 0,
+      icache_epoch: 0,
+    };
+    let wanted_set = FastCache::set_index(first);
+    for offset in (0..0x20_000).step_by(2) {
+      let key = TbKey {
+        pc: RV64_MEMORY_BASE + offset,
+        ..first
+      };
+      if FastCache::set_index(key) == wanted_set {
+        keys.push(key);
+        if keys.len() == 3 {
+          break;
+        }
+      }
+    }
+    assert_eq!(keys.len(), 3);
+
+    let mut cache = FastCache::new();
+    cache.insert(keys[0], 10);
+    cache.insert(keys[1], 11);
+    assert_eq!(cache.lookup(keys[0]), Some(10));
+    assert_eq!(cache.lookup(keys[1]), Some(11));
+
+    cache.insert(keys[2], 12);
+    assert_eq!(cache.lookup(keys[2]), Some(12));
+    assert_eq!(
+      usize::from(cache.lookup(keys[0]).is_some())
+        + usize::from(cache.lookup(keys[1]).is_some()),
+      1,
+    );
+
+    cache.invalidate();
+    assert_eq!(cache.lookup(keys[0]), None);
+    assert_eq!(cache.lookup(keys[1]), None);
+    assert_eq!(cache.lookup(keys[2]), None);
+    cache.insert(keys[0], 99);
+    assert_eq!(cache.lookup(keys[0]), Some(99));
   }
 
   #[test]
