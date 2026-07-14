@@ -21,24 +21,21 @@ const DEFAULT_HOT_THRESHOLD: u32 = 500;
 const DEFAULT_MAX_COMPILED_BLOCKS: usize = 4 * 1024;
 const DEFAULT_MAX_LIVE_CODE_BYTES: u64 = 128 * 1024 * 1024;
 const FAST_CACHE_SET_COUNT: usize = 4 * 1024;
+const MSTATUS_TRANSLATION_MASK: u64 = (0b11 << 11) | (1 << 17) | (1 << 18) | (1 << 19);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct TbKey {
   pc: u64,
   privilege: u8,
   satp: u64,
-  translation_epoch: u64,
-  icache_epoch: u64,
 }
 
 impl TbKey {
-  fn new(cpu: &RV64Cpu) -> Self {
+  fn new(cpu: &RV64Cpu, privilege: u8, satp: u64) -> Self {
     Self {
       pc: cpu.read_pc().0,
-      privilege: cpu.mode as u8,
-      satp: cpu.csrs.read_unchecked(SATP),
-      translation_epoch: cpu.translation_epoch,
-      icache_epoch: cpu.icache_epoch,
+      privilege,
+      satp,
     }
   }
 }
@@ -58,7 +55,7 @@ impl TlbContext {
       dram_host_base: cpu.bus.mem.memory.as_ptr() as usize,
       privilege: cpu.mode as u8,
       satp: cpu.csrs.read_unchecked(SATP),
-      mstatus: cpu.csrs.read_unchecked(MSTATUS),
+      mstatus: cpu.csrs.read_unchecked(MSTATUS) & MSTATUS_TRANSLATION_MASK,
       translation_epoch: cpu.translation_epoch,
     }
   }
@@ -121,8 +118,6 @@ impl FastCache {
     let mut hash = (key.pc >> 1)
       ^ key.satp
       ^ key.satp.rotate_right(23)
-      ^ key.translation_epoch.rotate_left(11)
-      ^ key.icache_epoch.rotate_left(37)
       ^ (key.privilege as u64).wrapping_mul(0x9e37_79b9);
     hash ^= hash >> 32;
     hash as usize & (FAST_CACHE_SET_COUNT - 1)
@@ -255,7 +250,7 @@ pub struct JitExecutor {
   stats_enabled: bool,
   stats_interval: Option<u64>,
   compilation_samples: Vec<u64>,
-  seen_translation_epoch: u64,
+  seen_sfence_epoch: u64,
   seen_icache_epoch: u64,
   stats: JitStats,
 }
@@ -281,7 +276,7 @@ impl JitExecutor {
       stats_enabled: true,
       stats_interval: None,
       compilation_samples: Vec::new(),
-      seen_translation_epoch: 0,
+      seen_sfence_epoch: 0,
       seen_icache_epoch: 0,
       stats: JitStats::default(),
     })
@@ -370,23 +365,22 @@ impl JitExecutor {
   }
 
   fn invalidate_changed_epochs(&mut self, cpu: &RV64Cpu) {
-    if self.seen_translation_epoch != cpu.translation_epoch
-      || self.seen_icache_epoch != cpu.icache_epoch
-    {
+    if self.seen_sfence_epoch != cpu.sfence_epoch || self.seen_icache_epoch != cpu.icache_epoch {
       self.clear_block_cache();
       self.pending_slow_memory.clear();
       self.replace_code_backend();
-      self.seen_translation_epoch = cpu.translation_epoch;
+      self.seen_sfence_epoch = cpu.sfence_epoch;
       self.seen_icache_epoch = cpu.icache_epoch;
     }
   }
 
-  fn sync_tlb_context(&mut self, cpu: &RV64Cpu) {
+  fn sync_tlb_context(&mut self, cpu: &RV64Cpu) -> TlbContext {
     let context = TlbContext::new(cpu);
     if self.tlb_context != Some(context) {
       self.tlb.invalidate();
       self.tlb_context = Some(context);
     }
+    context
   }
 
   fn rotate_code_cache_if_needed(&mut self) {
@@ -534,8 +528,14 @@ impl JitExecutor {
     naive.execute(cpu, budget.min(1))
   }
 
-  fn remember_slow_memory(&mut self, cpu: &RV64Cpu, inst: GuestInst) {
-    let pending_key = TbKey::new(cpu);
+  fn remember_slow_memory(
+    &mut self,
+    cpu: &RV64Cpu,
+    privilege: u8,
+    satp: u64,
+    inst: GuestInst,
+  ) {
+    let pending_key = TbKey::new(cpu, privilege, satp);
     if let Some((_, old)) = self
       .pending_slow_memory
       .iter_mut()
@@ -554,15 +554,14 @@ impl JitExecutor {
     cpu: &mut RV64Cpu,
     budget: u32,
     native_only: bool,
+    privilege: u8,
+    satp: u64,
   ) -> ExecuteOne {
     if budget == 0 || cpu.wfi {
       return ExecuteOne::stop(ExecOutcome::new(0, Ok(())));
     }
 
-    self.invalidate_changed_epochs(cpu);
-    self.sync_tlb_context(cpu);
-    self.rotate_code_cache_if_needed();
-    let key = TbKey::new(cpu);
+    let key = TbKey::new(cpu, privilege, satp);
 
     let pending_index = if self.pending_slow_memory.is_empty() {
       None
@@ -614,7 +613,7 @@ impl JitExecutor {
           native_only,
         );
         if let Some(inst) = native.pending {
-          self.remember_slow_memory(cpu, inst);
+          self.remember_slow_memory(cpu, privilege, satp, inst);
         }
         return ExecuteOne {
           outcome: native.outcome,
@@ -724,7 +723,7 @@ impl JitExecutor {
             native_only,
           );
           if let Some(inst) = native.pending {
-            self.remember_slow_memory(cpu, inst);
+            self.remember_slow_memory(cpu, privilege, satp, inst);
           }
           return ExecuteOne {
             outcome: native.outcome,
@@ -816,9 +815,22 @@ impl RV64Executor for JitExecutor {
       return ExecOutcome::new(0, Ok(()));
     }
 
+    // A chain continuation only enters baseline-native blocks. Those instructions cannot change
+    // privilege, SATP/mstatus, translation generations, or the code-cache ownership model, so the
+    // dispatcher checks these contexts once before the batch rather than once per TB.
+    self.invalidate_changed_epochs(cpu);
+    let tlb_context = self.sync_tlb_context(cpu);
+    self.rotate_code_cache_if_needed();
+
     let mut attempted = 0;
     let result = loop {
-      let step = self.execute_one(cpu, budget - attempted, attempted != 0);
+      let step = self.execute_one(
+        cpu,
+        budget - attempted,
+        attempted != 0,
+        tlb_context.privilege,
+        tlb_context.satp,
+      );
       attempted += step.outcome.attempted;
       match step.outcome.result {
         Err(exception) => break Err(exception),
@@ -926,8 +938,6 @@ mod tests {
       pc: RV64_MEMORY_BASE,
       privilege: PrivilegeMode::Machine as u8,
       satp: 0,
-      translation_epoch: 0,
-      icache_epoch: 0,
     };
     let wanted_set = FastCache::set_index(first);
     for offset in (0..0x20_000).step_by(2) {
@@ -964,6 +974,18 @@ mod tests {
     assert_eq!(cache.lookup(keys[2]), None);
     cache.insert(keys[0], 99);
     assert_eq!(cache.lookup(keys[0]), Some(99));
+  }
+
+  #[test]
+  fn tlb_context_only_tracks_mstatus_translation_controls() {
+    let mut cpu = RV64Cpu::new(None);
+    let original = TlbContext::new(&cpu);
+
+    cpu.csrs.write_mstatus_MIE(true);
+    assert_eq!(TlbContext::new(&cpu), original);
+
+    cpu.csrs.write_mstatus_SUM(true);
+    assert_ne!(TlbContext::new(&cpu), original);
   }
 
   #[test]
@@ -1188,7 +1210,7 @@ mod tests {
   }
 
   #[test]
-  fn fence_sfence_and_satp_write_invalidate_compiled_cache_generations() {
+  fn fences_invalidate_compiled_cache_while_satp_writes_keep_keyed_blocks() {
     let mut cpu = RV64Cpu::new(None);
     let pc = VirtAddr(RV64_MEMORY_BASE);
     let fence_pc = pc + VirtAddr(0x100);
@@ -1247,18 +1269,20 @@ mod tests {
     cpu.write_pc(sfence_pc);
     assert_eq!(jit.execute(&mut cpu, 1), ExecOutcome::new(1, Ok(())));
     assert_eq!(cpu.translation_epoch, 1);
+    assert_eq!(cpu.sfence_epoch, 1);
     cpu.write_pc(pc);
     assert_eq!(jit.execute(&mut cpu, 2), ExecOutcome::new(2, Ok(())));
-    assert_eq!(jit.seen_translation_epoch, 1);
+    assert_eq!(jit.seen_sfence_epoch, 1);
 
     cpu.write_reg(x1, 0);
     cpu.write_pc(satp_pc);
     assert_eq!(jit.execute(&mut cpu, 1), ExecOutcome::new(1, Ok(())));
     assert_eq!(cpu.translation_epoch, 2);
+    assert_eq!(cpu.sfence_epoch, 1);
     cpu.write_pc(pc);
     assert_eq!(jit.execute(&mut cpu, 2), ExecOutcome::new(2, Ok(())));
-    assert_eq!(jit.seen_translation_epoch, 2);
-    assert_eq!(jit.stats().compiled_blocks, 4);
+    assert_eq!(jit.seen_sfence_epoch, 1);
+    assert_eq!(jit.stats().compiled_blocks, 3);
   }
 
   #[test]
