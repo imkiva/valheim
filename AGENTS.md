@@ -32,7 +32,8 @@ Valheim 是一个用 Rust 编写、以学习和参考实现为目的的 RISC-V 6
 | `dts/` | 启动时由 `dtc` 编译的设备树模板。 |
 | `valheim-testing/` | 固定的 `riscv-tests` 子模块、启用/禁用测试列表和测试安装目录。 |
 | `profiler/` | 旧的 DTrace/FlameGraph 性能分析脚本；当前不能直接开箱运行。 |
-| `target/try/` | 本机手动安装的工具链和按 guest 分类的可运行 demo；被 Git 忽略。 |
+| `demo/` | Git 跟踪的三个最小 demo 入口：启动脚本、说明、RustSBI 适配 patch 和 Linux `/init`。 |
+| `target/demo/` | demo 运行时下载或生成的工具链、Rustup/Cargo 状态、guest 源码、构建产物和日志；被 Git 忽略。 |
 
 ## Guest 运行模型与硬件布局
 
@@ -59,16 +60,16 @@ Valheim 是一个用 Rust 编写、以学习和参考实现为目的的 RISC-V 6
 - 历史 RustSBI demo Rust：`nightly-2022-02-14`，已安装 target `riscv64imac-unknown-none-elf`。旧源码使用已从现代 Rust 删除的 generator API，不能改用新 nightly。
 - Device Tree Compiler：通过 apt 安装的 `device-tree-compiler 1.6.1-1`。
 - RISC-V bare-metal GNU toolchain：
-  `target/try/gcc-riscv64-elf-2022.03.09/`
+  `target/demo/gcc-riscv64-elf-2022.03.09/`
   - GCC `11.1.0 (g5964b5cd727)`
   - Binutils/objcopy `2.37`
-  - 可执行文件目录：`target/try/gcc-riscv64-elf-2022.03.09/riscv/bin`
+  - 可执行文件目录：`target/demo/gcc-riscv64-elf-2022.03.09/riscv/bin`
   - 安装包 SHA-256：`6ec8ea11558f283aecd47c52a25c61a10c117ed703fee09c5a7dbfde3b522da1`
 - RISC-V Linux GNU toolchain：
-  `target/try/gcc-riscv64-glibc-2022.03.09/`
+  `target/demo/gcc-riscv64-glibc-2022.03.09/`
   - GCC `11.1.0`，Binutils `2.37`
   - target prefix：`riscv64-unknown-linux-gnu-`
-  - 可执行文件目录：`target/try/gcc-riscv64-glibc-2022.03.09/riscv/bin`
+  - 可执行文件目录：`target/demo/gcc-riscv64-glibc-2022.03.09/riscv/bin`
   - 安装包 SHA-256：`02b97cf3502d9542943b62c7470d99f97c0c9148be95e1277df96d4b5c2fdb41`
 
 工具链来自项目原 CI 使用的官方 2022-03-09 预编译资产：
@@ -85,20 +86,9 @@ https://github.com/riscv-collab/riscv-gnu-toolchain/releases/download/2022.03.09
 
 bare-metal 工具链供 xv6、RustSBI 和 `riscv-tests` 使用；Linux 内核必须使用 Linux-target 工具链。不要用 `riscv64-unknown-elf-` 构建 Linux，它的 linker 不支持 vDSO 所需的 `-shared`。
 
-若 `target/try` 被删除，按用户约定手动恢复到共享工具链目录，不要用 apt 安装交叉 GCC，也不要把它放进某个 demo：
-
-```bash
-toolchain_dir="$PWD/target/try/gcc-riscv64-elf-2022.03.09"
-archive="$toolchain_dir/riscv64-elf-ubuntu-20.04-nightly-2022.03.09-nightly.tar.gz"
-mkdir -p "$toolchain_dir"
-curl --fail --location \
-  'https://github.com/riscv-collab/riscv-gnu-toolchain/releases/download/2022.03.09/riscv64-elf-ubuntu-20.04-nightly-2022.03.09-nightly.tar.gz' \
-  --output "$archive"
-printf '%s  %s\n' \
-  '6ec8ea11558f283aecd47c52a25c61a10c117ed703fee09c5a7dbfde3b522da1' \
-  "$archive" | sha256sum --check
-tar -xzf "$archive" -C "$toolchain_dir"
-```
+demo 脚本会在首次运行时下载并校验上述固定工具链，然后解压到
+`target/demo/` 下的共享目录。不要用 apt 安装交叉 GCC，也不要把工具链放进
+某个 guest 的状态目录。
 
 在新机器上，`dtc` 可按以下方式安装：
 
@@ -110,17 +100,19 @@ sudo apt-get install -y device-tree-compiler
 需要直接调用交叉编译器时：
 
 ```bash
-export PATH="$PWD/target/try/gcc-riscv64-elf-2022.03.09/riscv/bin:$PATH"
+export PATH="$PWD/target/demo/gcc-riscv64-elf-2022.03.09/riscv/bin:$PATH"
 ```
 
 构建 Linux 时改用：
 
 ```bash
-export PATH="$PWD/target/try/gcc-riscv64-glibc-2022.03.09/riscv/bin:$PATH"
+export PATH="$PWD/target/demo/gcc-riscv64-glibc-2022.03.09/riscv/bin:$PATH"
 export CROSS_COMPILE=riscv64-unknown-linux-gnu-
 ```
 
-重要：不要随意运行 `cargo clean`。整个 `target/` 被 Git 忽略，而手动安装的数 GiB 工具链、xv6/RustSBI/Linux checkout、rootfs、磁盘镜像和启动脚本也都位于 `target/try/`；`cargo clean` 会把它们一起删除。
+重要：不要随意运行 `cargo clean`。整个 `target/` 被 Git 忽略，数 GiB 工具链、
+Rustup/Cargo 缓存、xv6/RustSBI/Linux checkout、rootfs 和磁盘镜像都位于
+`target/demo/`；`cargo clean` 会把它们一起删除。`demo/` 中被 Git 跟踪的入口文件不受影响。
 
 ## 构建与常用命令
 
@@ -199,7 +191,7 @@ cargo +nightly-2024-09-05 test --workspace --locked
 完整 RISC-V ISA 测试需要交叉工具链和 `riscv-tests` 子模块：
 
 ```bash
-export PATH="$PWD/target/try/gcc-riscv64-elf-2022.03.09/riscv/bin:$PATH"
+export PATH="$PWD/target/demo/gcc-riscv64-elf-2022.03.09/riscv/bin:$PATH"
 cargo +nightly-2024-09-05 run-riscv-tests
 ```
 
@@ -231,34 +223,28 @@ cargo +nightly-2024-09-05 run \
 
 ## Demo 目录约定
 
-本地工具链和 demo 必须分离：
+可提交的入口和可重建的运行状态必须分离：
 
 ```text
-target/try/
-├── gcc-riscv64-elf-2022.03.09/  # 多个 demo 可共享的工具链
-├── gcc-riscv64-glibc-2022.03.09/ # Linux-target 共享工具链
-├── linux/                        # Linux 5.17 + 官方 Debian 13 slim shell
-│   ├── run.sh
-│   ├── README.md
-│   ├── downloads/
-│   ├── overlay/                  # 只含启动用 /init 和设备节点清单
-│   ├── source/                   # Linux 5.17 源码
-│   └── build/                    # 官方 rootfs cpio 和 kernel Image
-├── rustsbi/                      # 历史 RustSBI-QEMU test-kernel
-│   ├── run.sh
-│   ├── single-hart-valheim.patch
-│   ├── valheim-dtb-pointer.patch
-│   ├── source/
-│   ├── artifacts/
-│   └── runtime/last-run.log
-└── xv6/
-    ├── run.sh                    # 一键构建并启动
-    ├── README.md
-    ├── source/                   # 固定提交的 xv6 checkout 和构建产物
-    └── runtime/fs.img            # guest 实际读写的磁盘副本
+demo/                                # Git 跟踪；只放最小静态入口
+├── xv6/                           # run.sh + README.md
+├── rustsbi/                       # run.sh + README.md + 两个适配 patch
+└── linux/                         # run.sh + README.md + init
+
+target/demo/                         # Git 忽略；由 run.sh 创建
+├── gcc-riscv64-elf-2022.03.09/   # xv6/RustSBI 共享 GNU 工具链
+├── gcc-riscv64-glibc-2022.03.09/ # Linux-target 共享 GNU 工具链
+├── rustup/                        # 隔离的 Rustup home
+├── cargo-home/                    # 隔离的 Cargo home
+├── cargo/                         # Valheim Cargo target 输出
+├── xv6/                           # 源码、构建产物和可写磁盘
+├── rustsbi/                       # 源码、RustSBI Cargo target、artifact 和日志
+└── linux/                         # 下载、源码、initramfs 和 kernel
 ```
 
-今后新增 demo 时，使用 `target/try/<demo-name>/`，在该目录内提供可从任意工作目录调用的 `run.sh`。不要把共享 GCC/Rust 工具链嵌套到某个 demo 目录中。每个脚本至少应：
+今后新增 demo 时，使用 `demo/<demo-name>/run.sh` 作为可从任意工作目录调用的
+入口，把所有下载和生成内容放到 `target/demo/<demo-name>/` 或 `target/demo/` 下的共享目录。
+不要把共享 GCC/Rust 工具链嵌套到某个 guest 状态目录中。每个脚本至少应：
 
 1. 固定并检查上游版本。
 2. 使用相对脚本自身位置计算仓库根目录。
@@ -266,20 +252,21 @@ target/try/
 4. 使用独立的可写运行磁盘，避免修改唯一的原始镜像。
 5. 给出明确的启动成功标志和退出方式。
 
-注意：`target/` 在 `.gitignore` 中，因此这些本地 demo 文件不会出现在 `git status`，也不会随普通 Git commit 保存。
+注意：`target/` 在 `.gitignore` 中，因此只有 `demo/` 中的静态文件会随 Git commit
+保存；脚本的下载与构建产物不应出现在 `git status` 中。
 
 ## 已验证的 xv6 Demo
 
 从仓库根目录运行：
 
 ```bash
-./target/try/xv6/run.sh
+./demo/xv6/run.sh
 ```
 
 该脚本可从任意目录调用。它会：
 
-1. 检查 `dtc`、Cargo、Git、Make 和固定位置的 RISC-V GNU 工具链。
-2. 若 `target/try/xv6/source` 不存在，clone xv6-riscv 并 checkout 固定提交。
+1. 检查宿主依赖，并按需安装固定的 RISC-V GNU 工具链和 Rust nightly。
+2. 若 `target/demo/xv6/source` 不存在，clone xv6-riscv 并 checkout 固定提交。
 3. 构建 `kernel/kernel` 和 `fs.img`。
 4. 用 `objcopy -O binary` 生成 `kernel/kernel.bin`。
 5. 构建 `valheim-cli` release 版。
@@ -299,14 +286,14 @@ $
 默认复用 `runtime/fs.img`，保留 guest 写入。需要丢弃运行期改动时：
 
 ```bash
-RESET_DISK=1 ./target/try/xv6/run.sh
+RESET_DISK=1 ./demo/xv6/run.sh
 ```
 
 可选环境变量：
 
 - `JOBS`：xv6 并行构建任务数。
 - `VALHEIM_RUST_TOOLCHAIN`：默认 `nightly-2024-09-05`。
-- `VALHEIM_RISCV_TOOLCHAIN`：默认 `target/try/gcc-riscv64-elf-2022.03.09`。
+- `VALHEIM_RISCV_TOOLCHAIN`：默认 `target/demo/gcc-riscv64-elf-2022.03.09`。
 
 ### 为什么固定这个 xv6 版本
 
@@ -332,16 +319,16 @@ Valheim 的 xv6 README 演示实际加入于 2022-03-19。当时 xv6-riscv 默�
 从任意目录运行：
 
 ```bash
-/home/kiva/git/valheim/target/try/linux/run.sh
+/path/to/valheim/demo/linux/run.sh
 ```
 
 或者在仓库根目录运行：
 
 ```bash
-./target/try/linux/run.sh
+./demo/linux/run.sh
 ```
 
-脚本会固定并校验所有外部输入，复用 `target/try` 下的两个 GNU 工具链，构建 RustSBI、Linux 和 Valheim，然后进入真实 Debian Bash：
+脚本会固定并校验所有外部输入，复用 `target/demo` 下的两个 GNU 工具链，构建 RustSBI、Linux 和 Valheim，然后进入真实 Debian Bash：
 
 ```text
 Debian GNU/Linux 13 (trixie)
@@ -358,7 +345,7 @@ bash --version
 id
 ```
 
-2026-07-14 已实际验证交互输入输出：`/etc/debian_version` 为 `13.6`，Bash 为 `5.2.37(1)-release`，`coreutils` 为 `9.7-3`，glibc 为 `2.41-12+deb13u3`，`id` 显示 root；超过 80 字节的连续 UART 输出后仍能继续交互。完整验收日志在 `target/try/linux/runtime/last-run.log`。release 解释器在本机进入 shell 通常约需 1–3 分钟；第一次运行还要下载和构建，耗时更长。按宿主 `Ctrl-C` 退出。
+2026-07-14 已实际验证交互输入输出：`/etc/debian_version` 为 `13.6`，Bash 为 `5.2.37(1)-release`，`coreutils` 为 `9.7-3`，glibc 为 `2.41-12+deb13u3`，`id` 显示 root；超过 80 字节的连续 UART 输出后仍能继续交互。release 解释器在本机进入 shell 通常约需 1–3 分钟；第一次运行还要下载和构建，耗时更长。按宿主 `Ctrl-C` 退出。
 
 固定版本和来源：
 
@@ -379,17 +366,17 @@ Linux `v5.17` 是根据项目 2022-03 的 demo 时间选择的同年代内核，
 
 - `JOBS`：并行构建任务数。
 - `VALHEIM_RUST_TOOLCHAIN`：默认 `nightly-2024-09-05`。
-- `VALHEIM_LINUX_TOOLCHAIN`：默认 `target/try/gcc-riscv64-glibc-2022.03.09`。
-- `VALHEIM_RISCV_TOOLCHAIN`：RustSBI 使用的 bare-metal GNU 工具链，默认 `target/try/gcc-riscv64-elf-2022.03.09`。
+- `VALHEIM_LINUX_TOOLCHAIN`：默认 `target/demo/gcc-riscv64-glibc-2022.03.09`。
+- `VALHEIM_RISCV_TOOLCHAIN`：RustSBI 使用的 bare-metal GNU 工具链，默认 `target/demo/gcc-riscv64-elf-2022.03.09`。
 
-生成物放在 `target/try/linux/`：OCI metadata、rootfs layer 和 Linux tarball 在 `downloads/`，Linux 源码在 `source/`，合成的 cpio 和 kernel 输出在 `build/`。不要用 `cargo clean` 删除它们。
+生成物放在 `target/demo/linux/`：OCI metadata、rootfs layer 和 Linux tarball 在 `downloads/`，Linux 源码在 `source/`，合成的 cpio 和 kernel 输出在 `build/`。不要用 `cargo clean` 删除它们。
 
 ## 已验证的 RustSBI Demo
 
 这项 demo 是有限运行的 SBI test kernel，不是 shell。从任意目录运行：
 
 ```bash
-./target/try/rustsbi/run.sh
+./demo/rustsbi/run.sh
 ```
 
 脚本会固定 RustSBI-QEMU 提交、应用有记录的单 hart 和 DTB 指针 patch、构建 BIOS 和 test kernel、复用共享 GNU objcopy 转 raw binary、构建 Valheim，然后运行并检查成功行。预期末尾：
@@ -400,7 +387,7 @@ Linux `v5.17` 是根据项目 2022-03 的 demo 时间选择的同年代内核，
 << Test-kernel: All hart SBI test SUCCESS, shutdown
 ```
 
-完整输出保存在 `target/try/rustsbi/runtime/last-run.log`。2026-07-14 已从项目目录外执行脚本验证：退出码为 0，并检查到上述 success marker。
+完整输出保存在 `target/demo/rustsbi/runtime/last-run.log`。2026-07-14 已从项目目录外执行脚本验证：退出码为 0，并检查到上述 success marker。
 
 ### RustSBI 历史版本依据
 
@@ -412,7 +399,7 @@ Valheim README 在 2022-03-20 首次加入 RustSBI 截图。当时 RustSBI-QEMU 
 
 它是 `v0.1.0-7-g999e355`：包版本仍为 RustSBI-QEMU 0.1.0，但依赖已经是截图中的 RustSBI 0.2.1，并报告 SBI spec 0.3。BIOS ELF 入口为 `0x8000_0000`，test-kernel ELF 入口为 `0x8020_0000`，与 Valheim 的 BIOS/kernel 加载地址完全一致。
 
-构建固定使用 `nightly-2022-02-14`，并复用 `target/try/gcc-riscv64-elf-2022.03.09` 的 GNU objcopy。不要直接改回上游 `cargo make`：旧 xtask 会向 objcopy 传仅适合 `rust-objcopy` 的 `--binary-architecture=riscv64`，GNU Binutils 2.37 会拒绝它；当前脚本直接构建两个 package，再执行兼容的 `objcopy -O binary`。
+构建固定使用 `nightly-2022-02-14`，并复用 `target/demo/gcc-riscv64-elf-2022.03.09` 的 GNU objcopy。不要直接改回上游 `cargo make`：旧 xtask 会向 objcopy 传仅适合 `rust-objcopy` 的 `--binary-architecture=riscv64`，GNU Binutils 2.37 会拒绝它；当前脚本直接构建两个 package，再执行兼容的 `objcopy -O binary`。
 
 ### 为什么存在单 hart patch
 
@@ -422,14 +409,14 @@ Valheim 原截图不是未修改的上游 test kernel；原始 binary 也从未�
 >> Wake hart 1, sbi return value 0
 ```
 
-`target/try/rustsbi/single-hart-valheim.patch` 保留可在 hart 0 上运行的测试，并在 success marker 后执行 `ebreak`。这是退出适配：旧 RustSBI 原本通过 QEMU SiFive test finisher `0x0010_0000` 关机，Valheim 没有该设备。输出仍保留历史截图的 `All hart` 文本，但它只表示适用于单 hart 的测试通过，不能解释为实际测试了 hart 1–4。
+`demo/rustsbi/single-hart-valheim.patch` 保留可在 hart 0 上运行的测试，并在 success marker 后执行 `ebreak`。这是退出适配：旧 RustSBI 原本通过 QEMU SiFive test finisher `0x0010_0000` 关机，Valheim 没有该设备。输出仍保留历史截图的 `All hart` 文本，但它只表示适用于单 hart 的测试通过，不能解释为实际测试了 hart 1–4。
 
-该历史 firmware 在 Valheim 上未打 patch 实跑时，S-mode test kernel 观察到 `a1=0`。`target/try/rustsbi/valheim-dtb-pointer.patch` 将 supervisor 入口的 DTB 指针显式固定为当前 DRAM 地址 `0x87f0_0000`，因此 test kernel 和 Linux 都能得到有效 FDT。这个常量必须与 `Machine` 中的 `RV64_DTB_ADDR` 同步；它属于 Valheim 单 hart/启动布局适配，不能归因为已确认的上游通用 bug，也不能误报为未修改上游的逐字节复现。
+该历史 firmware 在 Valheim 上未打 patch 实跑时，S-mode test kernel 观察到 `a1=0`。`demo/rustsbi/valheim-dtb-pointer.patch` 将 supervisor 入口的 DTB 指针显式固定为当前 DRAM 地址 `0x87f0_0000`，因此 test kernel 和 Linux 都能得到有效 FDT。这个常量必须与 `Machine` 中的 `RV64_DTB_ADDR` 同步；它属于 Valheim 单 hart/启动布局适配，不能归因为已确认的上游通用 bug，也不能误报为未修改上游的逐字节复现。
 
 Linux demo 只需要构建 firmware、不需要启动 test kernel，可用：
 
 ```bash
-./target/try/rustsbi/run.sh --build-only
+./demo/rustsbi/run.sh --build-only
 ```
 
 ## openEuler Demo 状态
@@ -470,9 +457,9 @@ cargo +nightly-2024-09-05 build --release --locked --package valheim-cli
 修改 CPU、CSR、MMU、异常/中断、总线、UART、PLIC、CLINT、VirtIO、DTB 或 Machine 启动逻辑后，还应运行：
 
 ```bash
-RESET_DISK=1 ./target/try/xv6/run.sh
-./target/try/rustsbi/run.sh
-./target/try/linux/run.sh
+RESET_DISK=1 ./demo/xv6/run.sh
+./demo/rustsbi/run.sh
+./demo/linux/run.sh
 ```
 
 验收不是只看到 kernel banner。xv6 必须进入 `$`，Linux 必须进入 `debian13#`，并分别至少成功执行一个 guest 命令，例如：
