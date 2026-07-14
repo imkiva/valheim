@@ -1,0 +1,27 @@
+#!/bin/sh
+
+export HOME=/root
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export TERM=vt100
+
+exec </dev/console >/dev/console 2>&1
+
+mount -t devtmpfs devtmpfs /dev || echo "warning: could not mount devtmpfs"
+mount -t proc proc /proc || echo "warning: could not mount proc"
+mount -t sysfs sysfs /sys || echo "warning: could not mount sysfs"
+mount -t tmpfs tmpfs /run || echo "warning: could not mount /run"
+mkdir -p /dev/pts
+mount -t devpts devpts /dev/pts || echo "warning: could not mount devpts"
+
+echo
+echo "Debian 13 (trixie) official slim rootfs on Valheim"
+cat /etc/os-release
+uname -a
+echo "Type commands at the debian13# prompt."
+echo
+
+cd /root
+while :; do
+  PS1='debian13# ' setsid -c -w /bin/bash --noprofile --norc -i
+  echo "Shell exited; restarting it."
+done
