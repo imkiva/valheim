@@ -3,7 +3,7 @@ use std::mem::{offset_of, transmute};
 
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{
-  types, AbiParam, FuncRef, InstBuilder, MemFlags, Type, UserFuncName, Value,
+  types, AbiParam, AliasRegion, FuncRef, InstBuilder, MemFlags, Type, UserFuncName, Value,
 };
 use cranelift_codegen::isa::CallConv;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
@@ -164,35 +164,44 @@ impl CraneliftBackend {
       builder.switch_to_block(entry);
       builder.seal_block(entry);
       let frame = builder.block_params(entry)[0];
-      let flags = MemFlags::trusted();
+      // These regions are disjoint for the lifetime of a native TB. Keep xregs and the TLB/stat
+      // tables in one conservative region because they are separate allocations but share the
+      // same generated-code role. Guest DRAM needs its own unaligned flags: RISC-V permits
+      // naturally unaligned loads/stores and `MemFlags::trusted()` would incorrectly promise
+      // natural alignment to Cranelift.
+      let frame_flags = MemFlags::trusted().with_alias_region(Some(AliasRegion::Vmctx));
+      let xregs_flags = MemFlags::trusted().with_alias_region(Some(AliasRegion::Table));
+      let tlb_flags = xregs_flags;
+      let guest_flags =
+        MemFlags::new().with_notrap().with_alias_region(Some(AliasRegion::Heap));
       let xregs = builder.ins().load(
         pointer_type,
-        flags,
+        frame_flags,
         frame,
         offset_of!(JitFrame, xregs) as i32,
       );
       let load_tlb = builder.ins().load(
         pointer_type,
-        flags,
+        frame_flags,
         frame,
         offset_of!(JitFrame, load_tlb) as i32,
       );
       let store_tlb = builder.ins().load(
         pointer_type,
-        flags,
+        frame_flags,
         frame,
         offset_of!(JitFrame, store_tlb) as i32,
       );
       let tlb_generation = builder.ins().load(
         types::I64,
-        flags,
+        frame_flags,
         frame,
         offset_of!(JitFrame, tlb_generation) as i32,
       );
       let tlb_stats = if collect_tlb_stats {
         Some(builder.ins().load(
           pointer_type,
-          flags,
+          frame_flags,
           frame,
           offset_of!(JitFrame, tlb_stats) as i32,
         ))
@@ -203,7 +212,10 @@ impl CraneliftBackend {
         &mut builder,
         frame,
         xregs,
-        flags,
+        frame_flags,
+        xregs_flags,
+        tlb_flags,
+        guest_flags,
         load_tlb,
         store_tlb,
         tlb_generation,
@@ -256,7 +268,10 @@ struct Lowering<'a, 'b> {
   builder: &'a mut FunctionBuilder<'b>,
   frame: Value,
   xregs: Value,
-  flags: MemFlags,
+  frame_flags: MemFlags,
+  xregs_flags: MemFlags,
+  tlb_flags: MemFlags,
+  guest_flags: MemFlags,
   load_tlb: Value,
   store_tlb: Value,
   tlb_generation: Value,
@@ -273,7 +288,10 @@ impl<'a, 'b> Lowering<'a, 'b> {
     builder: &'a mut FunctionBuilder<'b>,
     frame: Value,
     xregs: Value,
-    flags: MemFlags,
+    frame_flags: MemFlags,
+    xregs_flags: MemFlags,
+    tlb_flags: MemFlags,
+    guest_flags: MemFlags,
     load_tlb: Value,
     store_tlb: Value,
     tlb_generation: Value,
@@ -285,7 +303,10 @@ impl<'a, 'b> Lowering<'a, 'b> {
       builder,
       frame,
       xregs,
-      flags,
+      frame_flags,
+      xregs_flags,
+      tlb_flags,
+      guest_flags,
       load_tlb,
       store_tlb,
       tlb_generation,
@@ -320,7 +341,7 @@ impl<'a, 'b> Lowering<'a, 'b> {
     }
     let value = self.builder.ins().load(
       types::I64,
-      self.flags,
+      self.xregs_flags,
       self.xregs,
       (index * std::mem::size_of::<u64>()) as i32,
     );
@@ -352,7 +373,7 @@ impl<'a, 'b> Lowering<'a, 'b> {
     self
       .builder
       .ins()
-      .store(self.flags, value, self.frame, offset as i32);
+      .store(self.frame_flags, value, self.frame, offset as i32);
   }
 
   fn store_frame_i64(&mut self, offset: usize, value: u64) {
@@ -360,7 +381,7 @@ impl<'a, 'b> Lowering<'a, 'b> {
     self
       .builder
       .ins()
-      .store(self.flags, value, self.frame, offset as i32);
+      .store(self.frame_flags, value, self.frame, offset as i32);
   }
 
   fn prepare_memory_access(&mut self, inst: GuestInst, attempted: u32) {
@@ -376,7 +397,7 @@ impl<'a, 'b> Lowering<'a, 'b> {
         continue;
       }
       self.builder.ins().store(
-        self.flags,
+        self.xregs_flags,
         self.values[index].expect("dirty register has no value"),
         self.xregs,
         (index * std::mem::size_of::<u64>()) as i32,
@@ -388,12 +409,12 @@ impl<'a, 'b> Lowering<'a, 'b> {
     self.flush_dirty_registers();
     let fault_pc = self.builder.ins().load(
       types::I64,
-      self.flags,
+      self.frame_flags,
       self.frame,
       offset_of!(JitFrame, fault_pc) as i32,
     );
     self.builder.ins().store(
-      self.flags,
+      self.frame_flags,
       fault_pc,
       self.frame,
       offset_of!(JitFrame, next_pc) as i32,
@@ -405,13 +426,14 @@ impl<'a, 'b> Lowering<'a, 'b> {
   fn branch_after_fallible_helper(&mut self, attempted: u32) {
     let exit_kind = self.builder.ins().load(
       types::I32,
-      self.flags,
+      self.frame_flags,
       self.frame,
       offset_of!(JitFrame, exit_kind) as i32,
     );
     let failed = self.builder.ins().icmp_imm(IntCC::NotEqual, exit_kind, 0);
     let exit = self.builder.create_block();
     let resume = self.builder.create_block();
+    self.builder.set_cold_block(exit);
     self.builder.ins().brif(failed, exit, &[], resume, &[]);
 
     self.builder.switch_to_block(exit);
@@ -427,12 +449,12 @@ impl<'a, 'b> Lowering<'a, 'b> {
     let old = self
       .builder
       .ins()
-      .load(types::I64, self.flags, tlb_stats, offset as i32);
+      .load(types::I64, self.tlb_flags, tlb_stats, offset as i32);
     let new = self.builder.ins().iadd_imm(old, 1);
     self
       .builder
       .ins()
-      .store(self.flags, new, tlb_stats, offset as i32);
+      .store(self.tlb_flags, new, tlb_stats, offset as i32);
   }
 
   fn tlb_host_address(
@@ -443,29 +465,33 @@ impl<'a, 'b> Lowering<'a, 'b> {
     width: u32,
     access: u32,
   ) -> Value {
-    self.prepare_memory_access(inst, attempted);
-
     let page_offset = self.builder.ins().band_imm(address, 0xfff);
-    let width_bytes = 1_u64 << width;
-    let last_direct_offset = 4096_u64 - width_bytes;
-    let crosses_page = self.builder.ins().icmp_imm(
-      IntCC::UnsignedGreaterThan,
-      page_offset,
-      last_direct_offset as i64,
-    );
-    let slow = self.builder.create_block();
-    let lookup = self.builder.create_block();
-    self
-      .builder
-      .ins()
-      .brif(crosses_page, slow, &[], lookup, &[]);
+    // A byte access can never cross a guest page. Wider accesses use the shared CPU path at the
+    // boundary so the exact second-fragment VA and exception type remain authoritative.
+    if width != WIDTH_8 {
+      let width_bytes = 1_u64 << width;
+      let last_direct_offset = 4096_u64 - width_bytes;
+      let crosses_page = self.builder.ins().icmp_imm(
+        IntCC::UnsignedGreaterThan,
+        page_offset,
+        last_direct_offset as i64,
+      );
+      let slow = self.builder.create_block();
+      let lookup = self.builder.create_block();
+      self.builder.set_cold_block(slow);
+      self
+        .builder
+        .ins()
+        .brif(crosses_page, slow, &[], lookup, &[]);
 
-    self.builder.switch_to_block(slow);
-    self.store_frame_i32(offset_of!(JitFrame, exit_kind), EXIT_SLOW_MEMORY);
-    self.increment_tlb_stat(offset_of!(TlbStats, slow_paths));
-    self.return_memory_exit(attempted);
+      self.builder.switch_to_block(slow);
+      self.prepare_memory_access(inst, attempted);
+      self.store_frame_i32(offset_of!(JitFrame, exit_kind), EXIT_SLOW_MEMORY);
+      self.increment_tlb_stat(offset_of!(TlbStats, slow_paths));
+      self.return_memory_exit(attempted);
 
-    self.builder.switch_to_block(lookup);
+      self.builder.switch_to_block(lookup);
+    }
     let tag = self.builder.ins().ushr_imm(address, 12);
     let index = self.builder.ins().band_imm(tag, TLB_INDEX_MASK as i64);
     let entry_offset = self
@@ -480,13 +506,13 @@ impl<'a, 'b> Lowering<'a, 'b> {
     let entry = self.builder.ins().iadd(table, entry_offset);
     let cached_tag = self.builder.ins().load(
       types::I64,
-      self.flags,
+      self.tlb_flags,
       entry,
       offset_of!(TlbEntry, tag) as i32,
     );
     let cached_generation = self.builder.ins().load(
       types::I64,
-      self.flags,
+      self.tlb_flags,
       entry,
       offset_of!(TlbEntry, generation) as i32,
     );
@@ -501,6 +527,7 @@ impl<'a, 'b> Lowering<'a, 'b> {
     let miss_block = self.builder.create_block();
     let ready = self.builder.create_block();
     let ready_host_page = self.builder.append_block_param(ready, types::I64);
+    self.builder.set_cold_block(miss_block);
     self
       .builder
       .ins()
@@ -510,13 +537,14 @@ impl<'a, 'b> Lowering<'a, 'b> {
     self.increment_tlb_stat(offset_of!(TlbStats, hits));
     let host_page = self.builder.ins().load(
       types::I64,
-      self.flags,
+      self.tlb_flags,
       entry,
       offset_of!(TlbEntry, host_page) as i32,
     );
     self.builder.ins().jump(ready, &[host_page]);
 
     self.builder.switch_to_block(miss_block);
+    self.prepare_memory_access(inst, attempted);
     let access_value = self.builder.ins().iconst(types::I32, access as i64);
     let call = self
       .builder
@@ -525,13 +553,15 @@ impl<'a, 'b> Lowering<'a, 'b> {
     let filled_host_page = self.builder.inst_results(call)[0];
     let exit_kind = self.builder.ins().load(
       types::I32,
-      self.flags,
+      self.frame_flags,
       self.frame,
       offset_of!(JitFrame, exit_kind) as i32,
     );
     let failed = self.builder.ins().icmp_imm(IntCC::NotEqual, exit_kind, 0);
     let miss_exit = self.builder.create_block();
     let miss_ready = self.builder.create_block();
+    self.builder.set_cold_block(miss_exit);
+    self.builder.set_cold_block(miss_ready);
     self
       .builder
       .ins()
@@ -655,7 +685,7 @@ impl<'a, 'b> Lowering<'a, 'b> {
     let value = self
       .builder
       .ins()
-      .load(load_type, self.flags, host_address, 0);
+      .load(load_type, self.guest_flags, host_address, 0);
     let value = match (width, signed) {
       (WIDTH_8 | WIDTH_16 | WIDTH_32, true) => self.builder.ins().sextend(types::I64, value),
       (WIDTH_8 | WIDTH_16 | WIDTH_32, false) => self.builder.ins().uextend(types::I64, value),
@@ -684,7 +714,10 @@ impl<'a, 'b> Lowering<'a, 'b> {
       WIDTH_64 => value,
       _ => return Err(JitError(format!("invalid store width {width}"))),
     };
-    self.builder.ins().store(self.flags, value, host_address, 0);
+    self
+      .builder
+      .ins()
+      .store(self.guest_flags, value, host_address, 0);
     Ok(())
   }
 
@@ -1128,19 +1161,13 @@ impl<'a, 'b> Lowering<'a, 'b> {
       None => self.iconst(block.start_pc),
     };
     self.builder.ins().store(
-      self.flags,
+      self.frame_flags,
       next_pc,
       self.frame,
       offset_of!(JitFrame, next_pc) as i32,
     );
     let attempted = block.instructions.len() as u32;
     let attempted_value = self.builder.ins().iconst(types::I32, attempted as i64);
-    self.builder.ins().store(
-      self.flags,
-      attempted_value,
-      self.frame,
-      offset_of!(JitFrame, attempted) as i32,
-    );
     self.builder.ins().return_(&[attempted_value]);
     Ok(())
   }
