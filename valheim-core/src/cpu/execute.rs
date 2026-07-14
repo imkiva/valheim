@@ -215,7 +215,13 @@ impl RV64Cpu {
       false => std::mem::size_of::<Bytecode>() as u64,
     };
     let mut next_pc = VirtAddr(pc.0.wrapping_add(delta));
-    let writes_satp = match instr {
+    let writes_csr = match instr {
+      RV64(CSRRW(_, _, _)) | RV64(CSRRWI(_, _, _)) => true,
+      RV64(CSRRS(_, rs1, _)) | RV64(CSRRC(_, rs1, _)) => !is_zero_reg(rs1.0),
+      RV64(CSRRSI(_, imm, _)) | RV64(CSRRCI(_, imm, _)) => imm.value() != 0,
+      _ => false,
+    };
+    let writes_satp = writes_csr && match instr {
       RV64(CSRRW(_, _, csr)) |
       RV64(CSRRS(_, _, csr)) |
       RV64(CSRRC(_, _, csr)) |
@@ -528,12 +534,16 @@ impl RV64Cpu {
       }
       RV64(CSRRS(rd, rs1, csr)) => {
         let old = self.csrs.read(csr);
-        self.csrs.write(csr, old | rs1.read(self))?;
+        if !is_zero_reg(rs1.0) {
+          self.csrs.write(csr, old | rs1.read(self))?;
+        }
         rd.write(self, old);
       }
       RV64(CSRRC(rd, rs1, csr)) => {
         let old = self.csrs.read(csr);
-        self.csrs.write(csr, old & (!rs1.read(self)))?;
+        if !is_zero_reg(rs1.0) {
+          self.csrs.write(csr, old & (!rs1.read(self)))?;
+        }
         rd.write(self, old);
       }
       RV64(CSRRWI(rd, imm, csr)) => {
@@ -542,12 +552,16 @@ impl RV64Cpu {
       }
       RV64(CSRRSI(rd, imm, csr)) => {
         let old = self.csrs.read(csr);
-        self.csrs.write(csr, old | imm.value() as u64)?;
+        if imm.value() != 0 {
+          self.csrs.write(csr, old | imm.value() as u64)?;
+        }
         rd.write(self, old);
       }
       RV64(CSRRCI(rd, imm, csr)) => {
         let old = self.csrs.read(csr);
-        self.csrs.write(csr, old & (!imm.value() as u64))?;
+        if imm.value() != 0 {
+          self.csrs.write(csr, old & (!imm.value() as u64))?;
+        }
         rd.write(self, old);
       }
 
@@ -831,6 +845,15 @@ impl RV64Cpu {
   }
 }
 
+#[inline(always)]
+fn is_zero_reg(reg: Reg) -> bool {
+  match reg {
+    Reg::ZERO => true,
+    Reg::X(index) => index.value() == 0,
+    _ => false,
+  }
+}
+
 trait ReadReg {
   fn read(&self, cpu: &RV64Cpu) -> u64;
   fn read_fp(&self, cpu: &RV64Cpu) -> f64;
@@ -875,9 +898,11 @@ impl WriteReg for Rd {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use valheim_asm::isa::data::Fin;
   use valheim_asm::isa::rv64::{CSRAddr, UImm};
 
   use crate::cpu::bus::RV64_MEMORY_BASE;
+  use crate::cpu::csr::CSRMap::MCYCLE;
 
   fn execute_rv64(cpu: &mut RV64Cpu, instr: RV64Instr) {
     let pc = cpu.read_pc();
@@ -916,6 +941,8 @@ mod tests {
     let mut cpu = RV64Cpu::new(None);
     cpu.write_pc(VirtAddr(RV64_MEMORY_BASE));
     let satp = CSRAddr(Imm32::from(SATP as u32));
+    let source = Reg::X(Fin::new(1));
+    cpu.write_reg(source, 1);
 
     execute_rv64(
       &mut cpu,
@@ -930,6 +957,108 @@ mod tests {
     );
     assert_eq!(cpu.translation_epoch, 2);
     assert_eq!(cpu.icache_epoch, 0);
+
+    execute_rv64(
+      &mut cpu,
+      RV64Instr::CSRRS(Rd(Reg::ZERO), Rs1(source), satp),
+    );
+    assert_eq!(cpu.translation_epoch, 3);
+    assert_eq!(cpu.vmppn, 1 << 12);
+
+    execute_rv64(
+      &mut cpu,
+      RV64Instr::CSRRC(Rd(Reg::ZERO), Rs1(source), satp),
+    );
+    assert_eq!(cpu.translation_epoch, 4);
+    assert_eq!(cpu.vmppn, 0);
+
+    execute_rv64(
+      &mut cpu,
+      RV64Instr::CSRRSI(Rd(Reg::ZERO), UImm(Imm32::from(1)), satp),
+    );
+    assert_eq!(cpu.translation_epoch, 5);
+
+    execute_rv64(
+      &mut cpu,
+      RV64Instr::CSRRCI(Rd(Reg::ZERO), UImm(Imm32::from(1)), satp),
+    );
+    assert_eq!(cpu.translation_epoch, 6);
+    assert_eq!(cpu.icache_epoch, 0);
+  }
+
+  #[test]
+  fn satp_set_clear_with_zero_source_are_reads_only() {
+    let mut cpu = RV64Cpu::new(None);
+    cpu.write_pc(VirtAddr(RV64_MEMORY_BASE));
+    cpu.translation_epoch = 7;
+    cpu.csrs.write_unchecked(SATP, 0x1234).unwrap();
+    let satp = CSRAddr(Imm32::from(SATP as u32));
+    let destinations = [
+      Reg::X(Fin::new(5)),
+      Reg::X(Fin::new(6)),
+      Reg::X(Fin::new(7)),
+      Reg::X(Fin::new(8)),
+    ];
+
+    execute_rv64(
+      &mut cpu,
+      RV64Instr::CSRRS(Rd(destinations[0]), Rs1(Reg::ZERO), satp),
+    );
+    execute_rv64(
+      &mut cpu,
+      RV64Instr::CSRRC(Rd(destinations[1]), Rs1(Reg::ZERO), satp),
+    );
+    execute_rv64(
+      &mut cpu,
+      RV64Instr::CSRRSI(Rd(destinations[2]), UImm(Imm32::from(0)), satp),
+    );
+    execute_rv64(
+      &mut cpu,
+      RV64Instr::CSRRCI(Rd(destinations[3]), UImm(Imm32::from(0)), satp),
+    );
+
+    assert_eq!(cpu.translation_epoch, 7);
+    assert_eq!(cpu.csrs.read_unchecked(SATP), 0x1234);
+    assert_eq!(cpu.vmppn, 0);
+    for destination in destinations {
+      assert_eq!(cpu.read_reg(destination), Some(0x1234));
+    }
+  }
+
+  #[test]
+  fn zero_source_set_clear_can_read_a_read_only_csr() {
+    let mut cpu = RV64Cpu::new(None);
+    cpu.write_pc(VirtAddr(RV64_MEMORY_BASE));
+    let mcycle = CSRAddr(Imm32::from(MCYCLE as u32));
+    let register_result = Reg::X(Fin::new(5));
+    let immediate_result = Reg::X(Fin::new(6));
+
+    execute_rv64(
+      &mut cpu,
+      RV64Instr::CSRRS(Rd(register_result), Rs1(Reg::ZERO), mcycle),
+    );
+    execute_rv64(
+      &mut cpu,
+      RV64Instr::CSRRCI(Rd(immediate_result), UImm(Imm32::from(0)), mcycle),
+    );
+
+    assert_eq!(cpu.read_reg(register_result), Some(0));
+    assert_eq!(cpu.read_reg(immediate_result), Some(0));
+
+    let source = Reg::X(Fin::new(7));
+    let failed_result = Reg::X(Fin::new(8));
+    cpu.write_reg(source, 1);
+    cpu.write_reg(failed_result, 0xdead_beef);
+    let pc = cpu.read_pc();
+    let result = cpu.execute(
+      pc,
+      Instr::RV64(RV64Instr::CSRRS(Rd(failed_result), Rs1(source), mcycle)),
+      false,
+    );
+
+    assert!(matches!(result, Err(Exception::IllegalInstruction)));
+    assert_eq!(cpu.read_reg(failed_result), Some(0xdead_beef));
+    assert_eq!(cpu.read_pc(), pc);
   }
 
   #[test]
