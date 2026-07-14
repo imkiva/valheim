@@ -889,10 +889,10 @@ mod tests {
 
     cpu.bus.write::<u64>(data, 5).unwrap();
     cpu.write_pc(pc);
-    assert_eq!(jit.execute(&mut cpu, 2), ExecOutcome::new(2, Ok(())));
+    assert_eq!(jit.execute(&mut cpu, 2), ExecOutcome::new(1, Ok(())));
     cpu.bus.write::<u64>(data, 10).unwrap();
     cpu.write_pc(pc);
-    assert_eq!(jit.execute(&mut cpu, 2), ExecOutcome::new(2, Ok(())));
+    assert_eq!(jit.execute(&mut cpu, 2), ExecOutcome::new(1, Ok(())));
 
     assert_eq!(cpu.read_reg(x(3)), Some(10));
     assert_eq!(cpu.bus.read::<u64>(data), Ok(17));
@@ -935,9 +935,9 @@ mod tests {
     let mut jit = JitExecutor::new().unwrap().with_hot_threshold(1);
 
     cpu.write_pc(lr_pc);
-    assert_eq!(jit.execute(&mut cpu, 2), ExecOutcome::new(2, Ok(())));
+    assert_eq!(jit.execute(&mut cpu, 2), ExecOutcome::new(1, Ok(())));
     cpu.write_pc(sc_pc);
-    assert_eq!(jit.execute(&mut cpu, 2), ExecOutcome::new(2, Ok(())));
+    assert_eq!(jit.execute(&mut cpu, 2), ExecOutcome::new(1, Ok(())));
 
     cpu.write_reg(x(1), 0);
     cpu.write_reg(x(3), 0x1111);

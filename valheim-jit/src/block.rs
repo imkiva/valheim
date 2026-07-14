@@ -234,7 +234,8 @@ pub fn is_baseline_native(instr: Instr) -> bool {
 }
 
 pub fn is_terminator(instr: Instr) -> bool {
-  matches!(
+  is_atomic(instr)
+    || matches!(
     instr,
     Instr::RV32(
       RV32Instr::JAL(..)
@@ -245,6 +246,37 @@ pub fn is_terminator(instr: Instr) -> bool {
         | RV32Instr::BGE(..)
         | RV32Instr::BLTU(..)
         | RV32Instr::BGEU(..)
+    )
+    )
+}
+
+pub fn is_atomic(instr: Instr) -> bool {
+  matches!(
+    instr,
+    Instr::RV32(
+      RV32Instr::LR_W(..)
+        | RV32Instr::SC_W(..)
+        | RV32Instr::AMOSWAP_W(..)
+        | RV32Instr::AMOADD_W(..)
+        | RV32Instr::AMOXOR_W(..)
+        | RV32Instr::AMOAND_W(..)
+        | RV32Instr::AMOOR_W(..)
+        | RV32Instr::AMOMIN_W(..)
+        | RV32Instr::AMOMAX_W(..)
+        | RV32Instr::AMOMINU_W(..)
+        | RV32Instr::AMOMAXU_W(..)
+    ) | Instr::RV64(
+      RV64Instr::LR_D(..)
+        | RV64Instr::SC_D(..)
+        | RV64Instr::AMOSWAP_D(..)
+        | RV64Instr::AMOADD_D(..)
+        | RV64Instr::AMOXOR_D(..)
+        | RV64Instr::AMOAND_D(..)
+        | RV64Instr::AMOOR_D(..)
+        | RV64Instr::AMOMIN_D(..)
+        | RV64Instr::AMOMAX_D(..)
+        | RV64Instr::AMOMINU_D(..)
+        | RV64Instr::AMOMAXU_D(..)
     )
   )
 }
