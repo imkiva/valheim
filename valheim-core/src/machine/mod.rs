@@ -17,6 +17,10 @@ use crate::interp::RV64Interpreter;
 use crate::memory::VirtAddr;
 
 const RV64_PC_RESET: u64 = 0x80000000;
+// Linux expects the flattened device tree to remain reachable through the
+// normal DRAM linear mapping after it installs the final page tables.
+const RV64_DTB_ADDR: u64 = 0x87f00000;
+const DEVICE_TREE_ROM_HEADER_SIZE: usize = 32;
 const DEFAULT_CMDLINE: &str = "root=/dev/vda ro console=ttyS0";
 
 pub struct Machine {
@@ -42,6 +46,10 @@ impl Machine {
       .expect("Cannot generate device tree");
     machine.load_device_tree(device_tree_rom.as_slice())
       .expect("Cannot load device tree");
+    machine.load_memory(
+      RV64_DTB_ADDR as usize,
+      &device_tree_rom[DEVICE_TREE_ROM_HEADER_SIZE..],
+    );
     unsafe {
       machine.cpu.bus.add_device(Arc::new(Uart16550a::new()))
         .expect("Cannot install UART device")
@@ -51,7 +59,7 @@ impl Machine {
 
   pub fn run(&mut self) {
     self.cpu.write_pc(VirtAddr(RV64_PC_RESET));
-    self.cpu.write_reg(Reg::X(Fin::new(11)), 0x1020);
+    self.cpu.write_reg(Reg::X(Fin::new(11)), RV64_DTB_ADDR);
     loop {
       let cont = self.run_next();
       match cont {
@@ -88,7 +96,7 @@ impl Machine {
 
   pub fn run_for_test(&mut self, test_name: String) -> i32 {
     self.cpu.write_pc(VirtAddr(RV64_PC_RESET));
-    self.cpu.write_reg(Reg::X(Fin::new(11)), 0x1020);
+    self.cpu.write_reg(Reg::X(Fin::new(11)), RV64_DTB_ADDR);
     loop {
       let cont = self.run_next_for_test();
       match cont {
