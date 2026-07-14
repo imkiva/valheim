@@ -1,5 +1,6 @@
 use std::io;
 use std::io::prelude::*;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use crate::device::Device;
@@ -168,15 +169,49 @@ impl UartState {
       false
     }
   }
+
+  fn has_interrupt_to_deliver(&self) -> bool {
+    let ier = self.registers[(UART_IER - UART_BASE) as usize];
+    let lsr = self.registers[(UART_LSR - UART_BASE) as usize];
+    (ier & UART_IER_RDI != 0 && lsr & UART_LSR_RX != 0 && self.receive_interrupt_asserted) ||
+      (ier & UART_IER_THRI != 0 && self.thre_interrupt_asserted)
+  }
+}
+
+struct SharedUartState {
+  state: Mutex<UartState>,
+  input_consumed: Condvar,
+  // This is only a fast-path hint. UartState remains the source of truth and
+  // all changes to an interrupt pulse are serialized by `state`.
+  interrupt_to_deliver: AtomicBool,
+}
+
+impl SharedUartState {
+  fn new() -> Self {
+    Self {
+      state: Mutex::new(UartState::new()),
+      input_consumed: Condvar::new(),
+      interrupt_to_deliver: AtomicBool::new(false),
+    }
+  }
+
+  fn publish_interrupt_state(&self, state: &UartState) {
+    // Producers publish while holding `state`. The interrupt consumer also
+    // updates the hint before releasing that mutex, so a producer that races
+    // with consumption necessarily publishes its newer value afterwards.
+    self
+      .interrupt_to_deliver
+      .store(state.has_interrupt_to_deliver(), Ordering::Release);
+  }
 }
 
 pub struct Uart16550a {
-  state: Arc<(Mutex<UartState>, Condvar)>,
+  state: Arc<SharedUartState>,
 }
 
 impl Uart16550a {
   pub fn new() -> Self {
-    let state = Arc::new((Mutex::new(UartState::new()), Condvar::new()));
+    let state = Arc::new(SharedUartState::new());
 
     {
       let state = state.clone();
@@ -185,18 +220,21 @@ impl Uart16550a {
         match io::stdin().read(&mut buffer) {
           Ok(0) => return,
           Ok(_) => {
-            let (state, cond) = state.as_ref();
-            let mut state = state.lock().expect("cannot lock uart state");
+            let mut uart = state.state.lock().expect("cannot lock uart state");
             // we can only write to the register if there's no previous data.
             // we achieve this by checking the bit 0 of LSR:
             // - 0: no data in receive holding register.
             // - 1: means data has been receive and saved in the receive holding register.
-            while state.registers[(UART_LSR - UART_BASE) as usize] & UART_LSR_RX != 0 {
-              state = cond.wait(state).expect("cannot wait on uart state");
+            while uart.registers[(UART_LSR - UART_BASE) as usize] & UART_LSR_RX != 0 {
+              uart = state
+                .input_consumed
+                .wait(uart)
+                .expect("cannot wait on uart state");
             }
-            state.registers[(UART_RHR - UART_BASE) as usize] = buffer[0];
-            state.registers[(UART_LSR - UART_BASE) as usize] |= UART_LSR_RX;
-            state.raise_receive_interrupt();
+            uart.registers[(UART_RHR - UART_BASE) as usize] = buffer[0];
+            uart.registers[(UART_LSR - UART_BASE) as usize] |= UART_LSR_RX;
+            uart.raise_receive_interrupt();
+            state.publish_interrupt_state(&uart);
           }
           Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
           Err(e) => {
@@ -244,82 +282,192 @@ impl Device for Uart16550a {
   }
 
   fn mmio_read(&self, addr: VirtAddr) -> Option<u8> {
-    let (state, cond) = &*self.state;
-    let mut state = state.lock().expect("cannot lock uart state");
-    match addr.0 {
+    let mut uart = self.state.state.lock().expect("cannot lock uart state");
+    let value = match addr.0 {
       UART_RHR => {
-        if state.dlab() {
-          Some(state.divisor_latch_low)
+        if uart.dlab() {
+          uart.divisor_latch_low
         } else {
-          let val = state.registers[(UART_RHR - UART_BASE) as usize];
-          state.registers[(UART_LSR - UART_BASE) as usize] &= !UART_LSR_RX;
-          state.clear_receive_interrupt();
-          cond.notify_one();
-          Some(val)
+          let val = uart.registers[(UART_RHR - UART_BASE) as usize];
+          uart.registers[(UART_LSR - UART_BASE) as usize] &= !UART_LSR_RX;
+          uart.clear_receive_interrupt();
+          self.state.input_consumed.notify_one();
+          val
         }
       }
       UART_IER => {
-        if state.dlab() {
-          Some(state.divisor_latch_high)
+        if uart.dlab() {
+          uart.divisor_latch_high
         } else {
-          Some(state.registers[(UART_IER - UART_BASE) as usize])
+          uart.registers[(UART_IER - UART_BASE) as usize]
         }
       }
-      UART_ISR => Some(state.acknowledge_interrupt()),
-      addr => Some(state.registers[(addr - UART_BASE) as usize]),
-    }
+      UART_ISR => uart.acknowledge_interrupt(),
+      addr => uart.registers[(addr - UART_BASE) as usize],
+    };
+    self.state.publish_interrupt_state(&uart);
+    Some(value)
   }
 
   fn mmio_write(&self, addr: VirtAddr, val: u8) -> Result<(), ()> {
-    let (state, cond) = &*self.state;
-    let mut state = state.lock().expect("cannot lock uart state");
+    let mut uart = self.state.state.lock().expect("cannot lock uart state");
     match addr.0 {
       UART_THR => {
-        if state.dlab() {
-          state.divisor_latch_low = val;
+        if uart.dlab() {
+          uart.divisor_latch_low = val;
         } else {
-          state.clear_thre_interrupt();
+          uart.clear_thre_interrupt();
           io::stdout().write_all(&[val]).expect("cannot write to stdout");
           io::stdout().flush().expect("cannot flush stdout");
           // Valheim writes the byte synchronously, so THR is empty again as
           // soon as this MMIO operation completes.
-          if state.registers[(UART_IER - UART_BASE) as usize] & UART_IER_THRI != 0 {
-            state.raise_thre_interrupt();
+          if uart.registers[(UART_IER - UART_BASE) as usize] & UART_IER_THRI != 0 {
+            uart.raise_thre_interrupt();
           }
         }
       }
       UART_IER => {
-        if state.dlab() {
-          state.divisor_latch_high = val;
+        if uart.dlab() {
+          uart.divisor_latch_high = val;
         } else {
-          state.set_interrupt_enable(val);
+          uart.set_interrupt_enable(val);
         }
       }
       UART_FCR => {
-        state.registers[(UART_FCR - UART_BASE) as usize] = val;
+        uart.registers[(UART_FCR - UART_BASE) as usize] = val;
         if val & UART_FCR_CLEAR_RCVR != 0 {
-          state.registers[(UART_LSR - UART_BASE) as usize] &= !UART_LSR_RX;
-          state.clear_receive_interrupt();
-          cond.notify_one();
+          uart.registers[(UART_LSR - UART_BASE) as usize] &= !UART_LSR_RX;
+          uart.clear_receive_interrupt();
+          self.state.input_consumed.notify_one();
         }
       }
       addr => {
-        state.registers[(addr - UART_BASE) as usize] = val;
+        uart.registers[(addr - UART_BASE) as usize] = val;
       }
     }
+    self.state.publish_interrupt_state(&uart);
     Ok(())
   }
 
   fn is_interrupting(&self) -> Option<u64> {
-    let (state, _) = &*self.state;
-    let mut state = state.lock().expect("cannot lock uart state");
-    state.take_interrupt().then_some(UART_IRQ)
+    if !self.state.interrupt_to_deliver.load(Ordering::Acquire) {
+      return None;
+    }
+
+    let mut uart = self.state.state.lock().expect("cannot lock uart state");
+    let interrupting = uart.take_interrupt();
+    self.state.publish_interrupt_state(&uart);
+    interrupting.then_some(UART_IRQ)
   }
 }
 
 #[cfg(test)]
 mod tests {
+  use std::sync::{mpsc, Barrier};
+  use std::time::Duration;
+
   use super::*;
+
+  fn uart_without_input_thread() -> Uart16550a {
+    Uart16550a { state: Arc::new(SharedUartState::new()) }
+  }
+
+  #[test]
+  fn interrupt_poll_without_an_event_does_not_lock_uart_state() {
+    let uart = uart_without_input_thread();
+    let shared = uart.state.clone();
+    let guard = shared.state.lock().expect("cannot lock uart state");
+    let (sender, receiver) = mpsc::channel();
+
+    let poller = std::thread::spawn(move || sender.send(uart.is_interrupting()).unwrap());
+
+    // Keep the state mutex held while the other thread polls. The no-event
+    // path must finish from the atomic hint instead of waiting for this lock.
+    assert_eq!(receiver.recv_timeout(Duration::from_secs(2)), Ok(None));
+    drop(guard);
+    poller.join().unwrap();
+  }
+
+  #[test]
+  fn consuming_one_cause_republishes_another_pending_pulse() {
+    let uart = uart_without_input_thread();
+    {
+      let mut state = uart.state.state.lock().expect("cannot lock uart state");
+      state.set_interrupt_enable(UART_IER_RDI | UART_IER_THRI);
+      state.registers[(UART_LSR - UART_BASE) as usize] |= UART_LSR_RX;
+      state.raise_receive_interrupt();
+      uart.state.publish_interrupt_state(&state);
+    }
+
+    // Receive has priority, and consuming it must leave the THRE event in the
+    // atomic fast-path hint for the next PLIC poll.
+    assert_eq!(uart.is_interrupting(), Some(UART_IRQ));
+    assert!(uart.state.interrupt_to_deliver.load(Ordering::Acquire));
+    assert_eq!(uart.is_interrupting(), Some(UART_IRQ));
+    assert!(!uart.state.interrupt_to_deliver.load(Ordering::Acquire));
+    assert_eq!(uart.is_interrupting(), None);
+  }
+
+  #[test]
+  fn racing_producer_cannot_lose_its_atomic_interrupt_hint() {
+    let uart = Arc::new(uart_without_input_thread());
+    uart.mmio_write(VirtAddr(UART_IER), UART_IER_THRI).unwrap();
+
+    let barrier = Arc::new(Barrier::new(2));
+    let producer_uart = uart.clone();
+    let producer_barrier = barrier.clone();
+    let producer = std::thread::spawn(move || {
+      producer_barrier.wait();
+      let mut state = producer_uart
+        .state
+        .state
+        .lock()
+        .expect("cannot lock uart state");
+      state.registers[(UART_LSR - UART_BASE) as usize] |= UART_LSR_RX;
+      state.set_interrupt_enable(UART_IER_RDI | UART_IER_THRI);
+      producer_uart.state.publish_interrupt_state(&state);
+    });
+
+    barrier.wait();
+    assert_eq!(uart.is_interrupting(), Some(UART_IRQ));
+    producer.join().unwrap();
+
+    // If the consumer won the mutex, this is the newly published RX pulse. If
+    // the producer won, RX was consumed first and this is the older THRE
+    // pulse. In either ordering, publishing while holding the mutex ensures
+    // that the remaining event cannot be overwritten with a stale `false`.
+    assert!(uart.state.interrupt_to_deliver.load(Ordering::Acquire));
+    assert_eq!(uart.is_interrupting(), Some(UART_IRQ));
+  }
+
+  #[test]
+  fn thre_enable_edge_rearms_atomic_interrupt_hint() {
+    let uart = uart_without_input_thread();
+
+    uart.mmio_write(VirtAddr(UART_IER), UART_IER_THRI).unwrap();
+    assert_eq!(uart.is_interrupting(), Some(UART_IRQ));
+    assert_eq!(uart.is_interrupting(), None);
+
+    // Rewriting an already-enabled IER is not a new THRE event.
+    uart.mmio_write(VirtAddr(UART_IER), UART_IER_THRI).unwrap();
+    assert_eq!(uart.is_interrupting(), None);
+
+    uart.mmio_write(VirtAddr(UART_IER), 0).unwrap();
+    uart.mmio_write(VirtAddr(UART_IER), UART_IER_THRI).unwrap();
+    assert_eq!(uart.is_interrupting(), Some(UART_IRQ));
+    assert_eq!(uart.is_interrupting(), None);
+  }
+
+  #[test]
+  fn iir_acknowledgement_clears_atomic_thre_hint() {
+    let uart = uart_without_input_thread();
+
+    uart.mmio_write(VirtAddr(UART_IER), UART_IER_THRI).unwrap();
+    assert!(uart.state.interrupt_to_deliver.load(Ordering::Acquire));
+    assert_eq!(uart.mmio_read(VirtAddr(UART_ISR)).unwrap() & 0x0f, 0x02);
+    assert!(!uart.state.interrupt_to_deliver.load(Ordering::Acquire));
+    assert_eq!(uart.is_interrupting(), None);
+  }
 
   #[test]
   fn thre_interrupt_is_a_single_pulse_until_rearmed() {
