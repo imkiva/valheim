@@ -67,6 +67,7 @@ struct CachedBlock {
   executions: u32,
   compiled: Option<CompiledBlock>,
   compile_failed: bool,
+  successors: SuccessorCache,
 }
 
 #[derive(Clone, Copy)]
@@ -86,6 +87,59 @@ struct FastCacheSet {
   generation: u64,
   ways: [Option<FastCacheWay>; 2],
   next_way: u8,
+}
+
+#[derive(Clone, Copy)]
+struct SuccessorLink {
+  generation: u64,
+  key: TbKey,
+  block_index: usize,
+}
+
+#[derive(Clone, Copy)]
+struct SuccessorCache {
+  links: [Option<SuccessorLink>; 2],
+  next_way: u8,
+}
+
+impl SuccessorCache {
+  const EMPTY: Self = Self {
+    links: [None, None],
+    next_way: 0,
+  };
+
+  #[inline(always)]
+  fn lookup(&self, generation: u64, key: TbKey) -> Option<usize> {
+    if let Some(link) = self.links[0] {
+      if link.generation == generation && link.key == key {
+        return Some(link.block_index);
+      }
+    }
+    if let Some(link) = self.links[1] {
+      if link.generation == generation && link.key == key {
+        return Some(link.block_index);
+      }
+    }
+    None
+  }
+
+  #[inline(always)]
+  fn insert(&mut self, generation: u64, key: TbKey, block_index: usize) {
+    let link = SuccessorLink {
+      generation,
+      key,
+      block_index,
+    };
+    for slot in &mut self.links {
+      if slot.map(|old| old.key == key).unwrap_or(true) {
+        *slot = Some(link);
+        return;
+      }
+    }
+    let replacement = self.next_way as usize;
+    self.links[replacement] = Some(link);
+    self.next_way ^= 1;
+  }
 }
 
 impl FastCacheSet {
@@ -163,6 +217,11 @@ impl FastCache {
     set.next_way ^= 1;
   }
 
+  #[inline(always)]
+  fn generation(&self) -> u64 {
+    self.generation
+  }
+
   fn invalidate(&mut self) {
     self.generation = self.generation.wrapping_add(1);
     if self.generation == 0 {
@@ -175,12 +234,15 @@ impl FastCache {
 #[derive(Debug)]
 struct ExecuteOne {
   outcome: ExecOutcome,
-  can_chain: bool,
+  chain_source: Option<usize>,
 }
 
 impl ExecuteOne {
   fn stop(outcome: ExecOutcome) -> Self {
-    Self { outcome, can_chain: false }
+    Self {
+      outcome,
+      chain_source: None,
+    }
   }
 }
 
@@ -198,6 +260,9 @@ pub struct JitStats {
   pub max_live_code_bytes: u64,
   pub cache_hits: u64,
   pub cache_misses: u64,
+  pub successor_hits: u64,
+  pub successor_misses: u64,
+  pub successor_installs: u64,
   pub decoded_executions: u64,
   pub native_executions: u64,
   pub compiled_blocks: u64,
@@ -401,8 +466,9 @@ impl JitExecutor {
     match CraneliftBackend::new() {
       Ok(backend) => {
         let old = std::mem::replace(&mut self.backend, backend);
-        // Keep the old module alive because cache entries still hold its function pointers.
-        // There is no block chaining, so generations are independent.
+        // Keep the old module alive because cache entries still hold its function pointers. Rust
+        // successor links only retain arena indices, so modules remain independent and there are
+        // no native cross-module jumps to patch.
         self.retired_backends.push(old);
         self.compiled_in_generation = 0;
         if self.stats_enabled {
@@ -549,6 +615,74 @@ impl JitExecutor {
 }
 
 impl JitExecutor {
+  // This runs once per native TB. Leaving it out of line adds a measurable host call to every
+  // successor edge and overwhelms the lookup saved by the inline cache.
+  #[inline(always)]
+  fn execute_compiled_block(
+    &mut self,
+    cpu: &mut RV64Cpu,
+    budget: u32,
+    native_only: bool,
+    privilege: u8,
+    satp: u64,
+    key: TbKey,
+    block_index: usize,
+    link_source: Option<usize>,
+  ) -> Option<ExecuteOne> {
+    let cached = self
+      .blocks
+      .get(block_index)
+      .expect("compiled block index outlived its arena");
+    let block_len = cached.block.instructions.len();
+    if block_len > budget as usize {
+      return native_only.then(|| ExecuteOne::stop(ExecOutcome::new(0, Ok(()))));
+    }
+    if native_only && !cached.chainable {
+      return Some(ExecuteOne::stop(ExecOutcome::new(0, Ok(()))));
+    }
+    let compiled = cached
+      .compiled
+      .expect("compiled cache path reached a decoded block");
+    let chainable = cached.chainable;
+    if self.stats_enabled {
+      self.stats.native_executions += 1;
+    }
+    let native = Self::execute_native(
+      &mut self.tlb,
+      cpu,
+      &cached.block,
+      compiled,
+      native_only,
+    );
+    let NativeExecution {
+      outcome,
+      pending,
+      completed_block,
+    } = native;
+    if let Some(inst) = pending {
+      self.remember_slow_memory(cpu, privilege, satp, inst);
+    }
+    let chain_source = (completed_block && chainable).then_some(block_index);
+    if chain_source.is_some() {
+      if let Some(source_index) = link_source {
+        let generation = self.fast_cache.generation();
+        self
+          .blocks
+          .get_mut(source_index)
+          .expect("successor source index outlived its arena")
+          .successors
+          .insert(generation, key, block_index);
+        if self.stats_enabled {
+          self.stats.successor_installs += 1;
+        }
+      }
+    }
+    Some(ExecuteOne {
+      outcome,
+      chain_source,
+    })
+  }
+
   fn execute_one(
     &mut self,
     cpu: &mut RV64Cpu,
@@ -556,6 +690,7 @@ impl JitExecutor {
     native_only: bool,
     privilege: u8,
     satp: u64,
+    predecessor: Option<usize>,
   ) -> ExecuteOne {
     if budget == 0 || cpu.wfi {
       return ExecuteOne::stop(ExecOutcome::new(0, Ok(())));
@@ -585,6 +720,39 @@ impl JitExecutor {
       return ExecuteOne::stop(ExecOutcome::new(1, result));
     }
 
+    let mut link_source = None;
+    if let Some(source_index) = predecessor {
+      let generation = self.fast_cache.generation();
+      let target = self
+        .blocks
+        .get(source_index)
+        .expect("successor source index outlived its arena")
+        .successors
+        .lookup(generation, key);
+      if let Some(block_index) = target {
+        if self.stats_enabled {
+          self.stats.cache_hits += 1;
+          self.stats.successor_hits += 1;
+        }
+        return self
+          .execute_compiled_block(
+            cpu,
+            budget,
+            native_only,
+            privilege,
+            satp,
+            key,
+            block_index,
+            None,
+          )
+          .expect("native successor rejected a continuation budget");
+      }
+      if self.stats_enabled {
+        self.stats.successor_misses += 1;
+      }
+      link_source = Some(source_index);
+    }
+
     if let Some(block_index) = self.fast_cache.lookup(key) {
       let cached = self
         .blocks
@@ -595,30 +763,18 @@ impl JitExecutor {
         if self.stats_enabled {
           self.stats.cache_hits += 1;
         }
-        if native_only && !cached.chainable {
-          return ExecuteOne::stop(ExecOutcome::new(0, Ok(())));
-        }
-        let compiled = cached
-          .compiled
-          .expect("fast cache must only contain compiled blocks");
-        let chainable = cached.chainable;
-        if self.stats_enabled {
-          self.stats.native_executions += 1;
-        }
-        let native = Self::execute_native(
-          &mut self.tlb,
-          cpu,
-          &cached.block,
-          compiled,
-          native_only,
-        );
-        if let Some(inst) = native.pending {
-          self.remember_slow_memory(cpu, privilege, satp, inst);
-        }
-        return ExecuteOne {
-          outcome: native.outcome,
-          can_chain: native.completed_block && chainable,
-        };
+        return self
+          .execute_compiled_block(
+            cpu,
+            budget,
+            native_only,
+            privilege,
+            satp,
+            key,
+            block_index,
+            link_source,
+          )
+          .expect("fast-cache block rejected a sufficient budget");
       }
       if native_only {
         if self.stats_enabled {
@@ -675,6 +831,7 @@ impl JitExecutor {
                 executions: 0,
                 compiled: None,
                 compile_failed: false,
+                successors: SuccessorCache::EMPTY,
               });
               entry.insert(CacheEntry::Block(block_index));
               block_index
@@ -702,33 +859,20 @@ impl JitExecutor {
           }
         }
       };
-      let cached = &mut self.blocks[block_index];
-
-      let block_len = cached.block.instructions.len();
-      if let Some(compiled) = cached.compiled {
+      let block_len = self.blocks[block_index].block.instructions.len();
+      if self.blocks[block_index].compiled.is_some() {
         self.fast_cache.insert(key, block_index);
-        if block_len <= budget as usize {
-          let chainable = cached.chainable;
-          if native_only && !chainable {
-            return ExecuteOne::stop(ExecOutcome::new(0, Ok(())));
-          }
-          if self.stats_enabled {
-            self.stats.native_executions += 1;
-          }
-          let native = Self::execute_native(
-            &mut self.tlb,
-            cpu,
-            &cached.block,
-            compiled,
-            native_only,
-          );
-          if let Some(inst) = native.pending {
-            self.remember_slow_memory(cpu, privilege, satp, inst);
-          }
-          return ExecuteOne {
-            outcome: native.outcome,
-            can_chain: native.completed_block && chainable,
-          };
+        if let Some(outcome) = self.execute_compiled_block(
+          cpu,
+          budget,
+          native_only,
+          privilege,
+          satp,
+          key,
+          block_index,
+          link_source,
+        ) {
+          return outcome;
         }
       }
 
@@ -739,6 +883,7 @@ impl JitExecutor {
       if self.stats_enabled {
         self.stats.decoded_executions += 1;
       }
+      let cached = &mut self.blocks[block_index];
       let outcome = Self::execute_decoded(cpu, &cached.block, budget);
 
       cached.executions = cached.executions.saturating_add(1);
@@ -823,6 +968,7 @@ impl RV64Executor for JitExecutor {
     self.rotate_code_cache_if_needed();
 
     let mut attempted = 0;
+    let mut predecessor = None;
     let result = loop {
       let step = self.execute_one(
         cpu,
@@ -830,19 +976,20 @@ impl RV64Executor for JitExecutor {
         attempted != 0,
         tlb_context.privilege,
         tlb_context.satp,
+        predecessor,
       );
       attempted += step.outcome.attempted;
       match step.outcome.result {
         Err(exception) => break Err(exception),
         Ok(())
           if step.outcome.attempted == 0
-            || !step.can_chain
+            || step.chain_source.is_none()
             || attempted == budget
             || cpu.wfi =>
         {
           break Ok(())
         }
-        Ok(()) => (),
+        Ok(()) => predecessor = step.chain_source,
       }
     };
     let outcome = ExecOutcome::new(attempted, result);
@@ -977,6 +1124,41 @@ mod tests {
   }
 
   #[test]
+  fn successor_cache_is_two_way_and_context_generation_guarded() {
+    let key = TbKey {
+      pc: RV64_MEMORY_BASE,
+      privilege: PrivilegeMode::Machine as u8,
+      satp: 0,
+    };
+    let other_pc = TbKey {
+      pc: key.pc + 4,
+      ..key
+    };
+    let other_privilege = TbKey {
+      privilege: PrivilegeMode::Supervisor as u8,
+      ..key
+    };
+    let other_satp = TbKey { satp: 1, ..key };
+    let mut cache = SuccessorCache::EMPTY;
+
+    cache.insert(7, key, 10);
+    cache.insert(7, other_pc, 11);
+    assert_eq!(cache.lookup(7, key), Some(10));
+    assert_eq!(cache.lookup(7, other_pc), Some(11));
+    assert_eq!(cache.lookup(8, key), None);
+    assert_eq!(cache.lookup(7, other_privilege), None);
+    assert_eq!(cache.lookup(7, other_satp), None);
+
+    cache.insert(7, other_privilege, 12);
+    assert_eq!(cache.lookup(7, other_privilege), Some(12));
+    assert_eq!(
+      usize::from(cache.lookup(7, key).is_some())
+        + usize::from(cache.lookup(7, other_pc).is_some()),
+      1,
+    );
+  }
+
+  #[test]
   fn tlb_context_only_tracks_mstatus_translation_controls() {
     let mut cpu = RV64Cpu::new(None);
     let original = TlbContext::new(&cpu);
@@ -1059,6 +1241,32 @@ mod tests {
     assert_eq!(jit.stats().dispatches, 2);
     assert_eq!(jit.stats().native_executions, 3);
     assert_eq!(jit.stats().guest_instructions, 8);
+    assert_eq!(jit.stats().successor_misses, 1);
+    assert_eq!(jit.stats().successor_installs, 1);
+    assert_eq!(jit.stats().successor_hits, 1);
+  }
+
+  #[test]
+  fn linked_successor_never_exceeds_the_remaining_budget() {
+    let mut cpu = RV64Cpu::new(None);
+    let pc = VirtAddr(RV64_MEMORY_BASE);
+    let x1 = Reg::X(Fin::new(1));
+    cpu.bus.write::<u32>(pc, 0x0010_8093).unwrap(); // addi x1, x1, 1
+    cpu
+      .bus
+      .write::<u32>(pc + VirtAddr(4), 0xffdff06f)
+      .unwrap(); // jal x0, -4
+    cpu.write_pc(pc);
+    let mut jit = JitExecutor::new().unwrap().with_hot_threshold(1);
+
+    assert_eq!(jit.execute(&mut cpu, 2), ExecOutcome::new(2, Ok(())));
+    assert_eq!(jit.execute(&mut cpu, 6), ExecOutcome::new(6, Ok(())));
+    let hits_before = jit.stats().successor_hits;
+    assert_eq!(jit.execute(&mut cpu, 3), ExecOutcome::new(2, Ok(())));
+
+    assert_eq!(cpu.read_reg(x1), Some(5));
+    assert_eq!(cpu.read_pc(), pc);
+    assert_eq!(jit.stats().successor_hits, hits_before + 1);
   }
 
   #[test]
@@ -1087,6 +1295,7 @@ mod tests {
       jit.execute(&mut cpu, 32),
       ExecOutcome::new(1, Err(Exception::MachineEcall))
     );
+    assert_eq!(jit.stats().successor_installs, 0);
   }
 
   #[test]
@@ -1119,6 +1328,7 @@ mod tests {
 
     assert_eq!(jit.execute(&mut cpu, 32), ExecOutcome::new(1, Ok(())));
     assert_eq!(cpu.bus.read::<u64>(data), Ok(17));
+    assert_eq!(jit.stats().successor_installs, 0);
   }
 
   #[test]
@@ -1176,6 +1386,41 @@ mod tests {
     assert_eq!(cpu.read_reg(x2), Some(1));
     assert!(jit.stats().module_rotations >= 1);
     assert!(jit.stats().native_executions >= 1);
+  }
+
+  #[test]
+  fn successor_links_cross_retired_and_current_modules_by_arena_index() {
+    let mut cpu = RV64Cpu::new(None);
+    let source = VirtAddr(RV64_MEMORY_BASE);
+    let target = source + VirtAddr(0x100);
+    let x1 = Reg::X(Fin::new(1));
+    cpu
+      .bus
+      .write::<u32>(source, jal_x0((target.0 - source.0) as i32))
+      .unwrap();
+    cpu.bus.write::<u32>(target, 0x0010_8093).unwrap(); // addi x1, x1, 1
+    cpu
+      .bus
+      .write::<u32>(target + VirtAddr(4), 0xffdff06f)
+      .unwrap(); // jal x0, -4
+    let mut jit = JitExecutor::new()
+      .unwrap()
+      .with_hot_threshold(1)
+      .with_max_compiled_blocks(1);
+
+    cpu.write_pc(source);
+    assert_eq!(jit.execute(&mut cpu, 1), ExecOutcome::new(1, Ok(())));
+    cpu.write_pc(target);
+    assert_eq!(jit.execute(&mut cpu, 2), ExecOutcome::new(2, Ok(())));
+    cpu.write_pc(source);
+    assert_eq!(jit.execute(&mut cpu, 3), ExecOutcome::new(3, Ok(())));
+    cpu.write_pc(source);
+    assert_eq!(jit.execute(&mut cpu, 3), ExecOutcome::new(3, Ok(())));
+
+    assert_eq!(cpu.read_reg(x1), Some(3));
+    assert!(jit.stats().module_rotations >= 2);
+    assert_eq!(jit.stats().successor_installs, 1);
+    assert_eq!(jit.stats().successor_hits, 1);
   }
 
   #[test]
@@ -1583,6 +1828,16 @@ mod tests {
     cpu.write_pc(source);
     assert_eq!(jit.execute(&mut cpu, 1), ExecOutcome::new(1, Ok(())));
 
+    // Warm the target's JIT TLB, then take the edge again so source -> target has an installed
+    // successor link before the MMIO address forces a fresh first-instruction miss.
+    cpu.write_pc(source);
+    assert_eq!(jit.execute(&mut cpu, 32), ExecOutcome::new(1, Ok(())));
+    assert_eq!(cpu.read_pc(), target);
+    assert_eq!(jit.execute(&mut cpu, 32), ExecOutcome::new(2, Ok(())));
+    cpu.write_pc(source);
+    assert_eq!(jit.execute(&mut cpu, 32), ExecOutcome::new(3, Ok(())));
+    assert_eq!(jit.stats().successor_installs, 1);
+
     cpu.write_reg(x1, mmio.0);
     cpu.write_pc(source);
     assert_eq!(jit.execute(&mut cpu, 32), ExecOutcome::new(1, Ok(())));
@@ -1594,6 +1849,7 @@ mod tests {
     assert_eq!(cpu.read_pc(), target + VirtAddr(4));
     assert_eq!(cpu.read_reg(x2), Some(0xfeed_face_cafe_beef));
     assert_eq!(jit.stats().memory_slow_paths, 1);
+    assert_eq!(jit.stats().successor_hits, 1);
   }
 
   #[test]
