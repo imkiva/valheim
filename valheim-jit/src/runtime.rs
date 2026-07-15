@@ -339,7 +339,7 @@ impl ExecuteOne {
 
 struct NativeExecution {
   outcome: ExecOutcome,
-  pending_index: Option<u8>,
+  pending_index: Option<usize>,
   completed_block: bool,
 }
 
@@ -680,23 +680,23 @@ impl JitExecutor {
     if is_slow_memory_exit(frame) {
       let index = attempted
         .checked_sub(1)
-        .expect("memory side exit attempted no instruction");
-      debug_assert!(index < MAX_BLOCK_LEN as u32);
-      let inst = block.instructions[index as usize];
+        .expect("memory side exit attempted no instruction") as usize;
+      debug_assert!(index < block.instructions.len());
+      let inst = block.instructions[index];
       debug_assert_eq!(inst.pc, frame.fault_pc);
       cpu.write_pc(VirtAddr(frame.fault_pc));
       if index != 0 {
-        cpu.instr = block.instructions[index as usize - 1].raw as u64;
+        cpu.instr = block.instructions[index - 1].raw as u64;
         return NativeExecution {
-          outcome: ExecOutcome::new(index, Ok(())),
-          pending_index: Some(index as u8),
+          outcome: ExecOutcome::new(index as u32, Ok(())),
+          pending_index: Some(index),
           completed_block: false,
         };
       }
       if defer_first_slow {
         return NativeExecution {
           outcome: ExecOutcome::new(0, Ok(())),
-          pending_index: Some(0),
+          pending_index: Some(index),
           completed_block: false,
         };
       }
