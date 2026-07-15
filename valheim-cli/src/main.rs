@@ -28,7 +28,7 @@ struct Args {
   pub test_name: Option<String>,
   #[clap(long, default_value = "naive")]
   pub engine: String,
-  #[clap(long, default_value_t = 500)]
+  #[clap(long, default_value_t = 750)]
   pub jit_hot_threshold: u32,
   #[clap(long, default_value_t = 32)]
   pub jit_max_block_len: usize,

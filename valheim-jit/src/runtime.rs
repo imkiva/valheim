@@ -15,7 +15,7 @@ use crate::memory::{
   exception_from_frame, is_deferred_memory_exit, is_slow_memory_exit, SoftwareTlb, FAULT_NONE,
 };
 
-const DEFAULT_HOT_THRESHOLD: u32 = 500;
+const DEFAULT_HOT_THRESHOLD: u32 = 750;
 // Keep one Cranelift module comfortably below the x86-64 PLT/GOT ±2 GiB relocation limit. The
 // generated memory/TLB side exits make each function substantially larger than a pure ALU TB.
 const DEFAULT_MAX_COMPILED_BLOCKS: usize = 4 * 1024;
