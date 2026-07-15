@@ -5,7 +5,7 @@ use std::sync::Arc;
 use valheim_asm::isa::typed::Reg;
 
 use crate::cpu::bus::{RV64_MEMORY_BASE, RV64_MEMORY_SIZE};
-use crate::cpu::mmu::VMMode;
+use crate::cpu::mmu::{TranslationCache, VMMode};
 use crate::debug::trace::{Journal, RegTrace, Trace};
 use crate::device::clint::{ClockSource, HostClock};
 use crate::memory::VirtAddr;
@@ -36,6 +36,8 @@ pub struct RV64Cpu {
   pub vmppn: u64,
   /// Generation of address-translation state visible to execution caches.
   pub translation_epoch: u64,
+  /// Core-owned second-level cache shared by interpreter accesses and JIT slow paths.
+  translation_cache: TranslationCache,
   /// Generation of explicit SFENCE.VMA operations visible to translated-code caches.
   pub sfence_epoch: u64,
   /// Generation of instruction bytes visible to execution caches.
@@ -72,6 +74,7 @@ impl RV64Cpu {
       vmppn: 0,
       vmmode: VMMode::MBARE,
       translation_epoch: 0,
+      translation_cache: TranslationCache::new(),
       sfence_epoch: 0,
       icache_epoch: 0,
       journal: Journal {

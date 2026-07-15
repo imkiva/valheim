@@ -711,6 +711,8 @@ mod tests {
         ((second_physical_page.0 >> PAGE_SHIFT) << 10) | (1 << PTE_V) | (1 << PTE_R),
       )
       .unwrap();
+    // Page-table writes become visible to an address-translation cache only after SFENCE.VMA.
+    cpu.translation_epoch = cpu.translation_epoch.wrapping_add(1);
     assert_eq!(
       GuestBlock::translate(&mut cpu, MAX_BLOCK_LEN),
       BlockBuild::Fault {

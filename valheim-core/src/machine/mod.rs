@@ -60,8 +60,8 @@ impl Machine {
     };
 
     let cmdline = cmdline.unwrap_or(DEFAULT_CMDLINE.to_string());
-    let memory_size = machine.cpu.bus.mem.memory_size as u64;
-    let memory_base = machine.cpu.bus.mem.memory_base.0;
+    let memory_size = machine.cpu.bus.mem.size() as u64;
+    let memory_base = machine.cpu.bus.mem.base().0;
     let device_tree_rom = generate_device_tree_rom(cmdline, memory_base, memory_size)
       .expect("Cannot generate device tree");
     machine.load_device_tree(device_tree_rom.as_slice())

@@ -130,7 +130,7 @@ impl TbKey {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct TlbContext {
-  dram_host_base: usize,
+  dram_backing_id: u64,
   privilege: u8,
   satp: u64,
   mstatus: u64,
@@ -140,7 +140,7 @@ struct TlbContext {
 impl TlbContext {
   fn new(cpu: &RV64Cpu) -> Self {
     Self {
-      dram_host_base: cpu.bus.mem.memory.as_ptr() as usize,
+      dram_backing_id: cpu.bus.mem.backing_id(),
       privilege: cpu.mode as u8,
       satp: cpu.csrs.read_unchecked(SATP),
       mstatus: cpu.csrs.read_unchecked(MSTATUS) & MSTATUS_TRANSLATION_MASK,
@@ -1170,12 +1170,15 @@ mod tests {
   use valheim_asm::isa::rv32::RV32Instr;
   use valheim_asm::isa::rv64::{CSRAddr, RV64Instr};
   use valheim_asm::isa::typed::{Imm32, Rd, Reg, Rs1, Rs2, AQ, RL};
-  use valheim_core::cpu::bus::{RV64_MEMORY_BASE, RV64_MEMORY_END, VIRT_MROM_BASE};
+  use valheim_core::cpu::bus::{
+    RV64_MEMORY_BASE, RV64_MEMORY_END, RV64_MEMORY_SIZE, VIRT_MROM_BASE,
+  };
   use valheim_core::cpu::irq::Exception;
   use valheim_core::cpu::mmu::{
     PAGE_SHIFT, PTE_A, PTE_D, PTE_R, PTE_V, PTE_W, PTE_X, SATP64_MODE_SHIFT, VMMode,
   };
-  use valheim_core::cpu::PrivilegeMode;
+  use valheim_core::cpu::{GuestCsrOp, PrivilegeMode};
+  use valheim_core::memory::Memory;
 
   const SV39_ROOT_PAGE: u64 = RV64_MEMORY_BASE + 0x1000;
   const SV39_LEVEL1_PAGE: u64 = RV64_MEMORY_BASE + 0x2000;
@@ -1218,6 +1221,18 @@ mod tests {
       )
       .unwrap();
     cpu.sync_pagetable();
+  }
+
+  fn rewrite_satp_to_invalidate_translation(cpu: &mut RV64Cpu) {
+    let satp = cpu.csrs.read_unchecked(SATP);
+    assert_eq!(
+      cpu.execute_guest_csr(
+        CSRAddr(Imm32::from(SATP as u32)),
+        GuestCsrOp::Write,
+        satp,
+      ),
+      Ok(satp),
+    );
   }
 
   fn jal_x0(offset: i32) -> u32 {
@@ -1309,7 +1324,7 @@ mod tests {
   }
 
   #[test]
-  fn tlb_context_only_tracks_mstatus_translation_controls() {
+  fn tlb_context_tracks_translation_controls_and_dram_backing() {
     let mut cpu = RV64Cpu::new(None);
     let original = TlbContext::new(&cpu);
 
@@ -1317,6 +1332,10 @@ mod tests {
     assert_eq!(TlbContext::new(&cpu), original);
 
     cpu.csrs.write_mstatus_SUM(true);
+    assert_ne!(TlbContext::new(&cpu), original);
+
+    cpu.csrs.write_mstatus_SUM(false);
+    cpu.bus.mem = Memory::new(RV64_MEMORY_BASE, RV64_MEMORY_SIZE as usize).unwrap();
     assert_ne!(TlbContext::new(&cpu), original);
   }
 
@@ -2067,6 +2086,7 @@ mod tests {
     // Retarget the leaf before the first native execution so its TLB miss takes the slow path.
     let inaccessible_pte = ((RV64_MEMORY_END >> PAGE_SHIFT) << 10) | data_flags;
     cpu.bus.write::<u64>(data_leaf, inaccessible_pte).unwrap();
+    rewrite_satp_to_invalidate_translation(&mut cpu);
     cpu.write_reg(x2, 0xfeed_face_cafe_beef);
     cpu.write_pc(GUEST_CODE);
 
@@ -2078,6 +2098,67 @@ mod tests {
     assert_eq!(cpu.read_reg(x2), Some(0xfeed_face_cafe_beef));
     assert_eq!(jit.stats().native_executions, 1);
     assert_eq!(jit.stats().memory_slow_paths, 1);
+  }
+
+  #[test]
+  fn native_tlb_miss_reuses_and_invalidates_the_core_translation_cache() {
+    const GUEST_CODE: VirtAddr = VirtAddr(0x1234_4000);
+    const GUEST_DATA: VirtAddr = VirtAddr(0x1234_5000);
+    const PHYSICAL_CODE: VirtAddr = VirtAddr(RV64_MEMORY_BASE + 0x4000);
+    const FIRST_DATA: VirtAddr = VirtAddr(RV64_MEMORY_BASE + 0x5000);
+    const SECOND_DATA: VirtAddr = VirtAddr(RV64_MEMORY_BASE + 0x6000);
+
+    let mut cpu = RV64Cpu::new(None);
+    cpu
+      .bus
+      .write::<u32>(PHYSICAL_CODE, 0x0000_b103)
+      .unwrap(); // ld x2, 0(x1)
+    cpu
+      .bus
+      .write::<u32>(PHYSICAL_CODE + VirtAddr(4), 0x0000_006f)
+      .unwrap(); // jal x0, 0
+    cpu.bus.write::<u64>(FIRST_DATA, 0x1111).unwrap();
+    cpu.bus.write::<u64>(SECOND_DATA, 0x2222).unwrap();
+
+    let code_flags = (1 << PTE_V) | (1 << PTE_X) | (1 << PTE_A);
+    let data_flags = (1 << PTE_V) | (1 << PTE_R) | (1 << PTE_A);
+    install_sv39_mapping(&mut cpu, GUEST_CODE, PHYSICAL_CODE, code_flags);
+    let data_leaf = install_sv39_mapping(&mut cpu, GUEST_DATA, FIRST_DATA, data_flags);
+    enable_sv39(&mut cpu);
+
+    let x1 = Reg::X(Fin::new(1));
+    let x2 = Reg::X(Fin::new(2));
+    cpu.write_reg(x1, GUEST_DATA.0);
+    cpu.write_pc(GUEST_CODE);
+    let mut jit = JitExecutor::new().unwrap().with_hot_threshold(1);
+
+    // Decoded execution fills the core cache while compiling the TB, but not the native L1 TLB.
+    assert_eq!(jit.execute(&mut cpu, 2), ExecOutcome::new(2, Ok(())));
+    assert_eq!(cpu.read_reg(x2), Some(0x1111));
+    assert_eq!(jit.stats().compiled_blocks, 1);
+
+    cpu
+      .bus
+      .write::<u64>(
+        data_leaf,
+        ((SECOND_DATA.0 >> PAGE_SHIFT) << 10) | data_flags,
+      )
+      .unwrap();
+    jit.tlb.invalidate();
+    cpu.write_pc(GUEST_CODE);
+
+    // The forced native L1 miss still observes the cached old PTE while the translation context
+    // remains unchanged.
+    assert_eq!(jit.execute(&mut cpu, 2), ExecOutcome::new(2, Ok(())));
+    assert_eq!(cpu.read_reg(x2), Some(0x1111));
+    assert_eq!(jit.stats().native_executions, 1);
+
+    // Valheim conservatively invalidates its translation context even for a same-value SATP write.
+    rewrite_satp_to_invalidate_translation(&mut cpu);
+    cpu.write_pc(GUEST_CODE);
+    assert_eq!(jit.execute(&mut cpu, 2), ExecOutcome::new(2, Ok(())));
+    assert_eq!(cpu.read_reg(x2), Some(0x2222));
+    assert_eq!(jit.stats().native_executions, 2);
   }
 
   #[test]
@@ -2204,6 +2285,7 @@ mod tests {
       | (1 << PTE_W)
       | (1 << PTE_A);
     cpu.bus.write::<u64>(data_leaf, mmio_pte).unwrap();
+    rewrite_satp_to_invalidate_translation(&mut cpu);
     cpu.write_pc(source);
 
     assert_eq!(jit.execute(&mut cpu, 32), ExecOutcome::new(1, Ok(())));

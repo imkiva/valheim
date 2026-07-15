@@ -1,13 +1,25 @@
-use std::fmt::Debug;
+use std::fmt::{Debug, Formatter};
 
 use crate::cpu::{PrivilegeMode, RV64Cpu};
-use crate::cpu::csr::CSRMap::SATP;
+use crate::cpu::csr::CSRMap::{MSTATUS, SATP};
 use crate::cpu::irq::Exception;
 use crate::debug::trace::{MemTrace, Trace};
 use crate::memory::{CanIO, VirtAddr};
 
 pub const PAGE_SHIFT: u64 = 12;
 pub const PAGE_SIZE: u64 = 1 << PAGE_SHIFT; // 4096
+
+const TRANSLATION_CACHE_ENTRIES: usize = 1 << 8;
+const TRANSLATION_CACHE_INDEX_MASK: usize = TRANSLATION_CACHE_ENTRIES - 1;
+const TRANSLATION_TAG_MODE_SHIFT: u32 = 62;
+const TRANSLATION_TAG_SUM: u64 = 1 << 61;
+const TRANSLATION_TAG_MXR: u64 = 1 << 60;
+
+#[cold]
+#[inline(never)]
+fn invalid_mpp_mode(invalid: u64) -> ! {
+  panic!("invalid privilege mode in MPP: {invalid:#04b}")
+}
 
 // RV64 satp CSR field masks
 pub const SATP64_MODE_MASK: u64 = 0xF000000000000000;
@@ -53,6 +65,198 @@ pub enum AccessType {
   Fetch,
   Read,
   Write,
+}
+
+#[derive(Clone, Copy)]
+struct TranslationPolicy {
+  effective_mode: PrivilegeMode,
+  mstatus_sum: bool,
+  mstatus_mxr: bool,
+}
+
+impl TranslationPolicy {
+  #[inline(always)]
+  fn cache_tag(self, addr: VirtAddr) -> u64 {
+    debug_assert_ne!(self.effective_mode, PrivilegeMode::Machine);
+    (addr.0 >> PAGE_SHIFT)
+      | ((self.effective_mode as u64) << TRANSLATION_TAG_MODE_SHIFT)
+      | u64::from(self.mstatus_sum) * TRANSLATION_TAG_SUM
+      | u64::from(self.mstatus_mxr) * TRANSLATION_TAG_MXR
+  }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct TranslationCacheContext {
+  epoch: u64,
+  dram_backing_id: u64,
+  satp: u64,
+  vmppn: u64,
+  vmmode: VMMode,
+}
+
+#[derive(Clone, Copy)]
+struct TranslationContext {
+  cache: TranslationCacheContext,
+  policy: TranslationPolicy,
+}
+
+#[cfg(test)]
+impl TranslationContext {
+  #[inline(always)]
+  fn cache_context(self) -> TranslationCacheContext {
+    self.cache
+  }
+
+  #[inline(always)]
+  fn cache_tag(self, addr: VirtAddr) -> u64 {
+    self.policy.cache_tag(addr)
+  }
+}
+
+#[derive(Clone, Copy, Default)]
+struct TranslationCacheEntry {
+  generation: u64,
+  tag: u64,
+  host_page: usize,
+  phys_page_and_permissions: u64,
+}
+
+struct TranslationCacheBank {
+  entries: Box<[TranslationCacheEntry; TRANSLATION_CACHE_ENTRIES]>,
+  context: Option<TranslationCacheContext>,
+  generation: u64,
+}
+
+impl TranslationCacheBank {
+  fn new() -> Self {
+    Self {
+      entries: Box::new([TranslationCacheEntry::default(); TRANSLATION_CACHE_ENTRIES]),
+      context: None,
+      generation: 0,
+    }
+  }
+
+  #[inline(always)]
+  fn synchronize(&mut self, context: TranslationCacheContext) {
+    if self.context == Some(context) {
+      return;
+    }
+    self.context = Some(context);
+    self.generation = self.generation.wrapping_add(1);
+    if self.generation == 0 {
+      self.entries.fill(TranslationCacheEntry::default());
+      self.generation = 1;
+    }
+  }
+
+  #[inline(always)]
+  fn index(addr: VirtAddr) -> usize {
+    ((addr.0 >> PAGE_SHIFT) as usize) & TRANSLATION_CACHE_INDEX_MASK
+  }
+
+  #[inline(always)]
+  fn lookup(&self, addr: VirtAddr, tag: u64) -> Option<TranslationTarget> {
+    debug_assert!(self.context.is_some());
+    debug_assert_ne!(self.generation, 0);
+    let entry = self.entries[Self::index(addr)];
+    if entry.generation != self.generation || entry.tag != tag {
+      return None;
+    }
+
+    let page_offset = addr.0 & (PAGE_SIZE - 1);
+    let phys_page = entry.phys_page_and_permissions & !(PAGE_SIZE - 1);
+    Some(TranslationTarget::Dram {
+      paddr: VirtAddr(phys_page | page_offset),
+      host_page: entry.host_page as *mut u8,
+      phys_page,
+      permissions: entry.phys_page_and_permissions as u8 & 0b111,
+    })
+  }
+
+  #[inline(always)]
+  fn insert(&mut self, addr: VirtAddr, tag: u64, target: TranslationTarget) {
+    debug_assert!(self.context.is_some());
+    debug_assert_ne!(self.generation, 0);
+    let TranslationTarget::Dram {
+      host_page,
+      phys_page,
+      permissions,
+      ..
+    } = target
+    else {
+      return;
+    };
+    debug_assert_eq!(phys_page & (PAGE_SIZE - 1), 0);
+    debug_assert_eq!(permissions & !0b111, 0);
+    self.entries[Self::index(addr)] = TranslationCacheEntry {
+      generation: self.generation,
+      tag,
+      host_page: host_page as usize,
+      phys_page_and_permissions: phys_page | permissions as u64,
+    };
+  }
+}
+
+/// Core-owned address-translation cache shared by interpreter accesses and JIT slow-path misses.
+pub(super) struct TranslationCache {
+  fetch: TranslationCacheBank,
+  read: TranslationCacheBank,
+  write: TranslationCacheBank,
+}
+
+impl Debug for TranslationCache {
+  fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("TranslationCache")
+      .field("entries_per_bank", &TRANSLATION_CACHE_ENTRIES)
+      .field(
+        "bank_generations",
+        &[self.fetch.generation, self.read.generation, self.write.generation],
+      )
+      .finish()
+  }
+}
+
+impl TranslationCache {
+  pub(super) fn new() -> Self {
+    Self {
+      fetch: TranslationCacheBank::new(),
+      read: TranslationCacheBank::new(),
+      write: TranslationCacheBank::new(),
+    }
+  }
+
+  #[inline(always)]
+  fn bank_mut(&mut self, access: AccessType) -> &mut TranslationCacheBank {
+    match access {
+      AccessType::Fetch => &mut self.fetch,
+      AccessType::Read => &mut self.read,
+      AccessType::Write => &mut self.write,
+    }
+  }
+
+  #[inline(always)]
+  fn lookup(
+    &mut self,
+    addr: VirtAddr,
+    access: AccessType,
+    context: TranslationCacheContext,
+    tag: u64,
+  ) -> Option<TranslationTarget> {
+    let bank = self.bank_mut(access);
+    bank.synchronize(context);
+    bank.lookup(addr, tag)
+  }
+
+  #[inline(always)]
+  fn insert(
+    &mut self,
+    addr: VirtAddr,
+    access: AccessType,
+    tag: u64,
+    target: TranslationTarget,
+  ) {
+    self.bank_mut(access).insert(addr, tag, target);
+  }
 }
 
 /// Compatibility name for existing callers. New MMU and JIT code should use `AccessType`.
@@ -481,8 +685,62 @@ impl RV64Cpu {
     addr: VirtAddr,
     access: AccessType,
   ) -> Result<TranslationTarget, Exception> {
-    let (paddr, permissions) = self.translate_address(addr, access)?;
-    Ok(match self.bus.dram_host_page(paddr) {
+    const BARE_PERMISSIONS: u8 =
+      TRANSLATION_READ | TRANSLATION_WRITE | TRANSLATION_EXECUTE;
+    if self.vmmode == VMMode::MBARE {
+      return Ok(self.classify_translation(addr, BARE_PERMISSIONS));
+    }
+
+    // Instruction translation is independent of MPRV/MPP/SUM/MXR, so its cache hit path need not
+    // sample mstatus at all. Data accesses read it once and derive every relevant policy bit.
+    let mstatus = if access == AccessType::Fetch {
+      0
+    } else {
+      self.csrs.read_unchecked(MSTATUS)
+    };
+    let effective_mode = self.effective_privilege(access, mstatus);
+    if effective_mode == PrivilegeMode::Machine {
+      return Ok(self.classify_translation(addr, BARE_PERMISSIONS));
+    }
+
+    let cache_context = self.translation_cache_context();
+    let policy = Self::translation_policy(access, effective_mode, mstatus);
+    let tag = policy.cache_tag(addr);
+    if let Some(target) = self
+      .translation_cache
+      .lookup(addr, access, cache_context, tag)
+    {
+      return Ok(target);
+    }
+
+    self.translate_to_host_miss(addr, access, mstatus, effective_mode)
+  }
+
+  #[cold]
+  #[inline(never)]
+  fn translate_to_host_miss(
+    &mut self,
+    addr: VirtAddr,
+    access: AccessType,
+    mstatus: u64,
+    effective_mode: PrivilegeMode,
+  ) -> Result<TranslationTarget, Exception> {
+    let cache_context = self.translation_cache_context();
+    let policy = Self::translation_policy(access, effective_mode, mstatus);
+    let tag = policy.cache_tag(addr);
+    let context = TranslationContext {
+      cache: cache_context,
+      policy,
+    };
+    let (paddr, permissions) = self.translate_address(addr, access, context)?;
+    let target = self.classify_translation(paddr, permissions);
+    self.translation_cache.insert(addr, access, tag, target);
+    Ok(target)
+  }
+
+  #[inline(always)]
+  fn classify_translation(&self, paddr: VirtAddr, permissions: u8) -> TranslationTarget {
+    match self.bus.dram_host_page(paddr) {
       Some(mapping) => TranslationTarget::Dram {
         paddr,
         host_page: mapping.host_page,
@@ -490,7 +748,7 @@ impl RV64Cpu {
         permissions,
       },
       None => TranslationTarget::Mmio { paddr, permissions },
-    })
+    }
   }
 
   /// Compatibility wrapper for code that only needs the translated physical address.
@@ -498,41 +756,66 @@ impl RV64Cpu {
     Ok(self.translate_to_host(addr, access)?.paddr())
   }
 
+  #[inline(always)]
+  fn translation_cache_context(&self) -> TranslationCacheContext {
+    TranslationCacheContext {
+      epoch: self.translation_epoch,
+      dram_backing_id: self.bus.mem.backing_id(),
+      satp: self.csrs.read_unchecked(SATP),
+      vmppn: self.vmppn,
+      vmmode: self.vmmode,
+    }
+  }
+
+  #[inline(always)]
+  fn translation_policy(
+    access: AccessType,
+    effective_mode: PrivilegeMode,
+    mstatus: u64,
+  ) -> TranslationPolicy {
+    TranslationPolicy {
+      effective_mode,
+      mstatus_sum: access != AccessType::Fetch
+        && effective_mode == PrivilegeMode::Supervisor
+        && (mstatus & (1 << 18)) != 0,
+      mstatus_mxr: access == AccessType::Read && (mstatus & (1 << 19)) != 0,
+    }
+  }
+
+  /// Returns the privilege mode used by this memory access. Both the cache lookup and the page
+  /// table walker consume the resulting policy, keeping MPRV handling in one place.
+  // 3.1.6.3 Memory Privilege in mstatus Register
+  // The MPRV (Modify PRiVilege) bit modifies the effective privilege mode,
+  // i.e., the privilege level at which loads and stores execute.
+  // When MPRV=0, loads and stores behave as normal, using the translation and protection
+  // mechanisms of the current privilege mode.
+  // When MPRV=1, load and store memory addresses are translated and protected,
+  // and endianness is applied, as though the current privilege mode were set to MPP.
+  // Instruction address-translation and protection are unaffected by the setting of MPRV.
+  // MPRV is read-only 0 if U-mode is not supported.
+  #[inline(always)]
+  fn effective_privilege(&self, access: AccessType, mstatus: u64) -> PrivilegeMode {
+    if access == AccessType::Fetch || (mstatus & (1 << 17)) == 0 {
+      return self.mode;
+    }
+    match (mstatus >> 11) & 0b11 {
+      0b00 => PrivilegeMode::User,
+      0b01 => PrivilegeMode::Supervisor,
+      0b11 => PrivilegeMode::Machine,
+      invalid => invalid_mpp_mode(invalid),
+    }
+  }
+
+  #[cold]
+  #[inline(never)]
   fn translate_address(
     &mut self,
     addr: VirtAddr,
     reason: AccessType,
+    context: TranslationContext,
   ) -> Result<(VirtAddr, u8), Exception> {
-    if self.vmmode == VMMode::MBARE {
-      return Ok((
-        addr,
-        TRANSLATION_READ | TRANSLATION_WRITE | TRANSLATION_EXECUTE,
-      ));
-    }
-
-    // 3.1.6.3 Memory Privilege in mstatus Register
-    // The MPRV (Modify PRiVilege) bit modifies the effective privilege mode,
-    // i.e., the privilege level at which loads and stores execute.
-    // When MPRV=0, loads and stores behave as normal, using the translation and protection
-    // mechanisms of the current privilege mode.
-    // When MPRV=1, load and store memory addresses are translated and protected,
-    // and endianness is applied, as though the current privilege mode were set to MPP.
-    // Instruction address-translation and protection are unaffected by the setting of MPRV.
-    // MPRV is read-only 0 if U-mode is not supported.
-    let eff_mode = match reason {
-      Reason::Fetch => self.mode,
-      _ => match self.csrs.read_mstatus_MPRV() {
-        true => self.csrs.read_mstatus_MPP(),
-        false => self.mode,
-      }
-    };
-
-    if eff_mode == PrivilegeMode::Machine {
-      return Ok((
-        addr,
-        TRANSLATION_READ | TRANSLATION_WRITE | TRANSLATION_EXECUTE,
-      ));
-    }
+    debug_assert_ne!(context.cache.vmmode, VMMode::MBARE);
+    debug_assert_ne!(context.policy.effective_mode, PrivilegeMode::Machine);
 
     // 3.1.6.3 Memory Privilege in mstatus Register
     // The MXR (Make eXecutable Readable) bit modifies the privilege with which loads access virtual memory.
@@ -540,7 +823,7 @@ impl RV64Cpu {
     // When MXR=1, loads from pages marked either readable or executable (R=1 or X=1) will succeed.
     // MXR has no effect when page-based virtual memory is not in effect.
     // MXR is read-only 0 if S-mode is not supported.
-    let mxr = self.csrs.read_mstatus_MXR();
+    let mxr = context.policy.mstatus_mxr;
 
     // 3.1.6.3 Memory Privilege in mstatus Register
     // The SUM (permit Supervisor User Memory access) bit modifies the privilege with which S-mode loads and stores access virtual memory.
@@ -550,7 +833,7 @@ impl RV64Cpu {
     // while SUM is ordinarily ignored when not executing in S-mode,
     // it is in effect when MPRV=1 and MPP=S.
     // SUM is read-only 0 if S-mode is not supported or if satp.MODE is read-only 0.
-    let sum = self.csrs.read_mstatus_SUM();
+    let sum = context.policy.mstatus_sum;
 
     // 3.1.6.3 Memory Privilege in mstatus Register
     // The MXR and SUM mechanisms only affect the interpretation of permissions encoded
@@ -559,16 +842,16 @@ impl RV64Cpu {
 
     // 4.3.2 Virtual Address Translation Process
     let addr = addr.0;
-    if !self.vmmode.is_canonical(addr) {
+    if !context.cache.vmmode.is_canonical(addr) {
       return reason.to_page_fault(VirtAddr(addr));
     }
-    let Some((levels, _ptidxbits, ptesize)) = self.vmmode.translation_args() else {
+    let Some((levels, _ptidxbits, ptesize)) = context.cache.vmmode.translation_args() else {
       return reason.to_page_fault(VirtAddr(addr));
     };
-    let vpn: [u64; 5] = self.vmmode.vpn(addr);
+    let vpn: [u64; 5] = context.cache.vmmode.vpn(addr);
 
     // 1. Let a be satp.ppn × PAGESIZE, and let i = LEVELS − 1.
-    let mut a = self.vmppn;
+    let mut a = context.cache.vmppn;
     let mut i: i64 = levels - 1;
     let mut pte: u64;
     let mut ppn: [u64; 5];
@@ -636,13 +919,16 @@ impl RV64Cpu {
         _ => (),
       }
 
-      if (pte_u == 1) && ((eff_mode != PrivilegeMode::User) && (!sum || reason == Reason::Fetch)) {
+      if (pte_u == 1)
+        && ((context.policy.effective_mode != PrivilegeMode::User)
+          && (!sum || reason == Reason::Fetch))
+      {
         // User PTE flags when not U mode and mstatus.SUM is not set,
         // or the access type is an instruction fetch
         return reason.to_page_fault(VirtAddr(addr));
       }
 
-      if (pte_u == 0) && (eff_mode != PrivilegeMode::Supervisor) {
+      if (pte_u == 0) && (context.policy.effective_mode != PrivilegeMode::Supervisor) {
         // Supervisor PTE flags when not S mode
         return reason.to_page_fault(VirtAddr(addr));
       }
@@ -660,7 +946,7 @@ impl RV64Cpu {
 
       // 6. If i > 0 and pte.ppn[i−1 : 0] != 0, this is a misaligned superpage;
       // stop and raise a page-fault exception corresponding to the original access type.
-      ppn = self.vmmode.pte_ppn(pte);
+      ppn = context.cache.vmmode.pte_ppn(pte);
       if i > 0 {
         if ppn.split_at(i as usize).0.iter().any(|&x| x != 0) {
           return reason.to_page_fault(VirtAddr(addr));
@@ -776,8 +1062,13 @@ impl RV64Cpu {
 mod tests {
   use std::sync::Arc;
 
+  use valheim_asm::isa::rv64::RV64Instr;
+  use valheim_asm::isa::typed::{Instr, Reg, Rs1, Rs2};
+
   use super::*;
-  use crate::cpu::bus::{CLINT_BASE, RV64_MEMORY_BASE, RV64_MEMORY_END};
+  use crate::cpu::bus::{
+    CLINT_BASE, RV64_MEMORY_BASE, RV64_MEMORY_END, RV64_MEMORY_SIZE,
+  };
   use crate::device::Device;
   use crate::memory::Memory;
 
@@ -840,6 +1131,250 @@ mod tests {
       cpu.translate_to_host(VirtAddr(TEST_VADDR), access),
       Err(expected),
     );
+  }
+
+  fn sfence_vma(cpu: &mut RV64Cpu) {
+    let pc = cpu.read_pc();
+    cpu
+      .execute(
+        pc,
+        Instr::RV64(RV64Instr::SFENCE_VMA(Rs1(Reg::ZERO), Rs2(Reg::ZERO))),
+        false,
+      )
+      .unwrap();
+  }
+
+  #[test]
+  fn translation_cache_entries_remain_compact_and_generation_wrap_clears_them() {
+    assert_eq!(std::mem::size_of::<TranslationCacheEntry>(), 32);
+
+    let context = TranslationContext {
+      cache: TranslationCacheContext {
+        epoch: 0,
+        dram_backing_id: 1,
+        satp: (VMMode::SV39 as u64) << SATP64_MODE_SHIFT,
+        vmppn: ROOT_PAGE,
+        vmmode: VMMode::SV39,
+      },
+      policy: TranslationPolicy {
+        effective_mode: PrivilegeMode::Supervisor,
+        mstatus_sum: false,
+        mstatus_mxr: false,
+      },
+    };
+    let addr = VirtAddr(TEST_VADDR + 0x38);
+    let mut bank = TranslationCacheBank::new();
+    bank.synchronize(context.cache_context());
+    let target = TranslationTarget::Dram {
+      paddr: VirtAddr(DATA_PAGE + 0x38),
+      host_page: 0x1000 as *mut u8,
+      phys_page: DATA_PAGE,
+      permissions: TRANSLATION_READ,
+    };
+    bank.insert(addr, context.cache_tag(addr), target);
+    assert_eq!(bank.lookup(addr, context.cache_tag(addr)), Some(target));
+
+    let collision_addr = VirtAddr(
+      addr.0 + TRANSLATION_CACHE_ENTRIES as u64 * PAGE_SIZE,
+    );
+    let collision_target = TranslationTarget::Dram {
+      paddr: VirtAddr(SECOND_DATA_PAGE + 0x38),
+      host_page: 0x2000 as *mut u8,
+      phys_page: SECOND_DATA_PAGE,
+      permissions: TRANSLATION_READ | TRANSLATION_WRITE,
+    };
+    bank.insert(
+      collision_addr,
+      context.cache_tag(collision_addr),
+      collision_target,
+    );
+    assert!(bank.lookup(addr, context.cache_tag(addr)).is_none());
+    assert_eq!(
+      bank.lookup(collision_addr, context.cache_tag(collision_addr)),
+      Some(collision_target),
+    );
+
+    bank.generation = u64::MAX;
+    bank.context = None;
+    bank.synchronize(context.cache_context());
+    assert_eq!(bank.generation, 1);
+    assert!(bank.lookup(addr, context.cache_tag(addr)).is_none());
+  }
+
+  #[test]
+  fn translation_policy_tags_do_not_flush_the_entire_bank() {
+    let user_context = TranslationContext {
+      cache: TranslationCacheContext {
+        epoch: 0,
+        dram_backing_id: 1,
+        satp: (VMMode::SV39 as u64) << SATP64_MODE_SHIFT,
+        vmppn: ROOT_PAGE,
+        vmmode: VMMode::SV39,
+      },
+      policy: TranslationPolicy {
+        effective_mode: PrivilegeMode::User,
+        mstatus_sum: false,
+        mstatus_mxr: false,
+      },
+    };
+    let supervisor_context = TranslationContext {
+      policy: TranslationPolicy {
+        effective_mode: PrivilegeMode::Supervisor,
+        ..user_context.policy
+      },
+      ..user_context
+    };
+    let user_addr = VirtAddr(TEST_VADDR);
+    let supervisor_addr = VirtAddr(TEST_VADDR + PAGE_SIZE);
+    let user_target = TranslationTarget::Dram {
+      paddr: VirtAddr(DATA_PAGE),
+      host_page: 0x1000 as *mut u8,
+      phys_page: DATA_PAGE,
+      permissions: TRANSLATION_READ,
+    };
+    let supervisor_target = TranslationTarget::Dram {
+      paddr: VirtAddr(SECOND_DATA_PAGE),
+      host_page: 0x2000 as *mut u8,
+      phys_page: SECOND_DATA_PAGE,
+      permissions: TRANSLATION_READ,
+    };
+    let mut bank = TranslationCacheBank::new();
+    bank.synchronize(user_context.cache_context());
+    bank.insert(user_addr, user_context.cache_tag(user_addr), user_target);
+    let generation = bank.generation;
+
+    bank.synchronize(supervisor_context.cache_context());
+    assert_eq!(bank.generation, generation);
+    bank.insert(
+      supervisor_addr,
+      supervisor_context.cache_tag(supervisor_addr),
+      supervisor_target,
+    );
+    bank.synchronize(user_context.cache_context());
+    assert_eq!(bank.generation, generation);
+    assert_eq!(
+      bank.lookup(user_addr, user_context.cache_tag(user_addr)),
+      Some(user_target),
+    );
+  }
+
+  #[test]
+  fn translation_cache_keeps_stale_pte_until_translation_epoch_changes() {
+    let flags = pte_flag(PTE_V) | pte_flag(PTE_R) | pte_flag(PTE_A);
+    let (mut cpu, leaf_addr) = mapped_cpu(VMMode::SV39, flags);
+    let vaddr = VirtAddr(TEST_VADDR + 0x38);
+
+    assert_eq!(
+      cpu.translate(vaddr, AccessType::Read),
+      Ok(VirtAddr(DATA_PAGE + 0x38)),
+    );
+    cpu
+      .bus
+      .write(
+        leaf_addr,
+        ((SECOND_DATA_PAGE >> PAGE_SHIFT) << 10) | flags,
+      )
+      .unwrap();
+
+    // RISC-V permits an address-translation cache to retain the old PTE until SFENCE.VMA.
+    assert_eq!(
+      cpu.translate(vaddr, AccessType::Read),
+      Ok(VirtAddr(DATA_PAGE + 0x38)),
+    );
+    sfence_vma(&mut cpu);
+    assert_eq!(
+      cpu.translate(vaddr, AccessType::Read),
+      Ok(VirtAddr(SECOND_DATA_PAGE + 0x38)),
+    );
+  }
+
+  #[test]
+  fn translation_cache_keys_the_complete_satp_including_asid() {
+    let flags = pte_flag(PTE_V) | pte_flag(PTE_R) | pte_flag(PTE_A);
+    let (mut cpu, leaf_addr) = mapped_cpu(VMMode::SV39, flags);
+    let vaddr = VirtAddr(TEST_VADDR);
+    assert_eq!(cpu.translate(vaddr, AccessType::Read), Ok(VirtAddr(DATA_PAGE)));
+
+    cpu
+      .bus
+      .write(
+        leaf_addr,
+        ((SECOND_DATA_PAGE >> PAGE_SHIFT) << 10) | flags,
+      )
+      .unwrap();
+    let satp = cpu.csrs.read_unchecked(SATP) | (1 << SATP64_ASID_SHIFT);
+    cpu.csrs.write_unchecked(SATP, satp).unwrap();
+    cpu.sync_pagetable();
+
+    assert_eq!(
+      cpu.translate(vaddr, AccessType::Read),
+      Ok(VirtAddr(SECOND_DATA_PAGE)),
+    );
+  }
+
+  #[test]
+  fn translation_cache_rejects_pointers_from_replaced_dram_backing() {
+    let flags = pte_flag(PTE_V) | pte_flag(PTE_R) | pte_flag(PTE_A);
+    let (mut cpu, _) = mapped_cpu(VMMode::SV39, flags);
+    let vaddr = VirtAddr(TEST_VADDR);
+    let TranslationTarget::Dram {
+      host_page: old_host_page,
+      ..
+    } = cpu.translate_to_host(vaddr, AccessType::Read).unwrap()
+    else {
+      panic!("expected a cached DRAM translation");
+    };
+
+    let replacement = Memory::new(RV64_MEMORY_BASE, RV64_MEMORY_SIZE as usize).unwrap();
+    assert_ne!(replacement.backing_id(), cpu.bus.mem.backing_id());
+    assert_ne!(replacement.host_base(), cpu.bus.mem.host_base());
+    cpu.bus.mem = replacement;
+    install_mapping(&mut cpu, VMMode::SV39, flags);
+
+    let TranslationTarget::Dram {
+      host_page: new_host_page,
+      ..
+    } = cpu.translate_to_host(vaddr, AccessType::Read).unwrap()
+    else {
+      panic!("expected a DRAM translation from the replacement backing");
+    };
+    assert_ne!(new_host_page, old_host_page);
+    assert_eq!(
+      new_host_page,
+      cpu.bus.dram_host_page(VirtAddr(DATA_PAGE)).unwrap().host_page,
+    );
+  }
+
+  #[test]
+  fn translation_cache_does_not_cache_faults_or_mmio_endpoints() {
+    let valid_read = pte_flag(PTE_V) | pte_flag(PTE_R) | pte_flag(PTE_A);
+    let (mut cpu, leaf_addr) = mapped_cpu(VMMode::SV39, pte_flag(PTE_V));
+    let vaddr = VirtAddr(TEST_VADDR);
+
+    assert_page_fault(&mut cpu, AccessType::Read, Exception::LoadPageFault(vaddr));
+    cpu
+      .bus
+      .write(
+        leaf_addr,
+        ((CLINT_BASE >> PAGE_SHIFT) << 10) | valid_read,
+      )
+      .unwrap();
+    assert!(matches!(
+      cpu.translate_to_host(vaddr, AccessType::Read),
+      Ok(TranslationTarget::Mmio { paddr, .. }) if paddr == VirtAddr(CLINT_BASE)
+    ));
+
+    cpu
+      .bus
+      .write(
+        leaf_addr,
+        ((SECOND_DATA_PAGE >> PAGE_SHIFT) << 10) | valid_read,
+      )
+      .unwrap();
+    assert!(matches!(
+      cpu.translate_to_host(vaddr, AccessType::Read),
+      Ok(TranslationTarget::Dram { paddr, .. }) if paddr == VirtAddr(SECOND_DATA_PAGE)
+    ));
   }
 
   #[test]
@@ -1326,6 +1861,9 @@ mod tests {
       AccessType::Fetch,
       Exception::InstructionPageFault(vaddr),
     );
+    cpu.csrs.write_mstatus_SUM(false);
+    assert_page_fault(&mut cpu, AccessType::Read, Exception::LoadPageFault(vaddr));
+    assert_page_fault(&mut cpu, AccessType::Write, Exception::StorePageFault(vaddr));
 
     let supervisor_flags = user_flags & !pte_flag(PTE_U);
     cpu
@@ -1335,6 +1873,7 @@ mod tests {
         ((DATA_PAGE >> PAGE_SHIFT) << 10) | supervisor_flags,
       )
       .unwrap();
+    sfence_vma(&mut cpu);
     cpu.mode = PrivilegeMode::User;
     assert_page_fault(&mut cpu, AccessType::Read, Exception::LoadPageFault(vaddr));
   }
@@ -1362,11 +1901,14 @@ mod tests {
       .bus
       .write(leaf_addr, ((DATA_PAGE >> PAGE_SHIFT) << 10) | execute_only)
       .unwrap();
+    sfence_vma(&mut cpu);
     assert!(cpu.translate_to_host(vaddr, AccessType::Fetch).is_ok());
     cpu.csrs.write_mstatus_MXR(false);
     assert_page_fault(&mut cpu, AccessType::Read, Exception::LoadPageFault(vaddr));
     cpu.csrs.write_mstatus_MXR(true);
     assert!(cpu.translate_to_host(vaddr, AccessType::Read).is_ok());
+    cpu.csrs.write_mstatus_MXR(false);
+    assert_page_fault(&mut cpu, AccessType::Read, Exception::LoadPageFault(vaddr));
   }
 
   #[test]

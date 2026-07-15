@@ -119,8 +119,9 @@ fn capture_ram(cpu: &RV64Cpu, ranges: &[(VirtAddr, usize)]) -> Vec<Vec<u8>> {
   ranges
     .iter()
     .map(|(address, len)| {
-      let start = usize::try_from(address.0 - cpu.bus.mem.memory_base.0).unwrap();
-      cpu.bus.mem.memory[start..start + len].to_vec()
+      let mut bytes = vec![0; *len];
+      cpu.bus.mem.read_bytes(*address, &mut bytes).unwrap();
+      bytes
     })
     .collect()
 }

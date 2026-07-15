@@ -1,6 +1,9 @@
 use std::fmt::Debug;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use memmap2::MmapMut;
+
+static NEXT_MEMORY_BACKING_ID: AtomicU64 = AtomicU64::new(1);
 
 /// `transmutable` data types
 pub trait CanIO: Copy + Sized {}
@@ -33,19 +36,45 @@ impl Debug for PhysAddr {
 
 #[derive(Debug)]
 pub struct Memory {
-  pub memory_base: VirtAddr,
-  pub memory_size: usize,
-  pub memory: MmapMut,
+  memory_base: VirtAddr,
+  memory_size: usize,
+  memory: MmapMut,
+  backing_id: u64,
 }
 
 impl Memory {
   pub fn new(memory_base: u64, memory_size: usize) -> Result<Memory, std::io::Error> {
     let memory = MmapMut::map_anon(memory_size)?;
+    let backing_id = NEXT_MEMORY_BACKING_ID.fetch_add(1, Ordering::Relaxed);
+    assert_ne!(backing_id, 0, "memory backing identity exhausted");
     Ok(Memory {
       memory_base: VirtAddr(memory_base),
       memory_size,
       memory,
+      backing_id,
     })
+  }
+
+  #[inline(always)]
+  pub fn base(&self) -> VirtAddr {
+    self.memory_base
+  }
+
+  #[inline(always)]
+  pub fn size(&self) -> usize {
+    self.memory_size
+  }
+
+  #[inline(always)]
+  pub fn host_base(&self) -> usize {
+    self.memory.as_ptr() as usize
+  }
+
+  /// Stable identity for this mapping's lifetime. Replacing a `Memory` creates a new identity even
+  /// if the host allocator later reuses the same virtual address.
+  #[inline(always)]
+  pub fn backing_id(&self) -> u64 {
+    self.backing_id
   }
 
   #[inline(always)]
