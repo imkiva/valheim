@@ -171,8 +171,8 @@ impl Clint {
   }
 
   pub fn write<T: CanIO>(&mut self, addr: VirtAddr, value: u64) -> Result<(), Exception> {
-    let now = self.clock.now();
     let width = std::mem::size_of::<T>();
+    let mut now = None;
     let (mut old, offset) =
       if let Some(offset) = Self::register_offset(addr.0, MSIP, MSIP_WIDTH, width) {
         (self.msip as u64, offset)
@@ -181,7 +181,9 @@ impl Clint {
       {
         (self.mtimecmp, offset)
       } else if let Some(offset) = Self::register_offset(addr.0, MTIME, MTIME_WIDTH, width) {
-        (self.mtime_at(now), offset)
+        let sampled_now = self.clock.now();
+        now = Some(sampled_now);
+        (self.mtime_at(sampled_now), offset)
       } else {
         return Err(Exception::StoreAccessFault(addr));
       };
@@ -214,7 +216,7 @@ impl Clint {
     } else if Self::register_offset(addr.0, MTIMECMP, MTIMECMP_WIDTH, width).is_some() {
       self.mtimecmp = old;
     } else if Self::register_offset(addr.0, MTIME, MTIME_WIDTH, width).is_some() {
-      self.host_anchor = now;
+      self.host_anchor = now.expect("MTIME writes sample the clock");
       self.guest_anchor = old;
     } else {
       return Err(Exception::StoreAccessFault(addr));
@@ -232,16 +234,22 @@ mod tests {
   #[derive(Default)]
   struct ManualClock {
     nanos: AtomicU64,
+    calls: AtomicU64,
   }
 
   impl ManualClock {
     fn set_nanos(&self, nanos: u64) {
       self.nanos.store(nanos, Ordering::Relaxed);
     }
+
+    fn call_count(&self) -> u64 {
+      self.calls.load(Ordering::Relaxed)
+    }
   }
 
   impl ClockSource for ManualClock {
     fn now(&self) -> Duration {
+      self.calls.fetch_add(1, Ordering::Relaxed);
       Duration::from_nanos(self.nanos.load(Ordering::Relaxed))
     }
   }
@@ -275,6 +283,27 @@ mod tests {
 
     let max_duration = Clint::duration_for_ticks_ceil(u64::MAX);
     assert_eq!(Clint::ticks_for_duration(max_duration), u64::MAX);
+  }
+
+  #[test]
+  fn only_mtime_writes_sample_the_realtime_clock() {
+    let clock = Arc::new(ManualClock::default());
+    let mut clint = Clint::new_with_clock(clock.clone());
+    assert_eq!(clock.call_count(), 1);
+
+    clint.write::<u32>(VirtAddr(MSIP), 1).unwrap();
+    clint.write::<u64>(VirtAddr(MTIMECMP), 42).unwrap();
+    assert!(matches!(
+      clint.write::<u64>(VirtAddr(MTIME + MTIME_WIDTH as u64), 0),
+      Err(Exception::StoreAccessFault(_)),
+    ));
+    assert_eq!(clock.call_count(), 1);
+
+    clint.write::<u64>(VirtAddr(MTIME), 7).unwrap();
+    assert_eq!(clock.call_count(), 2);
+
+    clint.write::<u16>(VirtAddr(MTIME + 2), 0).unwrap();
+    assert_eq!(clock.call_count(), 3);
   }
 
   #[test]
