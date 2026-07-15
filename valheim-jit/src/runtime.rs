@@ -660,11 +660,19 @@ impl JitExecutor {
       };
     }
     if is_deferred_memory_exit(frame) {
-      debug_assert_eq!(attempted, 1);
-      debug_assert_eq!(block.instructions[0].pc, frame.fault_pc);
+      let completed = attempted
+        .checked_sub(1)
+        .expect("deferred memory exit attempted no instruction");
+      debug_assert_eq!(
+        block.instructions[completed as usize].pc,
+        frame.fault_pc,
+      );
       cpu.write_pc(VirtAddr(frame.fault_pc));
+      if completed != 0 {
+        cpu.instr = block.instructions[completed as usize - 1].raw as u64;
+      }
       return NativeExecution {
-        outcome: ExecOutcome::new(0, Ok(())),
+        outcome: ExecOutcome::new(completed, Ok(())),
         pending_index: None,
         completed_block: false,
       };
@@ -1602,6 +1610,43 @@ mod tests {
     );
     assert_eq!(cpu.read_pc(), VirtAddr(start + 4));
     assert_eq!(cpu.instr, fault_raw as u64);
+    assert_eq!(exit.pending_index, None);
+    assert!(!exit.completed_block);
+  }
+
+  #[test]
+  fn deferred_memory_exit_commits_only_older_trace_instructions() {
+    let mut cpu = RV64Cpu::new(None);
+    let start = RV64_MEMORY_BASE;
+    let first_raw = 0x0010_8093; // addi x1, x1, 1
+    let load_raw = 0x0000_b103; // ld x2, 0(x1)
+    let block = GuestBlock {
+      start_pc: start,
+      instructions: vec![
+        GuestInst {
+          pc: start,
+          raw: first_raw,
+          len: 4,
+          decoded: Instr::decode32(first_raw).unwrap(),
+        },
+        GuestInst {
+          pc: start + 4,
+          raw: load_raw,
+          len: 4,
+          decoded: Instr::decode32(load_raw).unwrap(),
+        },
+      ],
+    };
+    let mut tlb = SoftwareTlb::new();
+    let mut frame = JitExecutor::new_native_frame(&mut tlb, &mut cpu);
+    frame.exit_kind = crate::memory::EXIT_DEFER_MEMORY;
+    frame.fault_pc = start + 4;
+
+    let exit = JitExecutor::finish_native_exit(&mut cpu, &block, &frame, 2, true);
+
+    assert_eq!(exit.outcome, ExecOutcome::new(1, Ok(())));
+    assert_eq!(cpu.read_pc(), VirtAddr(start + 4));
+    assert_eq!(cpu.instr, first_raw as u64);
     assert_eq!(exit.pending_index, None);
     assert!(!exit.completed_block);
   }
