@@ -38,6 +38,19 @@ pub enum Exception {
 }
 
 impl RV64Cpu {
+  fn interrupt_globally_enabled(&self, interrupt_mask: u64) -> bool {
+    let delegated = self.csrs.read_unchecked(MIDELEG) & interrupt_mask != 0;
+    match self.mode {
+      // A delegated interrupt remains pending while M-mode is running; it cannot trap downward.
+      PrivilegeMode::Machine => !delegated && self.csrs.read_mstatus_MIE(),
+      // Non-delegated interrupts target the higher M-mode and are therefore globally enabled
+      // regardless of SIE. Delegated interrupts target the current S-mode and must honor SIE.
+      PrivilegeMode::Supervisor => !delegated || self.csrs.read_sstatus_SIE(),
+      // Every implemented interrupt target is more privileged than U-mode.
+      PrivilegeMode::User => true,
+    }
+  }
+
   pub fn pending_interrupt(&mut self) -> Option<IRQ> {
     // 3.1.6.1 Privilege and Global Interrupt-Enable Stack in mstatus register
     // Global interrupt-enable bits, MIE and SIE, are provided for M-mode and S-mode respectively.
@@ -62,20 +75,6 @@ impl RV64Cpu {
     // WFI is also required to resume execution for locally enabled interrupts pending at any privilege level,
     // regardless of the global interrupt enable at each privilege level.
 
-    let irq_globally_enabled = match self.mode {
-      PrivilegeMode::Machine => self.csrs.read_mstatus_MIE(),
-      PrivilegeMode::Supervisor => self.csrs.read_sstatus_SIE(),
-      PrivilegeMode::User => true,
-    };
-
-    // Preserve the normal interrupt-polling behavior when global interrupts are disabled: in
-    // particular, do not consume a one-shot device event before the hart can take its interrupt.
-    // A waiting hart is the exception because it must observe locally enabled events even when the
-    // corresponding global enable is clear.
-    if !self.wfi && !irq_globally_enabled {
-      return None;
-    }
-
     // 3.1.9 Machine Interrupt Registers (mip and mie)
     // The machine-level interrupt fixed-priority ordering rules were developed with the following rationale:
     // 1. Interrupts for higher privilege modes must be serviced before interrupts
@@ -96,34 +95,40 @@ impl RV64Cpu {
     // VirtIO disks, which is also a external devices.
 
     // check builtin virtio disk
-    let external_irq = match self.bus.virtio.pending_interrupt() {
-      Some(virtio_irq) => {
-        // TODO: replace with our own DMA implementation
-        // TODO: exception handling
-        Virtio::disk_access(self).expect("failed to access the disk");
-        Some(virtio_irq)
-      }
-      _ => {
-        let mut irq = None;
-        // check other external devices like UART
-        for dev in self.bus.devices.iter() {
-          if let Some(irq_id) = dev.is_interrupting() {
-            irq = Some(irq_id);
-            break;
-          }
+    // Preserve one-shot external events until their target privilege can take them. A waiting hart
+    // still polls because any individually enabled pending event must wake WFI even when its target
+    // privilege's global enable is clear.
+    if self.wfi || self.interrupt_globally_enabled(SEIP_MASK) {
+      let external_irq = match self.bus.virtio.pending_interrupt() {
+        Some(virtio_irq) => {
+          // TODO: replace with our own DMA implementation
+          // TODO: exception handling
+          Virtio::disk_access(self).expect("failed to access the disk");
+          Some(virtio_irq)
         }
-        irq
-      }
-    };
+        _ => {
+          let mut irq = None;
+          // check other external devices like UART
+          for dev in self.bus.devices.iter() {
+            if let Some(irq_id) = dev.is_interrupting() {
+              irq = Some(irq_id);
+              break;
+            }
+          }
+          irq
+        }
+      };
 
-    if let Some(irq_id) = external_irq {
-      // tell PLIC that we have an external irq
-      self.bus.plic.update_pending(irq_id);
-      // 3.1.9 Machine Interrupt Registers (mip and mie)
-      // SEIP is writable in mip, and may be written by M-mode software to
-      // indicate to S-mode that an external interrupt is pending. Additionally,
-      // the platform-level interrupt controller may generate supervisor-level external interrupts.
-      let _ = self.csrs.write_unchecked(MIP, self.csrs.read_unchecked(MIP) | SEIP_MASK);
+      if let Some(irq_id) = external_irq {
+        // tell PLIC that we have an external irq
+        self.bus.plic.update_pending(irq_id);
+        // 3.1.9 Machine Interrupt Registers (mip and mie)
+        // SEIP is writable in mip, and may be written by M-mode software to
+        // indicate to S-mode that an external interrupt is pending. Additionally,
+        // the platform-level interrupt controller may generate supervisor-level external
+        // interrupts.
+        let _ = self.csrs.write_unchecked(MIP, self.csrs.read_unchecked(MIP) | SEIP_MASK);
+      }
     }
 
     // 3.1.9 Machine Interrupt Registers (mip and mie)
@@ -139,44 +144,26 @@ impl RV64Cpu {
     }
 
     // WFI wakeup and interrupt delivery are separate decisions. A locally enabled pending
-    // interrupt resumes a waiting hart regardless of the global interrupt-enable bit, but the
-    // interrupt is taken only if the ordinary global eligibility check above succeeds. Keep the
-    // pending bit set on a wake-only event so it can trap after software enables interrupts.
+    // interrupt resumes a waiting hart regardless of global enables and delegation. Delivery is
+    // then decided per candidate because a higher-privilege interrupt is globally enabled even if
+    // the current lower privilege has disabled its own interrupts.
     if self.wfi {
       self.wfi = false;
     }
-    if !irq_globally_enabled {
-      return None;
-    }
 
-    if (mip & MEIP_MASK) != 0 {
-      let _ = self.csrs.write_unchecked(MIP, self.csrs.read_unchecked(MIP) & !MEIP_MASK);
-      return Some(IRQ::MEI);
-    }
-
-    if (mip & MSIP_MASK) != 0 {
-      let _ = self.csrs.write_unchecked(MIP, self.csrs.read_unchecked(MIP) & !MSIP_MASK);
-      return Some(IRQ::MSI);
-    }
-
-    if (mip & MTIP_MASK) != 0 {
-      let _ = self.csrs.write_unchecked(MIP, self.csrs.read_unchecked(MIP) & !MTIP_MASK);
-      return Some(IRQ::MTI);
-    }
-
-    if (mip & SEIP_MASK) != 0 {
-      let _ = self.csrs.write_unchecked(MIP, self.csrs.read_unchecked(MIP) & !SEIP_MASK);
-      return Some(IRQ::SEI);
-    }
-
-    if (mip & SSIP_MASK) != 0 {
-      let _ = self.csrs.write_unchecked(MIP, self.csrs.read_unchecked(MIP) & !SSIP_MASK);
-      return Some(IRQ::SSI);
-    }
-
-    if (mip & STIP_MASK) != 0 {
-      let _ = self.csrs.write_unchecked(MIP, self.csrs.read_unchecked(MIP) & !STIP_MASK);
-      return Some(IRQ::STI);
+    let candidates = [
+      (MEIP_MASK, IRQ::MEI),
+      (MSIP_MASK, IRQ::MSI),
+      (MTIP_MASK, IRQ::MTI),
+      (SEIP_MASK, IRQ::SEI),
+      (SSIP_MASK, IRQ::SSI),
+      (STIP_MASK, IRQ::STI),
+    ];
+    for (mask, irq) in candidates {
+      if mip & mask != 0 && self.interrupt_globally_enabled(mask) {
+        let _ = self.csrs.write_unchecked(MIP, self.csrs.read_unchecked(MIP) & !mask);
+        return Some(irq);
+      }
     }
 
     None
@@ -186,7 +173,10 @@ impl RV64Cpu {
 #[cfg(test)]
 mod tests {
   use super::{IRQ, RV64Cpu};
-  use crate::cpu::csr::CSRMap::{MCAUSE, MEPC, MIE, MIP, MTIE_MASK, MTIP_MASK, MTVEC};
+  use crate::cpu::csr::CSRMap::{
+    MCAUSE, MEPC, MIDELEG, MIE, MIP, MTIE_MASK, MTIP_MASK, MTVEC, STIE_MASK, STIP_MASK,
+  };
+  use crate::cpu::PrivilegeMode;
   use crate::memory::VirtAddr;
 
   fn waiting_cpu_with_timer_interrupt(
@@ -245,6 +235,58 @@ mod tests {
     assert_eq!(cpu.pending_interrupt(), None);
     assert!(cpu.wfi);
     assert_eq!(cpu.csrs.read_unchecked(MIP) & MTIP_MASK, MTIP_MASK);
+  }
+
+  #[test]
+  fn machine_timer_preempts_supervisor_even_when_sie_is_clear() {
+    let mut cpu = waiting_cpu_with_timer_interrupt(true, false);
+    cpu.mode = PrivilegeMode::Supervisor;
+
+    let irq = cpu.pending_interrupt().unwrap();
+    assert_eq!(irq, IRQ::MTI);
+    assert!(!cpu.wfi);
+    irq.handle(&mut cpu).unwrap();
+    assert_eq!(cpu.mode, PrivilegeMode::Machine);
+    assert_eq!(cpu.read_pc(), VirtAddr(0x8000_0100));
+    assert_eq!(cpu.csrs.read_unchecked(MCAUSE), (1_u64 << 63) | 7);
+  }
+
+  fn supervisor_with_delegated_timer(waiting: bool) -> RV64Cpu {
+    let mut cpu = RV64Cpu::new(None);
+    cpu.mode = PrivilegeMode::Supervisor;
+    cpu.wfi = waiting;
+    cpu.csrs.write_unchecked(MIDELEG, STIP_MASK).unwrap();
+    cpu.csrs.write_unchecked(MIE, STIE_MASK).unwrap();
+    cpu.csrs.write_unchecked(MIP, STIP_MASK).unwrap();
+    cpu.csrs.write_sstatus_SIE(false);
+    cpu
+  }
+
+  #[test]
+  fn delegated_supervisor_timer_honors_sie_outside_wfi() {
+    let mut cpu = supervisor_with_delegated_timer(false);
+
+    assert_eq!(cpu.pending_interrupt(), None);
+    assert_eq!(cpu.csrs.read_unchecked(MIP) & STIP_MASK, STIP_MASK);
+  }
+
+  #[test]
+  fn delegated_supervisor_timer_wakes_wfi_without_trapping_when_sie_is_clear() {
+    let mut cpu = supervisor_with_delegated_timer(true);
+
+    assert_eq!(cpu.pending_interrupt(), None);
+    assert!(!cpu.wfi);
+    assert_eq!(cpu.csrs.read_unchecked(MIP) & STIP_MASK, STIP_MASK);
+  }
+
+  #[test]
+  fn delegated_supervisor_timer_cannot_interrupt_machine_mode() {
+    let mut cpu = supervisor_with_delegated_timer(false);
+    cpu.mode = PrivilegeMode::Machine;
+    cpu.csrs.write_mstatus_MIE(true);
+
+    assert_eq!(cpu.pending_interrupt(), None);
+    assert_eq!(cpu.csrs.read_unchecked(MIP) & STIP_MASK, STIP_MASK);
   }
 }
 
