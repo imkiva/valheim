@@ -224,6 +224,7 @@ pub struct Virtio {
   last_avail_idx: u16,
   used_idx: u16,
   backend: Option<Box<dyn BlockBackend>>,
+  descriptor_scratch: Vec<VirtqDesc>,
 }
 
 impl Virtio {
@@ -245,6 +246,7 @@ impl Virtio {
       last_avail_idx: 0,
       used_idx: 0,
       backend: None,
+      descriptor_scratch: Vec::new(),
     }
   }
 
@@ -287,6 +289,7 @@ impl Virtio {
     self.status = 0;
     self.last_avail_idx = 0;
     self.used_idx = 0;
+    self.descriptor_scratch.clear();
   }
 
   fn reset_queue_indices(&mut self) {
@@ -515,29 +518,34 @@ impl Virtio {
     queue: VirtqueueAddr,
     queue_num: u16,
     head: u16,
-  ) -> Option<Vec<VirtqDesc>> {
+    descriptors: &mut Vec<VirtqDesc>,
+  ) -> bool {
+    descriptors.clear();
     if head >= queue_num {
-      return None;
+      return false;
     }
-    let mut descriptors = Vec::with_capacity(usize::from(queue_num));
-    let mut visited = vec![false; usize::from(queue_num)];
+    let queue_num = usize::from(queue_num);
+    if descriptors.capacity() < queue_num {
+      descriptors.reserve(queue_num);
+    }
     let mut index = head;
     for _ in 0..queue_num {
-      if index >= queue_num || visited[usize::from(index)] {
-        return None;
+      if usize::from(index) >= queue_num {
+        return false;
       }
-      visited[usize::from(index)] = true;
-      let descriptor = VirtqDesc::read(memory, queue, index)?;
+      let Some(descriptor) = VirtqDesc::read(memory, queue, index) else {
+        return false;
+      };
       if descriptor.flags & VIRTQ_DESC_F_INDIRECT != 0 {
-        return None;
+        return false;
       }
       descriptors.push(descriptor);
       if descriptor.flags & VIRTQ_DESC_F_NEXT == 0 {
-        return Some(descriptors);
+        return true;
       }
       index = descriptor.next;
     }
-    None
+    false
   }
 
   fn block_range(&self, sector: u64, length: u64) -> Option<u64> {
@@ -793,6 +801,7 @@ impl Virtio {
       return result;
     }
 
+    let mut descriptors = std::mem::take(&mut self.descriptor_scratch);
     for _ in 0..available {
       let slot = self.last_avail_idx % queue_num;
       let Some(ring_address) = queue
@@ -805,9 +814,10 @@ impl Virtio {
       };
       let head = Self::read_u16(memory, ring_address).unwrap_or(queue_num);
       self.last_avail_idx = self.last_avail_idx.wrapping_add(1);
-      let request = match Self::descriptor_chain(memory, queue, queue_num, head) {
-        Some(descriptors) => self.process_request(memory, &descriptors),
-        None => RequestResult::io_error(),
+      let request = if Self::descriptor_chain(memory, queue, queue_num, head, &mut descriptors) {
+        self.process_request(memory, &descriptors)
+      } else {
+        RequestResult::io_error()
       };
       let published = self.publish_used(memory, queue, head, request.written);
       if published {
@@ -816,6 +826,7 @@ impl Virtio {
       }
       result.dma_write |= request.dma_write;
     }
+    self.descriptor_scratch = descriptors;
 
     if result.completed != 0 && avail_flags & VIRTQ_AVAIL_F_NO_INTERRUPT == 0 {
       self.interrupt_status |= VIRTIO_MMIO_INT_VRING;
@@ -1274,6 +1285,14 @@ mod tests {
     let state = observer.0.borrow();
     assert!(state.bytes[512..1024].iter().all(|byte| *byte == 0x55));
     assert!(state.bytes[1024..1536].iter().all(|byte| *byte == 0xaa));
+    drop(state);
+
+    assert!(virtio.descriptor_scratch.capacity() >= 3);
+    let scratch_pointer = virtio.descriptor_scratch.as_ptr();
+    publish(&mut memory, queue, QUEUE_SIZE, 2, 1);
+    notify(&mut virtio);
+    assert_eq!(virtio.service_queue(&mut memory).completed, 1);
+    assert_eq!(virtio.descriptor_scratch.as_ptr(), scratch_pointer);
   }
 
   #[test]
