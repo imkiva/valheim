@@ -4,8 +4,9 @@
 启动数据，以及下一轮仍值得评估的方向。JIT 的总体架构、语义约束和第一阶段验收见
 [`JIT-PLAN.md`](JIT-PLAN.md)。
 
-本轮实现到 `0265308` 为止；下面“尚可评估的优化”均未实现，也不代表已经验证会更快。
-第二轮每个已落地优化都先做独立 A/B，再单独提交；没有收益的实验已经完整回滚。
+启动性能优化实现到 `0265308`；之后的 WFI 语义与宿主空闲修复实现到 `9348812`。下面
+“尚可评估的优化”均未实现，也不代表已经验证会更快。每个已落地优化都先独立验证、再单独
+提交；没有收益的实验已经完整回滚。
 
 ## 范围与当前结论
 
@@ -19,8 +20,10 @@
   不应直接用两个绝对 checkpoint 的差值归因。
 - 相同固定 CPU 的 naive 中位数为 60.926 s，因此当前总体对照为 12.677×，启动时间减少
   92.1%；它不是逐项归因依据。旧的 69.603 / 13.447 s 数据继续作为第一阶段历史基线保留。
+- Debian JIT prompt 后的 WFI 忙轮询已经修复：修复前稳定占用一个 host core；实测两个
+  约 5 秒窗口均为 0 个 user/system tick，同时 UART 唤醒和超过 80 字节的连续输入输出通过。
 
-当前性能代码终点是 `0265308`；其后单独提交本文档，不混入代码改动。
+当前运行时代码终点是 `9348812`；其后单独提交本文档，不混入代码改动。
 
 ## 测量口径
 
@@ -52,6 +55,13 @@ A/B 结果是 compiled front cache；SATP/SFENCE 和 CLINT 对 Debian prompt 基
 CLINT 的确定性收益不体现在这个 prompt 指标中：它把 hart 的长 WFI timer idle wait 从
 O(`mtimecmp - mtime`) 次空转降为 O(1) 次 deadline 跳转。
 
+prompt 空闲问题使用单独口径诊断。修复前 `perf stat` 的 3 秒窗口为 3001.15 ms task-clock，
+即稳定使用 1.000 个 host CPU；JIT stats 中 dispatch 从 2000 万增长到 10.2 亿时 guest
+instruction/native execution 完全不变，证明是 WFI dispatcher 空转。`9348812` 后使用
+`/proc/<pid>/stat`、`CLK_TCK=100` 测得两个约 5.002 秒窗口均为 0 user/system tick；随后
+`echo`、Debian 版本查询和 114 字节 UART 命令/输出均成功返回 prompt。WSL 对应 perf 前端在
+最终复测时缺少当前 kernel tools，因此最终 0-tick 结果没有伪装成 perf 数据。
+
 本轮新增优化使用相同 Debian artifacts、固定 CPU 16、关闭 stats，并交错运行旧/新二进制。
 各行是各自独立实验，基线取样时间不同，因此不能把相邻行相减，也不能把所有倍数直接相乘：
 
@@ -76,8 +86,8 @@ compile failure 为 0。TLB 为 384,604,333 hit / 552,731 miss（约 99.86% hit�
 
 ## 已完成并独立提交的优化
 
-`b432c42..0265308` 的性能代码包含以下十六个独立提交；中间的 `d980f5e` 仅是上一版
-性能文档，不属于代码优化。
+`b432c42..0265308` 的启动性能代码包含以下十六个独立提交；中间的 `d980f5e` 仅是上一版
+性能文档，不属于代码优化。随后两个提交修复 WFI 正确性和 prompt 空闲 CPU。
 
 ### Core、设备与失效语义
 
@@ -187,27 +197,42 @@ compile failure 为 0。TLB 为 384,604,333 hit / 552,731 miss（约 99.86% hit�
     构建（包括 release tests）关闭这些编译期检查；启用 debug assertions 的构建（包括默认
     tests）仍显式开启，由此保留 lowering 开发期的早失败并移除 release 启动成本。
 
+### WFI 正确性与宿主空闲
+
+17. `8fd5057 fix(cpu): separate WFI wake from interrupt traps`
+
+    locally-enabled pending interrupt 现在可以在全局 xIE 关闭时退出 WFI，但只有现有 global
+    eligibility 检查通过时才进入 trap。wake-only 不清 MIP，individual enable 关闭也不会唤醒；
+    Machine 和真实 JIT timer 用例同时覆盖 global-on trap 与 global-off wake-only。
+
+18. `9348812 perf(core): block host thread during WFI idle`
+
+    Bus 持有 generation + `Mutex` + `Condvar` 组成的共享 WakeHub。完整 `Machine::run`/
+    `run_for_test` 在 WFI 没有本地启用的未来 timer 时按“snapshot → poll → recheck → wait”
+    阻塞；UART 输入先发布 RX/IRQ 状态、释放 UART mutex，再通知 WakeHub，避免 lost wake 和
+    锁序反转。公开的 `run_next()` 保持非阻塞，已有未来 timer 继续立即快进，因此本提交没有
+    引入实时时钟语义。
+
 ## 当前验证状态
 
 最终代码树已经通过：
 
 - `cargo +nightly-2024-09-05 test --workspace --locked`
   - `valheim-asm` 11 个测试；
-  - `valheim-core` 53 个测试；
+  - `valheim-core` 60 个测试；
   - `valheim-jit` 34 个单元测试；
-  - 8 个 native/naive differential tests；
+  - 9 个 native/naive differential tests；
   - 4 个 native memory fast-path integration tests；
   - `xtask` 4 个测试。
-- `cargo +nightly-2024-09-05 test --locked --package valheim-core --features trace`：54/54。
+- `cargo +nightly-2024-09-05 test --locked --package valheim-core --features trace`：61/61。
 - `cargo +nightly-2024-09-05 test --release --locked --package valheim-jit`，让
-  34 + 8 + 4 项 JIT tests 真正在 release verifier-off 配置执行。
+  34 + 9 + 4 项 JIT tests 真正在 release verifier-off 配置执行。
 - `cargo +nightly-2024-09-05 build --release --locked --package valheim-cli`。
-- 最终 release verifier-off binary 手工运行 96/96 JIT `riscv-tests`；debug xtask 的 JIT
-  路径也为 96/96。
-- xv6 JIT 进入 `$` 并执行 `echo RUN_SH_OK`；RustSBI JIT 输出完整 success marker；Debian
-  JIT 进入真实 `debian13#`，`cat /etc/debian_version` 返回 `13.6`。
-- executor budget 修改后的 naive/JIT 双引擎 ISA 和三个 demo 均已跑过；其后的提交只修改
-  JIT runtime/backend/default tuning，最终树再次覆盖了全部 JIT 验收。
+- 当前树的 debug xtask 在 naive 与 JIT 下均通过 96/96 `riscv-tests`。
+- 最终代码树串行实跑三个 demo 的 naive/JIT 六种组合：xv6 两种引擎均进入 `$` 并成功
+  执行 `echo`；RustSBI 两种引擎均输出完整 success marker；Debian 两种引擎均进入真实
+  `debian13#`，`cat /etc/debian_version` 均返回 `13.6`。Debian JIT 还在 prompt 空闲约 5 秒后
+  由 UART 输入成功唤醒。
 
 `cargo fmt --all -- --check` 会要求把仓库既有的 2 空格 Rust 风格整体改成 rustfmt 默认布局，
 因此当前不能作为局部改动的有效格式门禁。本轮只运行过只读 `--check`，失败后没有产生文件
@@ -309,12 +334,21 @@ WSL 中 `cycles`、`instructions`、`branches` 和 `branch-misses` 仍报告 `<n
    VA 到物理页的关系。该优化很容易制造 stale-code 或 stale-permission bug，只有统计显示
    SFENCE 导致大量重译时才值得做。
 
-4. 事件驱动的设备 pending 与无 timer WFI 等待。
+4. 完善 level-triggered PLIC/SEIP 与通用异步设备通知。
 
-   UART 空轮询已经无锁，但 Machine 仍周期性调用每个设备的 `is_interrupting()`。可以把设备
-   pending 发布到统一 atomic bitmap/PLIC，并让没有未来 timer 的 WFI 在宿主条件变量或 eventfd
-   上等待。它主要降低空闲 CPU，而非当前 Debian prompt；还应先修清 level-triggered PLIC/
-   SEIP 语义，避免把现有单脉冲兼容行为固化进优化路径。
+   无 timer WFI 的 WakeHub 等待和 UART 通知已经在 `9348812` 完成，并且实际解决了 Debian
+   prompt 的单核满载。剩余工作是让 PLIC 在 source enable/threshold/complete 变化时从 latched
+   level 重新计算 claim/SEIP，并把未来真正异步的 VirtIO 等设备接入同一通知协议。当前 UART
+   单脉冲若恰在 source 10 被 mask 时到达，可能要等后续同源 UART 脉冲再次更新 pending，不能
+   把 WakeHub 验收解释为完整 level-triggered PLIC 已实现。
+
+5. 分离 realtime 与 deterministic CLINT clock mode。
+
+   本轮按约定没有修正时钟语义：`mtime` 沿用现有 dispatcher/attempted-instruction tick 模型，
+   未来 timer 在 WFI 中立即快进，无 timer 的宿主阻塞期间 guest 时间暂停。若后续需要与 DTB
+   10 MHz 声明一致，应以宿主 monotonic clock 驱动 realtime 模式，并用 timer deadline 作为
+   WakeHub timeout；ISA 测试和可重复 benchmark 则保留 deterministic instruction clock。该
+   改动会影响启动等待和 guest 可见时间，必须独立设计、A/B 和提交。
 
 ### 当前低优先级
 

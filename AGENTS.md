@@ -18,6 +18,8 @@ Valheim 是一个用 Rust 编写、以学习和参考实现为目的的 RISC-V 6
 - JIT-enabled CLI 和完整 workspace 明确只支持 Linux x86_64 System V ABI；
   `valheim-core` 等不依赖 `valheim-jit` 的 crate 仍可单独构建。
 - UART 直接连接宿主标准输入和标准输出，并实现 Linux 8250 驱动需要的 DLAB、IIR、RX/TX 中断和状态位。
+- 完整 `Machine::run`/`run_for_test` 在 hart 已进入 WFI、没有可快进的本地 timer 时通过共享
+  WakeHub 阻塞宿主线程；UART 输入发布状态后唤醒。公开的 `run_next()` 仍是非阻塞单步接口。
 
 ## Workspace 与模块职责
 
@@ -211,8 +213,8 @@ Rust workspace 单元测试：
 cargo +nightly-2024-09-05 test --workspace --locked
 ```
 
-该命令已验证为 114 个测试通过、0 个失败：`valheim-asm` 11 个，
-`valheim-core` 53 个，`valheim-jit` 34 个 unit + 8 个 native/naive differential +
+该命令已验证为 122 个测试通过、0 个失败：`valheim-asm` 11 个，
+`valheim-core` 60 个，`valheim-jit` 34 个 unit + 9 个 native/naive differential +
 4 个 memory fast-path integration tests，`xtask` 4 个。额外的 trace 语义回归为：
 
 ```bash
@@ -220,7 +222,7 @@ cargo +nightly-2024-09-05 test \
   --locked --package valheim-core --features trace
 ```
 
-该命令已验证 54 个测试通过。
+该命令已验证 61 个测试通过。
 
 完整 RISC-V ISA 测试需要交叉工具链和 `riscv-tests` 子模块：
 
@@ -509,6 +511,10 @@ openEuler 演示没有固定的 BIOS、kernel、rootfs、下载脚本或版本 h
 - Linux 内核必须在同一个 `fakeroot` 元数据状态下打包 initramfs，否则 OCI 层中的 `root:shadow` 等属主信息会被宿主用户 UID 污染。
 - Linux demo 使用内建 initramfs，成功不代表现代 Linux 的 VirtIO block 路径已兼容；切换到磁盘 rootfs 前必须单独修复和验证 VirtIO。
 - UART RX/TX 目前以单次事件脉冲适配 Valheim 的简化 PLIC。xv6/Linux 的正常初始化顺序已验证；若字节恰在 PLIC source 10 被 mask 时到达，简化 PLIC 不会在之后 enable 时从 pending 重算 claim，事件可能暂时卡住。完整 level-triggered 语义需要连同 PLIC/SEIP 路径一起修复。
+- WFI 的宿主阻塞只消除了无可快进 timer 时的忙轮询，没有把 CLINT 改为宿主实时时钟。
+  `mtime` 沿用现有 dispatcher/attempted-instruction tick 模型，启用的未来 `mtimecmp` 仍立即
+  快进；WFI 阻塞期间不推进 guest 时间。需要 realtime/deterministic clock mode 时必须作为
+  单独语义改动实现和验证。
 - DTB 先由 `Machine::new` 放到 `0x87f0_0000`，CLI 随后才加载 BIOS/kernel，当前没有镜像范围与 DTB overlap 检查；现有约 40 MiB Linux Image 安全，但不要传入会延伸到该地址的大型 raw image。
 - `Memory` 现已对完整宽度/完整 slice 做 checked 半开区间检查，非对齐读写使用
   unaligned primitives；bus 也使用完整宽度的半开区间匹配。但 `Machine::load_memory`

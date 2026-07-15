@@ -201,7 +201,9 @@ Machine 调度顺序：
 外部设备中断在 Machine/executor batch 边界观察。初始 ceiling 为 32，第二轮 A/B 将其调为
 1024；未来 timer deadline 仍会精确缩短 budget，1024 上限则约束 UART/VirtIO 等异步设备的
 最坏轮询延迟。WFI 必须立即结束 TB；已经处于 WFI 状态时执行器返回 `attempted = 0`，外层
-仍继续推进 CLINT 和轮询中断。
+若有本地启用的未来 timer 则继续快进到 deadline，否则完整运行入口在共享 WakeHub 上阻塞，
+由 UART 等异步设备通知后再轮询。`run_next()` 仍保持非阻塞；CLINT 也仍沿用现有
+dispatcher/attempted-instruction tick 模型，本阶段没有把 guest 时间改成宿主实时时钟。
 
 ## GuestBlock 构建
 
