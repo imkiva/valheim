@@ -220,8 +220,8 @@ Rust workspace 单元测试：
 cargo +nightly-2024-09-05 test --workspace --locked
 ```
 
-该命令已验证为 171 个测试通过、0 个失败：`valheim-asm` 11 个，
-`valheim-core` 102 个，`valheim-jit` 40 个 unit + 10 个 native/naive differential +
+该命令已验证为 204 个测试通过、0 个失败：`valheim-asm` 11 个，
+`valheim-core` 118 个，`valheim-jit` 56 个 unit + 11 个 native/naive differential +
 4 个 memory fast-path integration tests，`xtask` 4 个。额外的 trace 语义回归为：
 
 ```bash
@@ -229,7 +229,7 @@ cargo +nightly-2024-09-05 test \
   --locked --package valheim-core --features trace
 ```
 
-该命令已验证 103 个测试通过。
+该命令已验证 119 个测试通过。
 
 完整 RISC-V ISA 测试需要交叉工具链和 `riscv-tests` 子模块：
 
@@ -416,15 +416,18 @@ id
 第一阶段数据见根 `JIT-PLAN.md`。后续性能提交在固定 CPU 16 上重测
 realtime 切换前的性能树：naive 中位数 60.926 s，JIT 中位数 4.806 s，
 加速 12.677×。`10cabc6`/`258fdf6` 后 realtime JIT 三次中位数为
-8.379352 s；realtime naive 单次验收为 133.996711 s（非正式三次中位数）。
+8.379352 s；realtime naive 单次验收为 133.996711 s（不是三次中位数）。
 这些历史数据都来自内建 initramfs，不能作为当前 ext4 block-root 的性能基线；旧时钟还会
 快进 guest 等待，新旧绝对时间也不可直接对比。逐项交错 A/B、profile 和剩余方向见
 `JIT-PERF.md`。
 
 当前 ext4 direct-root 口径固定 CPU 16、显式 threshold 750、关闭 stats，并为每次启动复制
-base image 得到全新的可写副本。`ded32a0` 与当前 `746684b` 各三次交错结果的中位数分别为
-3.957267 s 和 3.371372 s，当前树累计缩短 14.806%（1.1738×）。这是本轮 VirtIO、PLIC 和
-JIT 优化的累计结果，不能归因给任一单独 commit；逐项数据见 `JIT-PERF.md`。
+base image 得到全新的可写副本。`ded32a0` 与第一轮终点 `746684b` 各三次交错结果的中位数
+分别为 3.957267 s 和 3.371372 s，第一轮累计缩短 14.806%（1.1738×）。这是本轮 VirtIO、PLIC 和
+JIT 第一轮优化的累计结果，不能归因给任一单独 commit。后续独立 A/B 中，共享 core
+translation cache 将 prompt 中位数从 2.481824 s 降至 2.215396 s（-10.735%），跳过非
+`mtime` 写入的 host clock sample 为 -2.487%；VirtIO indirect descriptors 的 prompt 和
+64 MiB 吞吐均为中性。逐项数据、已否决实验和剩余方向见 `JIT-PERF.md`。
 
 固定版本和来源：
 
