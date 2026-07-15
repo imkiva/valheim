@@ -14,5 +14,6 @@ pub mod device;
 pub mod debug;
 pub mod machine;
 pub mod dtb;
+pub(crate) mod wake;
 
 pub const TRACE_ENABLED: bool = cfg!(feature = "trace");

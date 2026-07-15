@@ -62,8 +62,12 @@ impl Machine {
       RV64_DTB_ADDR as usize,
       &device_tree_rom[DEVICE_TREE_ROM_HEADER_SIZE..],
     );
+    let wake_hub = machine.cpu.bus.wake_hub.clone();
     unsafe {
-      machine.cpu.bus.add_device(Arc::new(Uart16550a::new()))
+      machine
+        .cpu
+        .bus
+        .add_device(Arc::new(Uart16550a::new(wake_hub)))
         .expect("Cannot install UART device")
     };
     machine
@@ -73,9 +77,10 @@ impl Machine {
     self.cpu.write_pc(VirtAddr(RV64_PC_RESET));
     self.cpu.write_reg(Reg::X(Fin::new(11)), RV64_DTB_ADDR);
     loop {
+      let wake_generation = self.prepare_wfi_wait();
       let cont = self.run_next();
       match cont {
-        true => (),
+        true => self.wait_if_still_idle(wake_generation),
         false => break,
       }
     }
@@ -141,13 +146,38 @@ impl Machine {
     outcome.result
   }
 
+  /// Capture the asynchronous-device generation before the dispatcher polls devices. Waiting is
+  /// only useful when WFI has no enabled future timer: enabled timer deadlines retain the existing
+  /// immediate guest-time fast-forward path in `dispatch_next`.
+  fn prepare_wfi_wait(&self) -> Option<u64> {
+    self.should_wait_for_async_device()
+      .then(|| self.cpu.bus.wake_hub.snapshot())
+  }
+
+  fn wait_if_still_idle(&self, wake_generation: Option<u64>) {
+    if let Some(wake_generation) = wake_generation {
+      // run_next may have observed an interrupt and cleared WFI, or made a future timer eligible.
+      // Recheck both conditions before blocking the host thread.
+      if self.should_wait_for_async_device() {
+        self.cpu.bus.wake_hub.wait_for_change(wake_generation);
+      }
+    }
+  }
+
+  fn should_wait_for_async_device(&self) -> bool {
+    let has_enabled_future_timer = self.cpu.csrs.read_unchecked(MIE) & MTIE_MASK != 0 &&
+      self.cpu.bus.clint.ticks_until_timer().is_some();
+    self.cpu.wfi && !has_enabled_future_timer
+  }
+
   pub fn run_for_test(&mut self, test_name: String) -> i32 {
     self.cpu.write_pc(VirtAddr(RV64_PC_RESET));
     self.cpu.write_reg(Reg::X(Fin::new(11)), RV64_DTB_ADDR);
     loop {
+      let wake_generation = self.prepare_wfi_wait();
       let cont = self.run_next_for_test();
       match cont {
-        true => (),
+        true => self.wait_if_still_idle(wake_generation),
         false => {
           // riscv-tests uses ecall to tell test results
           let gp = self.cpu.read_reg(Reg::X(Fin::new(3))).unwrap();
@@ -238,11 +268,17 @@ impl Machine {
 
 #[cfg(test)]
 mod tests {
-  use std::sync::{Arc, Mutex};
+  use std::sync::atomic::{AtomicBool, Ordering};
+  use std::sync::{mpsc, Arc, Mutex};
+  use std::time::Duration;
 
   use super::*;
   use crate::cpu::bus::CLINT_BASE;
-  use crate::cpu::csr::CSRMap::{MCAUSE, MEPC, MIP, MSIE_MASK, MTIP_MASK, MTVEC, TIME};
+  use crate::cpu::csr::CSRMap::{
+    MCAUSE, MEPC, MIP, MSIE_MASK, MTIP_MASK, MTVEC, SEIE_MASK, TIME,
+  };
+  use crate::device::ns16550a::UART_IER;
+  use crate::device::Device;
   use crate::interp::ExecOutcome;
 
   struct RecordingExecutor {
@@ -325,6 +361,7 @@ mod tests {
       executor: Box::new(executor),
     };
 
+    assert_eq!(machine.prepare_wfi_wait(), None);
     assert_eq!(machine.dispatch_next(), Ok(()));
     assert_eq!(machine.cpu.csrs.read_unchecked(TIME), 100);
     assert!(!machine.cpu.wfi);
@@ -440,5 +477,65 @@ mod tests {
     assert_eq!(machine.dispatch_next(), Ok(()));
     assert_eq!(machine.cpu.csrs.read_unchecked(TIME), 1);
     assert!(machine.cpu.wfi);
+  }
+
+  #[test]
+  fn waiting_hart_sleeps_until_uart_input_without_advancing_guest_time() {
+    let budgets = Arc::new(Mutex::new(Vec::new()));
+    let mut cpu = RV64Cpu::new(None);
+    cpu.wfi = true;
+    cpu.write_pc(VirtAddr(0x8000_0000));
+    cpu.csrs.write_unchecked(MTVEC, 0x8000_0100).unwrap();
+    cpu.csrs.write_unchecked(MIE, SEIE_MASK).unwrap();
+    cpu.csrs.write_mstatus_MIE(true);
+
+    let wake_hub = cpu.bus.wake_hub.clone();
+    let uart = Arc::new(Uart16550a::new_without_input_thread(wake_hub.clone()));
+    uart.mmio_write(VirtAddr(UART_IER), 1).unwrap();
+    unsafe {
+      cpu.bus.add_device(uart.clone()).unwrap();
+    }
+
+    let mut machine = Machine {
+      cpu,
+      executor: Box::new(RecordingExecutor {
+        budgets,
+        attempted: 0,
+      }),
+    };
+
+    let wake_generation = machine.prepare_wfi_wait();
+    assert!(wake_generation.is_some());
+    assert!(machine.run_next());
+    assert!(machine.cpu.wfi);
+    assert_eq!(machine.cpu.csrs.read_unchecked(TIME), 1);
+
+    let input_uart = uart.clone();
+    let watchdog_hub = wake_hub.clone();
+    let watchdog_fired = Arc::new(AtomicBool::new(false));
+    let producer_watchdog_fired = watchdog_fired.clone();
+    let (cancel_watchdog, watchdog_cancelled) = mpsc::channel();
+    let producer = std::thread::spawn(move || {
+      std::thread::sleep(Duration::from_millis(10));
+      input_uart.inject_input(b'x');
+      if watchdog_cancelled.recv_timeout(Duration::from_secs(1)).is_err() {
+        producer_watchdog_fired.store(true, Ordering::Relaxed);
+        watchdog_hub.notify();
+      }
+    });
+    machine.wait_if_still_idle(wake_generation);
+    cancel_watchdog.send(()).unwrap();
+    producer.join().unwrap();
+    assert!(!watchdog_fired.load(Ordering::Relaxed));
+
+    // Host waiting does not advance mtime. The normal dispatcher tick and interrupt path run only
+    // after the asynchronous notification wakes the machine thread.
+    assert_eq!(machine.cpu.csrs.read_unchecked(TIME), 1);
+    assert!(machine.cpu.wfi);
+    assert!(machine.run_next());
+    assert_eq!(machine.cpu.csrs.read_unchecked(TIME), 2);
+    assert!(!machine.cpu.wfi);
+    assert_eq!(machine.cpu.read_pc(), VirtAddr(0x8000_0100));
+    assert_eq!(machine.cpu.csrs.read_unchecked(MCAUSE), (1_u64 << 63) | 9);
   }
 }

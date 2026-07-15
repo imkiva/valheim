@@ -8,6 +8,7 @@ use crate::device::Device;
 use crate::device::plic::Plic;
 use crate::device::virtio::Virtio;
 use crate::memory::{CanIO, Memory, VirtAddr};
+use crate::wake::WakeHub;
 
 pub const RV64_MEMORY_BASE: u64 = 0x80000000;
 pub const RV64_MEMORY_SIZE: u64 = 256 * 1024 * 1024;
@@ -53,6 +54,7 @@ pub struct Bus {
   pub clint: Clint,
   pub plic: Plic,
   pub virtio: Virtio,
+  pub(crate) wake_hub: Arc<WakeHub>,
 }
 
 impl Debug for Bus {
@@ -76,6 +78,7 @@ impl Bus {
       clint: Clint::new(),
       plic: Plic::new(),
       virtio: Virtio::new(0),
+      wake_hub: Arc::new(WakeHub::new()),
     })
   }
 

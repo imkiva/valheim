@@ -5,6 +5,7 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use crate::device::Device;
 use crate::memory::{Memory, VirtAddr};
+use crate::wake::WakeHub;
 
 pub const UART_BASE: u64 = 0x1000_0000;
 pub const UART_SIZE: u64 = 0x100;
@@ -203,38 +204,46 @@ impl SharedUartState {
       .interrupt_to_deliver
       .store(state.has_interrupt_to_deliver(), Ordering::Release);
   }
+
+  fn receive_byte(&self, byte: u8) {
+    let mut uart = self.state.lock().expect("cannot lock uart state");
+    // We can only write to the receive register after the previous byte has been consumed.
+    while uart.registers[(UART_LSR - UART_BASE) as usize] & UART_LSR_RX != 0 {
+      uart = self
+        .input_consumed
+        .wait(uart)
+        .expect("cannot wait on uart state");
+    }
+    uart.registers[(UART_RHR - UART_BASE) as usize] = byte;
+    uart.registers[(UART_LSR - UART_BASE) as usize] |= UART_LSR_RX;
+    uart.raise_receive_interrupt();
+    self.publish_interrupt_state(&uart);
+  }
 }
 
 pub struct Uart16550a {
   state: Arc<SharedUartState>,
+  #[cfg(test)]
+  wake_hub: Arc<WakeHub>,
 }
 
 impl Uart16550a {
-  pub fn new() -> Self {
+  pub(crate) fn new(wake_hub: Arc<WakeHub>) -> Self {
     let state = Arc::new(SharedUartState::new());
 
     {
       let state = state.clone();
+      let wake_hub = wake_hub.clone();
       std::thread::spawn(move || loop {
         let mut buffer = [0; 1];
         match io::stdin().read(&mut buffer) {
           Ok(0) => return,
           Ok(_) => {
-            let mut uart = state.state.lock().expect("cannot lock uart state");
-            // we can only write to the register if there's no previous data.
-            // we achieve this by checking the bit 0 of LSR:
-            // - 0: no data in receive holding register.
-            // - 1: means data has been receive and saved in the receive holding register.
-            while uart.registers[(UART_LSR - UART_BASE) as usize] & UART_LSR_RX != 0 {
-              uart = state
-                .input_consumed
-                .wait(uart)
-                .expect("cannot wait on uart state");
-            }
-            uart.registers[(UART_RHR - UART_BASE) as usize] = buffer[0];
-            uart.registers[(UART_LSR - UART_BASE) as usize] |= UART_LSR_RX;
-            uart.raise_receive_interrupt();
-            state.publish_interrupt_state(&uart);
+            state.receive_byte(buffer[0]);
+            // receive_byte releases the UART mutex before taking the WakeHub mutex. The machine
+            // similarly never holds the WakeHub mutex while polling devices, so these two locks
+            // cannot be acquired in opposite orders.
+            wake_hub.notify();
           }
           Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
           Err(e) => {
@@ -245,7 +254,25 @@ impl Uart16550a {
       });
     }
 
-    Self { state }
+    Self {
+      state,
+      #[cfg(test)]
+      wake_hub,
+    }
+  }
+
+  #[cfg(test)]
+  pub(crate) fn new_without_input_thread(wake_hub: Arc<WakeHub>) -> Self {
+    Self {
+      state: Arc::new(SharedUartState::new()),
+      wake_hub,
+    }
+  }
+
+  #[cfg(test)]
+  pub(crate) fn inject_input(&self, byte: u8) {
+    self.state.receive_byte(byte);
+    self.wake_hub.notify();
   }
 }
 
@@ -369,7 +396,7 @@ mod tests {
   use super::*;
 
   fn uart_without_input_thread() -> Uart16550a {
-    Uart16550a { state: Arc::new(SharedUartState::new()) }
+    Uart16550a::new_without_input_thread(Arc::new(WakeHub::new()))
   }
 
   #[test]
@@ -504,5 +531,30 @@ mod tests {
     state.registers[(UART_LSR - UART_BASE) as usize] |= UART_LSR_RX;
     state.raise_receive_interrupt();
     assert!(state.take_interrupt());
+  }
+
+  #[test]
+  fn injected_input_is_visible_when_the_machine_is_notified() {
+    let wake_hub = Arc::new(WakeHub::new());
+    let uart = Arc::new(Uart16550a::new_without_input_thread(wake_hub.clone()));
+    uart.mmio_write(VirtAddr(UART_IER), UART_IER_RDI).unwrap();
+    let observed = wake_hub.snapshot();
+
+    let (sender, receiver) = mpsc::channel();
+    let waiter_hub = wake_hub.clone();
+    let waiter_uart = uart.clone();
+    let waiter = std::thread::spawn(move || {
+      waiter_hub.wait_for_change(observed);
+      sender.send(waiter_uart.is_interrupting()).unwrap();
+    });
+
+    uart.inject_input(b'x');
+
+    assert_eq!(
+      receiver.recv_timeout(Duration::from_secs(1)).unwrap(),
+      Some(UART_IRQ),
+    );
+    waiter.join().unwrap();
+    assert_eq!(uart.mmio_read(VirtAddr(UART_RHR)), Some(b'x'));
   }
 }
