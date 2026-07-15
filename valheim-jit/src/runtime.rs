@@ -500,21 +500,24 @@ impl JitExecutor {
     ExecOutcome::new(attempted, Ok(()))
   }
 
-  fn execute_native(
-    tlb: &mut SoftwareTlb,
-    cpu: &mut RV64Cpu,
-    block: &GuestBlock,
-    compiled: CompiledBlock,
-    defer_first_slow: bool,
-  ) -> NativeExecution {
+  fn new_native_frame(tlb: &mut SoftwareTlb, cpu: &mut RV64Cpu) -> JitFrame {
     let xregs = cpu.regs.x.as_mut_ptr();
     let load_tlb = tlb.load_ptr();
     let store_tlb = tlb.store_ptr();
     let tlb_generation = tlb.generation();
     let tlb_stats = tlb.stats_ptr();
-    let mut frame = JitFrame::new(cpu, xregs, load_tlb, store_tlb, tlb_generation, tlb_stats);
-    frame.defer_first_memory = defer_first_slow as u32;
-    let attempted = unsafe { (compiled.entry)(&mut frame) };
+    JitFrame::new(cpu, xregs, load_tlb, store_tlb, tlb_generation, tlb_stats)
+  }
+
+  fn execute_native(
+    frame: &mut JitFrame,
+    cpu: &mut RV64Cpu,
+    block: &GuestBlock,
+    compiled: CompiledBlock,
+    defer_first_slow: bool,
+  ) -> NativeExecution {
+    frame.reset_for_block(cpu, defer_first_slow);
+    let attempted = unsafe { (compiled.entry)(frame) };
     if frame.exit_kind == FAULT_NONE {
       cpu.write_pc(VirtAddr(frame.next_pc));
       if attempted != 0 {
@@ -526,7 +529,7 @@ impl JitExecutor {
         completed_block: true,
       };
     }
-    Self::finish_native_exit(cpu, block, &frame, attempted, defer_first_slow)
+    Self::finish_native_exit(cpu, block, frame, attempted, defer_first_slow)
   }
 
   #[cold]
@@ -636,6 +639,7 @@ impl JitExecutor {
   #[inline(always)]
   fn execute_compiled_block(
     &mut self,
+    frame: &mut JitFrame,
     cpu: &mut RV64Cpu,
     budget: u32,
     native_only: bool,
@@ -664,7 +668,7 @@ impl JitExecutor {
       self.stats.native_executions += 1;
     }
     let native = Self::execute_native(
-      &mut self.tlb,
+      frame,
       cpu,
       &cached.block,
       compiled,
@@ -702,6 +706,7 @@ impl JitExecutor {
 
   fn execute_one(
     &mut self,
+    frame: &mut JitFrame,
     cpu: &mut RV64Cpu,
     budget: u32,
     native_only: bool,
@@ -753,6 +758,7 @@ impl JitExecutor {
         }
         return self
           .execute_compiled_block(
+            frame,
             cpu,
             budget,
             native_only,
@@ -782,6 +788,7 @@ impl JitExecutor {
         }
         return self
           .execute_compiled_block(
+            frame,
             cpu,
             budget,
             native_only,
@@ -880,6 +887,7 @@ impl JitExecutor {
       if self.blocks[block_index].compiled.is_some() {
         self.fast_cache.insert(key, block_index);
         if let Some(outcome) = self.execute_compiled_block(
+          frame,
           cpu,
           budget,
           native_only,
@@ -983,11 +991,15 @@ impl RV64Executor for JitExecutor {
     self.invalidate_changed_epochs(cpu);
     let tlb_context = self.sync_tlb_context(cpu);
     self.rotate_code_cache_if_needed();
+    // Native continuations cannot invalidate or replace these CPU/TLB allocations. Reuse their
+    // frame pointers for the whole batch and reset only block-local exit state before each call.
+    let mut frame = Self::new_native_frame(&mut self.tlb, cpu);
 
     let mut attempted = 0;
     let mut predecessor = None;
     let result = loop {
       let step = self.execute_one(
+        &mut frame,
         cpu,
         budget - attempted,
         attempted != 0,

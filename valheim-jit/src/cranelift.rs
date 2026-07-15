@@ -66,6 +66,18 @@ impl JitFrame {
       tlb_stats,
     }
   }
+
+  pub(crate) fn reset_for_block(&mut self, cpu: &mut RV64Cpu, defer_first_memory: bool) {
+    debug_assert_eq!(self.cpu, cpu as *mut RV64Cpu);
+    debug_assert_eq!(self.xregs, cpu.regs.x.as_mut_ptr());
+    self.next_pc = cpu.read_pc().0;
+    self.fault_pc = 0;
+    self.fault_addr = 0;
+    self.raw_instr = 0;
+    self.attempted = 0;
+    self.exit_kind = 0;
+    self.defer_first_memory = defer_first_memory as u32;
+  }
 }
 
 #[derive(Clone, Copy)]
