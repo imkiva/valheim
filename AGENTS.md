@@ -10,7 +10,10 @@ Valheim 是一个用 Rust 编写、以学习和参考实现为目的的 RISC-V 6
 
 - 单 hart；设备树只声明 hart 0。
 - 256 MiB guest RAM；Debian 13 demo 现从外部 ext4 block rootfs 启动，不再把完整
-  rootfs 内嵌进 kernel，但保留该内存规模供 Linux、page cache 和真实用户空间使用。
+  rootfs 内嵌进 kernel。默认 rootfs 是固定 Debian 13 NoCloud riscv64 镜像中提取并适配的
+  p1，并在首次生成 base 时通过宿主 chroot 从固定 Debian snapshot 预装基础开发环境；
+  `--from-oci` 保留原有固定 slim OCI 路径。该内存规模供 Linux、page cache 和真实
+  用户空间使用，与磁盘镜像容量无关。
 - guest kernel/BIOS 必须是 raw binary，CLI 不解析 ELF。
 - VirtIO block 是 legacy VirtIO-MMIO version 1，队列上限为 128，支持 direct 和协商后的
   indirect split-queue descriptor chain、读写、FLUSH 和 `SEG_MAX=126`；Linux 5.17 的
@@ -73,6 +76,16 @@ Valheim 是一个用 Rust 编写、以学习和参考实现为目的的 RISC-V 6
 - Valheim Rust：`nightly-2024-09-05`。根 `rust-toolchain` 只写了不固定版本的 `nightly`，为了复现不要依赖它解析到的最新版本。
 - 历史 RustSBI demo Rust：`nightly-2022-02-14`，已安装 target `riscv64imac-unknown-none-elf`。旧源码使用已从现代 Rust 删除的 generator API，不能改用新 nightly。
 - Device Tree Compiler：通过 apt 安装的 `device-tree-compiler 1.6.1-1`。
+- NoCloud host ext4 工具：脚本固定并自动构建 e2fsprogs `1.47.2`，使用源码
+  自带的私有 libuuid/libblkid。Ubuntu 22.04 常见的宿主 e2fsprogs `1.46.5` 不
+  识别固定 NoCloud p1 的 `orphan_file`/`FEATURE_C12`；不要用它替代脚本固定的
+  NoCloud `e2fsck`/`debugfs`。OCI 路径仍使用宿主 e2fsprogs。
+- NoCloud chroot 工具：脚本固定下载 Ubuntu
+  `qemu-user-static 6.2+dfsg-2ubuntu6.31` 的 amd64 package，只提取并校验其中的
+  static qemu-riscv64。base cache miss 时需要 mount/PID namespace、loop mount、
+  `chroot` 和 `update-binfmts`，非 root 用户还需要 `sudo`；宿主内核必须支持 p1 的
+  `orphan_file` ext4 feature，容器还必须提供 loop device 和 `CAP_SYS_ADMIN`。缓存命中
+  与 `--from-oci` 不需要这条特权路径。
 - RISC-V bare-metal GNU toolchain：
   `target/demo/gcc-riscv64-elf-2022.03.09/`
   - GCC `11.1.0 (g5964b5cd727)`
@@ -278,7 +291,7 @@ cargo +nightly-2024-09-05 run \
 demo/                                # Git 跟踪；只放最小静态入口
 ├── xv6/                           # run.sh + README.md
 ├── rustsbi/                       # run.sh + README.md + 三个适配 patch
-└── linux/                         # run.sh + README.md + init
+└── linux/                         # run.sh + chroot helper + README.md + init
 
 target/demo/                         # Git 忽略；由 run.sh 创建
 ├── gcc-riscv64-elf-2022.03.09/   # xv6/RustSBI 共享 GNU 工具链
@@ -288,7 +301,7 @@ target/demo/                         # Git 忽略；由 run.sh 创建
 ├── cargo/                         # Valheim Cargo target 输出
 ├── xv6/                           # 源码、构建产物和可写磁盘
 ├── rustsbi/                       # 源码、RustSBI Cargo target、artifact 和日志
-└── linux/                         # 下载、源码、ext4 base/runtime 和 kernel
+└── linux/                         # 下载、源码、host-tools、NoCloud/OCI ext4 和 kernel
 ```
 
 今后新增 demo 时，使用 `demo/<demo-name>/run.sh` 作为可从任意工作目录调用的
@@ -315,9 +328,11 @@ RESET_DISK=1 ./demo/xv6/run.sh --engine jit
 ```
 
 2026-07-15 已实际验证三个 demo 的 naive 和 JIT 两种 engine：xv6 进入 `$` 并执行
-`echo`，RustSBI 输出 success marker，Debian 从 `/dev/vda` 的 read-write ext4 进入
-`debian13#`、读取版本 `13.6` 并写入文件。Debian JIT 还验证了 `sync` 后跨进程持久化、
-日志恢复和 `RESET_DISK=1` 重置。
+`echo`，RustSBI 输出 success marker，当时的 Debian slim OCI 路径（现为
+`--from-oci`）从 `/dev/vda` 的 read-write ext4 进入 `debian13#`、读取版本
+`13.6` 并写入文件。Debian JIT 还验证了 `sync` 后跨进程持久化、日志恢复和
+`RESET_DISK=1` 重置。这些是 OCI 模式的历史验收事实，不应自动外推为新默认
+NoCloud 模式的验收结果。
 
 ## 已验证的 xv6 Demo
 
@@ -378,7 +393,7 @@ Valheim 的 xv6 README 演示实际加入于 2022-03-19。当时 xv6-riscv 默�
 
 不要随意把 `source/` 更新到 xv6 最新分支；现代 xv6 会因为 VirtIO version 2 检查而无法在当前 Valheim 上启动。
 
-## 已验证的 Debian 13 Linux Demo
+## Debian 13 Linux Demo
 
 从任意目录运行：
 
@@ -392,7 +407,16 @@ Valheim 的 xv6 README 演示实际加入于 2022-03-19。当时 xv6-riscv 默�
 ./demo/linux/run.sh
 ```
 
-脚本会固定并校验所有外部输入，复用 `target/demo` 下的两个 GNU 工具链，构建 RustSBI、Linux 和 Valheim，然后进入真实 Debian Bash：
+默认使用固定的 Debian 13 NoCloud riscv64 cloud image；要运行原有的精简
+Docker Official Image 回归口径，传入由 demo 脚本消费、不透传给 CLI 的
+`--from-oci`：
+
+```bash
+./demo/linux/run.sh --from-oci
+```
+
+脚本会固定并校验选中来源及其他所有外部输入，复用 `target/demo` 下的两个
+GNU 工具链，构建 RustSBI、Linux 和 Valheim，然后进入真实 Debian Bash：
 
 ```text
 Debian GNU/Linux 13 (trixie)
@@ -409,7 +433,27 @@ bash --version
 id
 ```
 
-2026-07-14 已实际验证交互输入输出：`/etc/debian_version` 为 `13.6`，Bash 为 `5.2.37(1)-release`，`coreutils` 为 `9.7-3`，glibc 为 `2.41-12+deb13u3`，`id` 显示 root；超过 80 字节的连续 UART 输出后仍能继续交互。第一次运行还要下载和构建，耗时更长。按宿主 `Ctrl-C` 退出。
+2026-07-14 已实际验证当时的 slim OCI 路径（现用 `--from-oci` 选择）的交互输入
+输出：`/etc/debian_version` 为 `13.6`，Bash 为 `5.2.37(1)-release`，`coreutils`
+为 `9.7-3`，glibc 为 `2.41-12+deb13u3`，`id` 显示 root；超过 80 字节的连续
+UART 输出后仍能继续交互。第一次运行还要下载和构建，耗时更长。按宿主
+`Ctrl-C` 退出。除非另有新的实际运行记录，不得把这些版本和交互结果改写为
+默认 NoCloud 路径的已验证结果。
+
+2026-07-15 在开发包扩展前，已实际用默认 NoCloud 路径和 release JIT 验证原始
+271-package 适配版：GPT/p1、固定 e2fsprogs 1.47.2、read-write ext4、基础工具、
+journal recovery 和 `sync` 后跨进程持久化均通过。
+
+同日又实际完成当前 development profile 的首次构建与 release JIT 验收：宿主
+chroot 从固定、签名校验的 Debian snapshots 安装 121 个新包、0 个升级；`dpkg --audit`
+为空，APT 模拟升级仍为 0，宿主 qemu chroot 和真实 Valheim guest 都成功用 GCC
+编译并运行最小 C 程序。最终 392 个 dpkg 条目全部为 `install ok installed`，排序后的
+`package/architecture/version` manifest SHA-256 为
+`051c1d9de5b0b1eb38442edcab296835363fcdbbe806f4335888de1e11d6672b`。
+guest 中 GCC target 为 `riscv64-linux-gnu`，Git 为 2.47.3，pip 为 25.1.1，且
+GCC/G++/make、Git、CMake/Ninja/Meson、Autotools、GDB/strace、jq/rsync 和 Python
+开发命令均已验证可执行；第二次启动复用 base/runtime 并在 journal recovery 后进入
+prompt。仍没有把 NoCloud naive 或性能数据写成已验证事实。
 
 2026-07-15 第一阶段在同一 release binary 与已构建 artifact 上，从宿主进程启动到真实行末
 `debian13# ` 各测三次：naive 中位数 69.603 s，JIT 中位数 13.447 s，加速 5.176×；设计与
@@ -417,12 +461,13 @@ id
 realtime 切换前的性能树：naive 中位数 60.926 s，JIT 中位数 4.806 s，
 加速 12.677×。`10cabc6`/`258fdf6` 后 realtime JIT 三次中位数为
 8.379352 s；realtime naive 单次验收为 133.996711 s（不是三次中位数）。
-这些历史数据都来自内建 initramfs，不能作为当前 ext4 block-root 的性能基线；旧时钟还会
+这些历史数据都来自内建 initramfs，不能作为任一 ext4 block-root 的性能基线；旧时钟还会
 快进 guest 等待，新旧绝对时间也不可直接对比。逐项交错 A/B、profile 和剩余方向见
 `JIT-PERF.md`。
 
-当前 ext4 direct-root 口径固定 CPU 16、显式 threshold 750、关闭 stats，并为每次启动复制
-base image 得到全新的可写副本。`ded32a0` 与第一轮终点 `746684b` 各三次交错结果的中位数
+既有 slim OCI ext4 direct-root 历史口径固定 CPU 16、显式 threshold 750、关闭
+stats，并为每次启动复制 base image 得到全新的可写副本。`ded32a0` 与第一轮
+终点 `746684b` 各三次交错结果的中位数
 分别为 3.957267 s 和 3.371372 s，第一轮累计缩短 14.806%（1.1738×）。这是本轮 VirtIO、PLIC 和
 JIT 第一轮优化的累计结果，不能归因给任一单独 commit。后续独立 A/B 中，共享 core
 translation cache 将 prompt 中位数从 2.481824 s 降至 2.215396 s（-10.735%），跳过非
@@ -431,41 +476,95 @@ translation cache 将 prompt 中位数从 2.481824 s 降至 2.215396 s（-10.735
 
 固定版本和来源：
 
-- userspace：Docker Official Image 的 `debian:13-slim` / `trixie-slim` riscv64 rootfs；脚本按不可变 OCI digest 从 Docker Hub 的 `library/debian` 下载。
+- 默认 userspace：Debian 官方 NoCloud riscv64 build `20260712-2537`，下载 URL 为
+  `https://cloud.debian.org/images/cloud/trixie/20260712-2537/debian-13-nocloud-riscv64-20260712-2537.tar.xz`，
+  SHA-512 为
+  `65f4c937175e6f096e697f671b8bbd745f1a6025f610343e1d00bfd4e0bbe475b27a8cc77c0f22f83499242d78be2070769c24da11ee4c73e37072eab8659783`。
+  同目录 package metadata
+  `debian-13-nocloud-riscv64-20260712-2537.json` 的 SHA-512 为
+  `023206bfb347bc1f2c1b64ae1d42f7c1ccc2b42fb48b7f2bdd2e8c7750d06bdee0ffc2248d5df054d40803aefc8abc2d5318098fee42202d41dbfe1eb6b28412`。
+  archive 内是带 GPT 的 sparse `disk.raw`；脚本从 p1 取出 root ext4，加入 Valheim
+  启动所需的 `/init` 和早期 console 节点，再把该分区作为无分区表的
+  `/dev/vda`。不要把整个 `disk.raw` 直接传给 Valheim。
+- NoCloud development packages：main/updates 固定为 Debian snapshot
+  `20260712T202631Z`，security 固定为 `20260712T194830Z`；只使用 `main`、保留
+  Debian archive keyring 签名校验，并为历史 snapshot 设置
+  `Check-Valid-Until: no`。显式顶层包列表和完整 392-package manifest 都属于 schema。
+- NoCloud chroot static qemu：Ubuntu amd64 package
+  `qemu-user-static_6.2+dfsg-2ubuntu6.31_amd64.deb`，SHA-256 为
+  `2d22939f98f2ee8b84c5cc53b01082a4a937cfc7b4a8aa432788b9eaf4a14a41`；提取出的
+  `qemu-riscv64-static` SHA-256 为
+  `ee063e5feaae2475b1eabe82ead98574c94fbbdbf6e0131379ea686ab6e3b437`。
+- 可选 userspace：`--from-oci` 使用 Docker Official Image 的 `debian:13-slim` /
+  `trixie-slim` riscv64 rootfs；脚本按不可变 OCI digest 从 Docker Hub 的
+  `library/debian` 下载。
 - OCI index：`sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd`。
 - OCI riscv64 manifest：`sha256:7244fbb388f7b59c9f584bb2bb7ef3a60b23aa1e55f1ad1d0641bd5ec12390f3`。
-- rootfs layer：`sha256:3ed37bd5491de4685b6418abd6b83c4b16cc06b7a51e46da7f154c5a149a41a5`，内容为 Debian `13.6`。
+- OCI rootfs layer：`sha256:3ed37bd5491de4685b6418abd6b83c4b16cc06b7a51e46da7f154c5a149a41a5`，
+  内容为 Debian `13.6`。
+- NoCloud host ext4 工具：e2fsprogs `1.47.2`，tarball URL 为
+  `https://cdn.kernel.org/pub/linux/kernel/people/tytso/e2fsprogs/v1.47.2/e2fsprogs-1.47.2.tar.xz`，
+  SHA-256 为 `08242e64ca0e8194d9c1caad49762b19209a06318199b63ce74ae4ef2d74e63c`。
 - kernel：upstream Linux `v5.17`，tarball SHA-256 `555fef61dddb591a83d62dd04e252792f9af4ba9ef14683f64840e46fa20b1b1`。
 - firmware：上文固定的 RustSBI-QEMU 2022-03 版本及 Valheim 适配 patch；
   SBI TIME `set_timer` 会首次建立并在后续重装 machine-timer→STIP 中继。
 
 Linux `v5.17` 是根据项目 2022-03 的 demo 时间选择的同年代内核，不应误写成 README 历史 openEuler 录屏的原始内核；历史录屏使用的是 Linux `5.5.19` 和 OpenSBI `0.6`。
 
-这不是手工伪造的 Debian rootfs。脚本原样下载并逐级校验官方 OCI index、riscv64 manifest
-和 rootfs layer，在同一个 `fakeroot` 会话中解包、加入最小 overlay 并调用
-`mke2fs -d`，从而保留层内 UID/GID、权限、符号链接、硬链接和设备节点。由于 `slim`
-容器层本来没有 init 系统且 `/dev` 为空，overlay 只增加启动必需的 `/init` 和
-`console/null/tty`；`/init` 确认 `/` 是 read-write ext4，挂载 `devtmpfs`、`proc`、
-`sysfs`、`tmpfs` 和 `devpts` 后执行 rootfs 自带的 `/bin/bash`。Debian 的 Bash、glibc、
-coreutils、dpkg 数据库和 `/etc/os-release` 全部来自官方层。
+两种模式都直接使用 Debian 官方 artifact，不是 BusyBox、手写
+`/etc/os-release` 或自制目录树。NoCloud p1 原本就是 Debian 构建的 ext4；脚本只把
+尚未晋升的临时 p1 副本挂入私有 mount namespace，用 qemu-riscv64 binfmt + chroot
+安装固定开发包，卸载后再以 `debugfs` 接入仓库 `/init` 和控制台节点，并用固定构建的
+e2fsprogs 1.47.2 验收其 `orphan_file` ext4 feature。下载 archive、最终 base 和
+runtime 不作为安装目标。OCI 模式则原样下载并逐级校验官方
+index、riscv64 manifest 和 rootfs layer，在同一个 `fakeroot` 会话中解包、加入
+最小 overlay 并调用 `mke2fs -d`，从而保留层内 UID/GID、权限、符号链接、
+硬链接和设备节点。`/init` 确认 `/` 是 read-write ext4，挂载 `devtmpfs`、
+`proc`、`sysfs`、`tmpfs` 和 `devpts` 后执行 rootfs 自带的 `/bin/bash`。
 
-脚本生成 256 MiB sparse raw ext4 只读 base，并复制为默认可写 runtime；kernel 不再内嵌
-rootfs，而是用 built-in VirtIO block/ext4 驱动直接挂载 `/dev/vda`。runtime 默认跨运行
-保留，`RESET_DISK=1` 才会从已校验 base 重置；base、runtime 与实际 disk inode 都有防误用
-校验或 nonblocking `flock`。guest `sync` 后写入已验证可跨进程和 journal recovery 保留。
-FDT 仍位于 guest DRAM `0x87f0_0000`，UART 继续作为 Linux 8250 console。
+NoCloud 官方输入有 271 个 dpkg package；固定 chroot profile 新增 121 个，最终为
+392 个。除 `procps`/`psmisc`、Nano/Vim、Python 3、`man`、压缩和文件系统工具外，
+默认还包含 build-essential、GCC/G++/make、Binutils、Git、CMake/Ninja/Meson、
+Autotools、Bison/Flex、GDB/strace/lsof、jq/rsync、Python headers/pip/venv 等基础
+开发环境。
+Valheim 未实现网卡，该 demo kernel 也关闭 `CONFIG_NET`；因此即使 NoCloud 中存在
+`curl`、wget、Git 和 apt，guest 也不能通过它们访问网络。APT 只在宿主首次构建
+NoCloud base 的 chroot 阶段使用；guest 中的 `apt update` 或联网安装仍不可用。
+
+两个来源拥有彼此独立的只读 base 和持久化可写 runtime；kernel 不再内嵌
+rootfs，而是用 built-in VirtIO block/ext4 驱动直接挂载选中 runtime 为
+`/dev/vda`。`RESET_DISK=1` 只会用选中来源的 base 重置它自己的 runtime；
+不会删除或覆盖另一来源的 guest 写入。base、runtime 与实际 disk inode 都有
+防误用校验或 nonblocking `flock`。脚本仅为引入 NoCloud 时那次来源中性 banner
+变更接受旧 OCI `/init` schema，以便原有 `runtime/rootfs.ext4` 不丢失；未来
+`/init` 再变化不会自动套用这个兼容例外。开发包扩展把 NoCloud schema 升为 v2；
+旧 NoCloud runtime 不会被静默覆盖，必须先备份再显式 `RESET_DISK=1`。重置只复制
+已验证 base，不会重复联网安装。guest `sync` 后写入已在 OCI 历史路径验证可跨
+进程和 journal recovery 保留。FDT 仍位于 guest DRAM `0x87f0_0000`，UART 继续作为
+Linux 8250 console。
 
 常用覆盖变量：
 
 - `JOBS`：并行构建任务数。
-- `RESET_DISK=1`：从只读 base 重建默认可写 ext4 runtime；默认复用现有 guest 写入。
+- `--from-oci`：使用原 slim OCI 路径；该参数由 `run.sh` 消费，不是
+  `valheim-cli` 参数。
+- `RESET_DISK=1`：从当前选中来源的只读 base 重建它自己的默认可写
+  ext4 runtime；默认复用该来源现有的 guest 写入。
 - `VALHEIM_RUST_TOOLCHAIN`：默认 `nightly-2024-09-05`。
 - `VALHEIM_LINUX_TOOLCHAIN`：默认 `target/demo/gcc-riscv64-glibc-2022.03.09`。
 - `VALHEIM_RISCV_TOOLCHAIN`：RustSBI 使用的 bare-metal GNU 工具链，默认 `target/demo/gcc-riscv64-elf-2022.03.09`。
 
-生成物放在 `target/demo/linux/`：OCI metadata、rootfs layer 和 Linux tarball 在
-`downloads/`，Linux 源码在 `source/`，只读 ext4 base 与 kernel 输出在 `build/`，
-可写 `rootfs.ext4` 在 `runtime/`。不要用 `cargo clean` 删除它们。
+生成物放在 `target/demo/linux/`：NoCloud archive、OCI metadata/rootfs layer、
+e2fsprogs 1.47.2 和 Linux tarball 在 `downloads/`，Linux 源码在 `source/`，NoCloud 专用
+e2fsprogs 源码/build 缓存分别在 `host-tools/e2fsprogs-1.47.2-source` 和
+`host-tools/e2fsprogs-1.47.2-build`，static qemu 缓存在
+`host-tools/qemu-user-static-6.2+dfsg-2ubuntu6.31`，NoCloud/OCI 只读 ext4 base 与
+kernel 输出在 `build/`；base 分别为 `build/debian-13-nocloud-riscv64.ext4`
+和 `build/debian-13-slim-riscv64.ext4`，两个来源的可写 runtime 分别为
+`runtime/nocloud-rootfs.ext4` 和保留旧路径的 OCI `runtime/rootfs.ext4`。archive 内的
+整个 sparse
+`disk.raw` 只是 p1 抽取的输入，不作为第三份可写 runtime 保留。不要用
+`cargo clean` 删除这些缓存。
 
 ## 已验证的 RustSBI Demo
 
@@ -553,13 +652,34 @@ openEuler 演示没有固定的 BIOS、kernel、rootfs、下载脚本或版本 h
   `VIRTIO_F_RING_INDIRECT_DESC`，接受 direct 以及协商后的 indirect descriptor chain；仍必须
   选择明确支持 legacy VirtIO-MMIO v1 的 guest 驱动，不能只根据 guest 的发布年份判断。
 - RustSBI 历史 test kernel 的 success marker 来自明确记录的单 hart patch；不要声称未修改的上游多 hart HSM 测试在 Valheim 上完整通过。
-- Debian 13 demo 的 rootfs 必须继续来自已固定并校验的官方 OCI artifact；不要用 BusyBox、手写 `/etc/os-release` 或自制目录树冒充 Debian。
-- Linux ext4 base 必须在同一个 `fakeroot` 会话中解包 OCI layer、创建 overlay/device node
-  并执行 `mke2fs -d`，否则 `root:shadow` 等属主信息会被宿主 UID 污染。修改 schema、feature
-  或 `/init` 时必须保留只读 fsck/debugfs 元数据验收。
-- Linux demo 默认 runtime 是持久化可写磁盘；guest `sync` 前用宿主 `Ctrl-C` 退出等价于
+- Debian 13 demo 的 rootfs 必须继续来自已固定并校验的 Debian 官方
+  NoCloud 或 OCI artifact；不要用 BusyBox、手写 `/etc/os-release` 或自制目录树
+  冒充 Debian。NoCloud 默认路径必须校验固定 archive 的 SHA-512、GPT 布局和
+  p1 ext4 边界；不得把未校验的整个 `disk.raw` 当成 `/dev/vda`。
+- OCI Linux ext4 base 必须在同一个 `fakeroot` 会话中解包 layer、创建
+  overlay/device node 并执行 `mke2fs -d`，否则 `root:shadow` 等属主信息会被
+  宿主 UID 污染。NoCloud base 应从官方 `disk.raw` 的 p1 提取；开发包安装只能
+  mount 尚未晋升的临时 p1 副本，必须在私有 mount namespace 中使用固定 static
+  qemu、唯一的临时 F-flag riscv64 binfmt、固定且签名校验的 Debian snapshot 和
+  chroot；不得复用、禁用或改写宿主已有的 binfmt entry，退出时也只能删除本次创建的 entry。
+  必须用 `policy-rc.d` 阻止 service 启动，保留原 `resolv.conf`/APT sources，并在成功、
+  失败和信号退出时撤销本次 binfmt、逆序卸载所有 bind/proc/tmpfs/root mount；不得
+  mount 或修改下载 archive、最终 base 或 runtime。卸载后才以 `debugfs` 接入 `/init`
+  和必需设备节点。NoCloud 的 `orphan_file`/
+  `FEATURE_C12` 必须用脚本固定构建的 e2fsprogs 1.47.2 验收，不得因宿主
+  1.46.5 报 unsupported 而跳过 fsck，也不得对 NoCloud base 禁用官方 ext4 feature；
+  固定 e2fsprogs 不能弥补宿主内核缺少该 ext4 feature 支持。
+  开发包顶层列表、snapshot、qemu/helper hash、392-package count 和完整
+  package/architecture/version manifest 都必须纳入 schema 或只读验收。修改任一来源的
+  schema、feature 或 `/init` 时必须保留对应版本的只读 fsck/debugfs 元数据验收。
+- Linux demo 的 NoCloud 和 OCI runtime 是互相独立的持久化可写磁盘；
+  `RESET_DISK=1` 只能重置当前选中来源。guest `sync` 前用宿主 `Ctrl-C` 退出等价于
   突然断电。不要在 Valheim 仍持有 mmap 时对 runtime 运行 e2fsprogs。`run.sh` 的 `flock`
   是 advisory；直接调用 `valheim-cli --disk` 会绕过它，调用者必须避免并发打开同一镜像。
+  两个来源仍共享下载、toolchain/source、kernel、RustSBI 和 Cargo 构建产物；这些阶段
+  必须继续由 `target/demo/linux/prepare.lock` 串行保护。该全局锁只在准备/构建阶段持有，
+  特权 chroot/base 晋升也必须位于该锁内，并在进入 Valheim 前确认没有本次 binfmt 或
+  mount 残留后释放；来源 runtime lock 与实际 disk inode lock 则跨 `exec` 持有。
 - PLIC 会在 priority/enable/threshold/claim/complete 和 source level 变化后重算各 context
   的 claim；CPU 每轮 interrupt poll 再按 S-context claimability 重建 SEIP。VirtIO IRQ 1
   使用真正的 level input，ACK 后才 deassert。UART 仍通过 one-shot pulse 接口注入；CPU 只在
@@ -635,8 +755,14 @@ cat /etc/debian_version
 
 修改 VirtIO、PLIC、DMA、磁盘 mmap 或 Linux ext4 demo 时，Linux 还必须确认启动日志识别
 `vda`、`/proc/mounts` 中 `/dev/root` 为 `ext4` 且含 `rw`，guest 写文件后执行 `sync`，
-重启仍能读取该文件；随后用 `RESET_DISK=1` 启动并确认文件消失。还应检查
+重启仍能读取该文件；随后用与该来源匹配的 `RESET_DISK=1` 命令启动并确认
+文件消失。修改 rootfs 来源选择、base/runtime 生成、schema 或重置逻辑时，必须分别
+验收默认 NoCloud 与 `--from-oci`，确认两个 runtime 的写入和重置互不影响。还应检查
 `/proc/interrupts` 的 `virtio0` 计数增长，并验证第二个并发 `run.sh` 不能打开同一 runtime。
+修改 NoCloud package/chroot 路径时，还必须从 base cache miss 开始验证固定 snapshot
+安装、`dpkg --audit` 为空、392 个 installed package 和 manifest hash；宿主 qemu chroot
+及真实 Valheim guest 都要用 GCC 编译并运行最小 C 程序，且退出后不得残留 Valheim
+binfmt entry、loop mount 或 chroot bind mount。`--from-oci` 不应触发 sudo/chroot。
 
 修改 CLINT、TIME CSR、WFI 或 RustSBI timer relay 时，Debian 还必须确认启动日志包含
 `SBI TIME extension detected` 和 10 MHz `sched_clock`，`time sleep 1` 约为一秒、

@@ -36,7 +36,7 @@ if [ "${root_fstype}" != ext4 ] || [ "${root_is_rw}" != 1 ]; then
 fi
 
 echo
-echo "Debian 13 (trixie) official slim rootfs on Valheim"
+echo "Debian 13 (trixie) official rootfs on Valheim"
 echo "Root filesystem: ${root_source} mounted read-write as ext4"
 cat /etc/os-release
 uname -a
