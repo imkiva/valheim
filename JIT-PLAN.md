@@ -9,14 +9,16 @@
 dispatcher 和编译期开销优化。superblock、direct machine-code chaining 等仍不是第一阶段
 完成条件；最新数据和后续方向见 [`JIT-PERF.md`](JIT-PERF.md)：
 
-- `valheim-core` 提供共享 `translate_to_host()`、显式执行 budget、批量 CLINT 推进及
-  SATP/SFENCE.VMA/FENCE.I epoch。跨页 32-bit 取指会分别以 Fetch 权限翻译两个
+- `valheim-core` 提供共享 `translate_to_host()`、显式执行 budget、host-monotonic 10 MHz
+  CLINT（可注入 `ClockSource` 供测试）及 SATP/SFENCE.VMA/FENCE.I epoch。跨页
+  32-bit 取指会分别以 Fetch 权限翻译两个
   16-bit parcel；页表隐式访问与最终 endpoint fault 都保留原访问类型和 guest VA。
 - `valheim-jit` 提供 decoded TB、negative cache、Cranelift RV64I/M、A helper、SSA GPR、
   software TLB、DRAM direct access、精确 exception/MMIO side exit，以及有界 code arena。
 - JIT 可在一个 Machine budget 内连续执行多个已编译 TB，并用 generation-guarded successor
   cache 连接常见边；decoded/fallback、atomic、system、WFI、budget 或 side exit 会结束 batch。
-  MMIO 若位于 native 前缀之后，会先返回 dispatcher，并在下一次 tick/IRQ 边界精确执行。
+  MMIO 若位于 native 前缀之后，会先返回 dispatcher，并在下一次
+  dispatcher/IRQ 轮询边界精确执行。
 - 每个 Cranelift module 最多 4096 个函数；旧 module 只在其函数指针仍被 TB cache 引用时
   保留。所有存活 module 的机器码总量达到默认 128 MiB 上限后，在下一个
   dispatcher 安全点清 cache 并释放全部 module。
@@ -29,7 +31,7 @@ dispatcher 和编译期开销优化。superblock、direct machine-code chaining 
 
 | 项目 | naive | JIT |
 | --- | --- | --- |
-| workspace / trace / 差分单元测试 | workspace 114/114、core trace 54/54 | 34 个 JIT unit + 8 个 differential + 4 个 memory fast-path tests；release 配置同样通过 |
+| workspace / trace / 差分单元测试 | workspace 合计 137/137（含右列 48 项 JIT tests）、core trace 75/75 | 34 个 JIT unit + 10 个 differential + 4 个 memory fast-path tests；release 配置同样通过 |
 | `riscv-tests` | 96/96 | 96/96；xtask 使用 hot threshold 1 以覆盖热编译路径 |
 | xv6 | 进入 `$` 并执行 `echo` | 进入 `$` 并执行 `echo` |
 | RustSBI | success marker | success marker |
@@ -51,7 +53,9 @@ compiled TB、1.604 s 累计编译时间（平均 287.2 µs，p50 187.1 µs，p9
 code、383,368,809 次 TLB hit 和 4,322,837 次
 miss（98.885% hit rate）、2999 次 memory slow path、20 次 memory fault，且 compile failure
 为 0。第一阶段默认统一 hot threshold 为 500；第二轮完整 Debian A/B 将当前默认调为 750，
-早期 3/16/2 启发式没有保留。当前约 4.8 s 的 checkpoint 和逐项数据见 `JIT-PERF.md`。
+早期 3/16/2 启发式没有保留。约 4.8 s 是切换 realtime 前的历史 checkpoint；
+`10cabc6` 之后 guest 等待不再快进，新口径与旧绝对时间不可直接对比，详见
+`JIT-PERF.md`。
 
 ## 目标与已确定的范围
 
@@ -175,35 +179,39 @@ pub trait RV64Executor {
 - `JitExecutor` 的 decoded/fallback 路径每次最多执行一个 TB；native 路径可在同一 budget 内
   连续执行多个满足精确 side-exit 约束的 compiled TB。
 - native code 不直接进入 RISC-V trap；异常由 `Machine` 继续调用 `Exception::handle`。
-- `attempted` 包含 faulting instruction，因为当前模型在尝试该指令之前已经产生一次 CLINT tick。
+- `attempted` 包含 faulting instruction，用于 budget 与精确提交计数；它不推进
+  `mtime`。
 - 若 JIT 执行了一个可编译前缀，并在下一条 unsupported instruction 前退出，本轮只报告前缀；
-  下一次调度重新经过 tick 和中断检查后再执行 fallback。
+  下一次调度重新经过实时中断检查后再执行 fallback。
 
-建议给 CLINT 增加批量推进和 deadline 查询：
+当前 CLINT 的计数与 deadline 接口是：
 
 ```rust
-fn advance(&mut self, csrs: &mut CSRRegs, ticks: u64);
-fn ticks_until_timer(&self) -> Option<u64>;
+pub trait ClockSource: Send + Sync {
+  fn now(&self) -> Duration;
+}
+
+impl Clint {
+  pub fn mtime(&self) -> u64;
+  pub fn duration_until_timer(&self) -> Option<Duration>;
+}
 ```
 
 Machine 调度顺序：
 
-1. 在 TB 前执行一次 `tick(1)`。
-2. 检查并处理 pending interrupt。
-3. 根据 executor ceiling 和距离 `mtimecmp` 的 tick 数计算 budget。
-4. 执行 TB，得到 `attempted = N`。
-5. 若 `N > 1`，执行 `advance(N - 1)`。
-6. 统一处理同步异常或进入下一次调度。
+1. 从 realtime CLINT 重新派生 level-triggered MSIP/MTIP，检查并处理 pending
+   interrupt。
+2. 使用固定 executor ceiling（当前 1024 条 guest 指令）作为 budget。
+3. 执行 decoded/native TB，得到 `attempted = N` 和结果。
+4. 统一处理同步异常或进入下一次 dispatcher。
 
-当当前 `mtime < mtimecmp` 时，budget 不得大于 `mtimecmp - mtime`，保证触发 timer interrupt
-的那次 tick 仍发生在下一条 guest 指令之前。
-
-外部设备中断在 Machine/executor batch 边界观察。初始 ceiling 为 32，第二轮 A/B 将其调为
-1024；未来 timer deadline 仍会精确缩短 budget，1024 上限则约束 UART/VirtIO 等异步设备的
-最坏轮询延迟。WFI 必须立即结束 TB；已经处于 WFI 状态时执行器返回 `attempted = 0`，外层
-若有本地启用的未来 timer 则继续快进到 deadline，否则完整运行入口在共享 WakeHub 上阻塞，
-由 UART 等异步设备通知后再轮询。`run_next()` 仍保持非阻塞；CLINT 也仍沿用现有
-dispatcher/attempted-instruction tick 模型，本阶段没有把 guest 时间改成宿主实时时钟。
+realtime timer delta 不是指令数，因此不缩短 TB budget。timer 若在 active native
+batch 中到期，会在下一个 dispatcher 边界观察；1024 上限同时约束 timer
+和 UART/VirtIO 等异步事件的最坏指令延迟。WFI 必须立即结束 TB；已经
+处于 WFI 时执行器返回 `attempted = 0`。完整运行入口以 WakeHub generation
+防止 lost wake：本地启用的未来 timer 使用绝对宿主 deadline timed wait，UART
+通知可提前结束宿主等待并回到 dispatcher；已到期 timer 不等待。`run_next()` 仍保持非阻塞。production
+不存在 instruction-clock/turbo mode，`ClockSource` 注入仅用于测试。
 
 ## GuestBlock 构建
 
@@ -549,7 +557,7 @@ native block 只返回整数 exit code 和 `JitFrame` 数据；Rust runtime 负�
 
 fallback 规则：
 
-- unsupported 位于 TB 起点：同一调度 tick 内 naive 单步一次。
+- unsupported 位于 TB 起点：同一 executor dispatch 内 naive 单步一次。
 - unsupported 位于已执行前缀之后：先返回 dispatcher，下一次调度再单步。
 - MMIO instruction 未执行前退出，下一次由 slow path 执行，避免设备 side effect 重复。
 - CSR/特权指令 fallback 成功后，JIT runtime 检查可能影响 cache key、TLB 或 privilege 的状态。
@@ -605,7 +613,9 @@ CLI 增加：
 
 - 引入 `RV64Executor`、`ExecOutcome` 和 budget。
 - 将 `Machine` 改为注入执行器。
-- 增加 CLINT `advance/ticks_until_timer`。
+- 阶段 1 当时增加了 CLINT `advance/ticks_until_timer`；`10cabc6` 后已由
+  host-monotonic `ClockSource`/`mtime`/`duration_until_timer` 取代，`attempted`
+  不再推进时间。
 - 合并普通运行和 test 运行中重复的调度语义。
 - Naive 模式仍严格逐指令运行。
 
@@ -696,7 +706,9 @@ F/D、精确 JIT trace 和其他 host 后端不属于该阶段的默认范围。
 - 页边界、misalignment、Sv39 权限和 PTE A/D；跨页 32-bit 取指分别翻译两个 parcel，
   compressed 指令不访问下一页，PTE/endpoint access fault 保留故障 guest VA。
 - SATP、SFENCE.VMA、FENCE.I 和 privilege change 后的 cache/TLB 失效。
-- timer deadline 不被 TB 跨过，WFI 能被中断唤醒。
+- 10 MHz realtime `mtime`、MMIO 写入重设 guest/host anchor、live read-only `rdtime`、
+  timer 不缩短 TB budget，以及
+  WFI 不早于宿主 deadline 恢复 guest、deadline 后重查 MTIP，UART 可提前结束 host wait。
 - helper panic 不得穿过 native frame。
 
 ### 项目级验证
@@ -750,7 +762,7 @@ JIT 与 naive 两种 engine 都要覆盖适用的测试。验收必须进入 xv6
 | Cranelift 编译大量冷启动代码，启动反而变慢 | decoded tier、hot threshold、记录编译时间 |
 | 所有访存走 helper，ALU 加速被 MMU 开销吞没 | 尽早实现 software TLB 和 DRAM fast path |
 | fault PC 或寄存器提交顺序错误 | 单一 JitFrame、统一 side exit、naive 差分 |
-| TB 跨过 timer deadline | Machine 根据 `mtimecmp` 限制 budget |
+| realtime timer 在 native batch 中到期 | 每个 dispatcher 从 CLINT level 重新派生 MTIP；固定 1024 ceiling 约束 active 投递延迟，WFI timeout 后重查 MTIP，不会在 deadline 前恢复 guest |
 | 外部 IRQ 延迟过大 | 以 executor ceiling 限制 native batch，不做 direct tail chaining，按 demo 测量延迟 |
 | 页表或指令缓存失效后执行陈旧代码 | SATP/SFENCE.VMA/FENCE.I epoch 和 conservative flush |
 | Rust layout 变化破坏 native code | 只访问 `repr(C)` frame，不硬编码 RV64Cpu offset |

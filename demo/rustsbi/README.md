@@ -62,7 +62,7 @@ sudo apt-get install -y device-tree-compiler
 1. 下载并校验固定的 RISC-V GNU toolchain。
 2. 用 minimal profile 安装缺失的两个 Rust nightly，并为旧 nightly 安装 guest
    target。
-3. clone 固定 RustSBI-QEMU commit，应用两个兼容 patch。
+3. clone 固定 RustSBI-QEMU commit，应用三个兼容 patch。
 4. 构建 RustSBI、test kernel 和 Valheim，必要时启动并校验 test kernel。
 
 所有下载、源码、缓存和产物都在 Git 忽略的 `target/demo/`：
@@ -101,6 +101,13 @@ hart 1–4。
 `a1=0`。`valheim-dtb-pointer.patch` 把 supervisor 入口的 DTB 地址显式设为
 `0x87f00000`。这个常量必须与 Valheim `Machine` 中的 `RV64_DTB_ADDR` 保持一致；
 这是 Valheim 启动布局兼容措施，不代表已确认的上游通用 bug。
+
+`valheim-time-relay.patch` 修复该历史 firmware 的 supervisor timer 中继首次建立和
+后续重装。MachineTimer trap 会设置 STIP 并关闭 MTIE；每次 SBI TIME `set_timer`
+必须按“屏蔽 MTIE → 写新 `mtimecmp` → 清旧 STIP → 重开 MTIE”的顺序装载。
+未打 patch 时，当前初始化路径不会打开 MTIE，Linux 无法可靠获得该中继。这一路径由
+Linux `sleep` 和 `/proc/interrupts` 验收；历史 test kernel 本身不调用 timer 扩展，
+不能单独证明 relay 正常。
 
 不要改用旧仓库的 `cargo make`。它会向 GNU objcopy 传入仅适用于
 `rust-objcopy` 的 `--binary-architecture=riscv64`，Binutils 2.37 会拒绝该参数。

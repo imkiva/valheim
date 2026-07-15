@@ -4,32 +4,45 @@
 启动数据，以及下一轮仍值得评估的方向。JIT 的总体架构、语义约束和第一阶段验收见
 [`JIT-PLAN.md`](JIT-PLAN.md)。
 
-启动性能优化实现到 `0265308`；之后的 WFI 语义与宿主空闲修复实现到 `9348812`。下面
+启动性能优化实现到 `0265308`；之后的 WFI 空闲修复实现到 `9348812`、
+按目标特权投递中断实现于 `a0038d8`、realtime CLINT/TIME 实现于 `10cabc6`，
+历史 RustSBI 的 timer relay 适配实现于 `258fdf6`。下面
 “尚可评估的优化”均未实现，也不代表已经验证会更快。每个已落地优化都先独立验证、再单独
 提交；没有收益的实验已经完整回滚。
 
 ## 范围与当前结论
 
 - host 明确只支持 Linux x86_64 System V ABI。
-- guest、Linux kernel、RustSBI、Debian rootfs 和未压缩内建 initramfs 均保持不变；本轮性能
-  改动只发生在 Valheim。
+- 截止 `0265308` 的性能 A/B 保持 guest、Linux kernel、RustSBI、Debian rootfs
+  和未压缩内建 initramfs 不变。realtime 验收为兼容旧 RustSBI 新增 timer relay
+  patch；它是时钟正确性适配，不混入旧性能改动的归因。
 - 性能主指标仍是宿主进程启动到真实行末 `debian13# ` prompt，包含 JIT 编译时间。
 - 初始 JIT 的历史中位数为 13.447 s；上一轮 `b7bc41a` 工作树为 7.014 s。
-- 当前 `0265308` 在固定 CPU 16 上三次为 4.814 / 4.757 / 4.806 s，中位数 4.806 s。
+- realtime 切换前的 `0265308` 在固定 CPU 16 上三次为
+  4.814 / 4.757 / 4.806 s，中位数 4.806 s。
   这个绝对 checkpoint 与早期未绑核数据的调度条件不同；单项收益应引用下面的交错 A/B，
   不应直接用两个绝对 checkpoint 的差值归因。
-- 相同固定 CPU 的 naive 中位数为 60.926 s，因此当前总体对照为 12.677×，启动时间减少
-  92.1%；它不是逐项归因依据。旧的 69.603 / 13.447 s 数据继续作为第一阶段历史基线保留。
+- 相同历史口径的 naive 中位数为 60.926 s，对照为 12.677×，启动时间
+  减少 92.1%。旧的 69.603 / 13.447 s 数据继续作为第一阶段历史基线保留。
+  这些数据都基于 instruction-driven/fast-forward clock，不能与 realtime 树的
+  绝对时间直接比较。
+- `10cabc6` + `258fdf6` 后，固定 CPU 16 的 realtime JIT 三次为
+  8.903906 / 8.379352 / 8.321334 s，中位数 8.379352 s。新语义不再将 guest
+  等待快进，所以这是新基线，不是 JIT 热路径退化的独立 A/B。
+- 同口径 realtime naive 额外做了一次完整验收，为 133.996711 s。该单次值
+  不是三次中位数，不用它声称新的正式加速比。
 - Debian JIT prompt 后的 WFI 忙轮询已经修复：修复前稳定占用一个 host core；实测两个
   约 5 秒窗口均为 0 个 user/system tick，同时 UART 唤醒和超过 80 字节的连续输入输出通过。
 
-当前运行时代码终点是 `9348812`；其后单独提交本文档，不混入代码改动。
+当前运行时/固件代码终点是 `258fdf6`；其后单独提交本文档，不混入代码改动。
 
 ## 测量口径
 
 测量环境与 `JIT-PLAN.md` 相同：Linux 6.6.87.2 WSL2、AMD Ryzen 9 9950X3D、
-32 logical CPUs、固定的 Debian demo artifacts，以及同一 release 构建。外部计时从进程
-启动开始，到检测到真实行末 prompt 为止；因此镜像加载和全部运行期 JIT 编译成本都被计入。
+32 logical CPUs，kernel/rootfs artifacts 固定。realtime 前后使用表中各自标明的
+release binary，realtime firmware 另含 timer relay patch；只有每项独立 A/B 才保证
+除被测改动外的条件相同。外部计时从进程启动开始，到检测到真实行末 prompt 为止；
+因此镜像加载和全部运行期 JIT 编译成本都被计入。
 
 计时运行默认关闭 `--jit-stats`，避免统计本身改变热路径。早期累计 checkpoint 如下：
 
@@ -45,15 +58,19 @@
 | MSTATUS translation mask | 中位数 6.922 s |
 | SATP/SFENCE 拆分 | 中位数 6.949 s |
 | 完成 WFI/CLINT 后的 `b7bc41a` | 7.086 / 6.987 / 7.014 s；中位数 7.014 s |
-| 当前 naive，固定 CPU 16 | 66.382 / 60.926 / 60.849 s；中位数 60.926 s |
-| 当前 `0265308`，固定 CPU 16 | 4.814 / 4.757 / 4.806 s；中位数 4.806 s |
+| realtime 前 naive，固定 CPU 16 | 66.382 / 60.926 / 60.849 s；中位数 60.926 s |
+| realtime 前 `0265308`，固定 CPU 16 | 4.814 / 4.757 / 4.806 s；中位数 4.806 s |
+| realtime JIT，`258fdf6`，固定 CPU 16 | 8.903906 / 8.379352 / 8.321334 s；中位数 8.379352 s |
+| realtime naive，`258fdf6`，固定 CPU 16 | 单次验收 133.996711 s；非正式中位数 |
 
 这些 checkpoint 在开发工作树上累计测得，之后才按职责拆成独立 Git commit；因此 Git 拓扑
 顺序与测量顺序并不一一对应，不能用相邻行之差宣称单个 commit 的独立收益。可以单独引用的
-A/B 结果是 compiled front cache；SATP/SFENCE 和 CLINT 对 Debian prompt 基本中性。
+A/B 结果是 compiled front cache；SATP/SFENCE 和当时的 instruction-clock CLINT
+fast-forward 对 Debian prompt 基本中性。
 
-CLINT 的确定性收益不体现在这个 prompt 指标中：它把 hart 的长 WFI timer idle wait 从
-O(`mtimecmp - mtime`) 次空转降为 O(1) 次 deadline 跳转。
+`254db75` 当时把 instruction-clock 下的长 WFI timer idle wait 从
+O(`mtimecmp - mtime`) 次空转降为 O(1) 次 deadline 跳转。该模型已被
+`10cabc6` supersede：当前不跳变 `mtime`，而是阻塞到宿主 realtime deadline。
 
 prompt 空闲问题使用单独口径诊断。修复前 `perf stat` 的 3 秒窗口为 3001.15 ms task-clock，
 即稳定使用 1.000 个 host CPU；JIT stats 中 dispatch 从 2000 万增长到 10.2 亿时 guest
@@ -62,14 +79,20 @@ instruction/native execution 完全不变，证明是 WFI dispatcher 空转。`9
 `echo`、Debian 版本查询和 114 字节 UART 命令/输出均成功返回 prompt。WSL 对应 perf 前端在
 最终复测时缺少当前 kernel tools，因此最终 0-tick 结果没有伪装成 perf 数据。
 
-本轮新增优化使用相同 Debian artifacts、固定 CPU 16、关闭 stats，并交错运行旧/新二进制。
+realtime 树上重新验收 prompt 空闲：JIT 的 `pidstat -p PID 1 3` 三个窗口均为
+0.00% CPU；naive 的 10 个 1 秒窗口中 8 个为 0%、2 个为 1%，平均 0.20%。
+Debian `time sleep 1` 分别为 JIT 1.100 s、naive 1.144 s，`riscv-timer` IRQ 计数
+前后都持续增长。这证明 timed WFI 同时保留了实时 timer 转发和宿主空闲。
+
+realtime 切换前的本轮新增优化使用相同 Debian artifacts、固定 CPU 16、关闭 stats，
+并交错运行旧/新二进制。
 各行是各自独立实验，基线取样时间不同，因此不能把相邻行相减，也不能把所有倍数直接相乘：
 
 | 独立优化 | 旧版中位数 | 新版中位数 | 独立结果 |
 | --- | ---: | ---: | ---: |
 | executor budget 32 → 1024 | 7.042948 s | 6.263692 s | 1.124408×；时间 -11.064% |
 | generation-guarded successor cache | 6.321652 s | 5.789340 s | 1.091947×；时间 -8.420% |
-| native exit fast path | 5.782143 s | 5.307218 s | 1.089486×；时间 -8.214% |
+| native exit fast path | 5.782143 s | 5.307218 s | 1.089487×；时间 -8.214% |
 | batch 内复用 `JitFrame` | 5.117076 s | 5.018599 s | 1.019622×；时间 -1.924% |
 | 默认 hot threshold 500 → 750 | 5.103571 s | 4.904941 s | 1.040496×；时间 -3.892% |
 | release 关闭 Cranelift IR verifier | 4.928789 s | 4.541883 s | 1.085186×；时间 -7.850% |
@@ -79,7 +102,8 @@ instruction/native execution 完全不变，证明是 WFI dispatcher 空转。`9
 不是 guest 安全边界，但 malformed IR 在 release 可能更晚暴露为 panic 或错误机器码；因此
 debug verifier、release verifier-off tests、ISA tests 和 demo 是不可省略的回归门禁。
 
-当前 stats-on 快照记录 4496 个 compiled TB、1.813 s 累计编译时间、4.11 MB 生成代码、
+realtime 切换前的 stats-on 快照记录 4496 个 compiled TB、1.813 s 累计编译时间、
+4.11 MB 生成代码、
 277,803,697 次 native TB 执行、273,461,839 次 successor hit 和 3,305,991 次 miss，且
 compile failure 为 0。TLB 为 384,604,333 hit / 552,731 miss（约 99.86% hit）；统计开启会
 显著改变运行时间，这些数值只用于热点排序，不能与 stats-off 的 4.806 s 直接比较。
@@ -87,7 +111,8 @@ compile failure 为 0。TLB 为 384,604,333 hit / 552,731 miss（约 99.86% hit�
 ## 已完成并独立提交的优化
 
 `b432c42..0265308` 的启动性能代码包含以下十六个独立提交；中间的 `d980f5e` 仅是上一版
-性能文档，不属于代码优化。随后两个提交修复 WFI 正确性和 prompt 空闲 CPU。
+性能文档，不属于代码优化。随后五个代码提交修复 WFI/中断正确性、prompt
+空闲 CPU、realtime 时钟和历史固件中继。
 
 ### Core、设备与失效语义
 
@@ -163,8 +188,11 @@ compile failure 为 0。TLB 为 384,604,333 hit / 552,731 miss（约 99.86% hit�
 11. `b1b1b15 perf(core): amortize executor dispatch overhead`
 
     Machine 的 executor ceiling 从 32 提高到 1024，减少 Machine/JIT dispatcher、CLINT 和
-    pending-interrupt 检查次数。未来 timer deadline 仍会精确缩短 budget；上限继续约束 UART、
-    VirtIO 等异步设备的最坏轮询延迟。
+    pending-interrupt 检查次数。在该提交当时，未来 timer deadline 仍会精确缩短
+    budget；上限继续约束 UART、
+    VirtIO 等异步设备的最坏轮询延迟。这是该历史提交当时的模型；
+    `10cabc6` 后 active execution 始终使用 1024 budget，realtime deadline 不对应
+    instruction budget。
 
 12. `d1d0a6f perf(jit): cache native block successors`
 
@@ -204,6 +232,7 @@ compile failure 为 0。TLB 为 384,604,333 hit / 552,731 miss（约 99.86% hit�
     locally-enabled pending interrupt 现在可以在全局 xIE 关闭时退出 WFI，但只有现有 global
     eligibility 检查通过时才进入 trap。wake-only 不清 MIP，individual enable 关闭也不会唤醒；
     Machine 和真实 JIT timer 用例同时覆盖 global-on trap 与 global-off wake-only。
+    `a0038d8` 后 global eligibility 不再按“当前 mode 的一个 xIE”统一判断。
 
 18. `9348812 perf(core): block host thread during WFI idle`
 
@@ -211,7 +240,30 @@ compile failure 为 0。TLB 为 384,604,333 hit / 552,731 miss（约 99.86% hit�
     `run_for_test` 在 WFI 没有本地启用的未来 timer 时按“snapshot → poll → recheck → wait”
     阻塞；UART 输入先发布 RX/IRQ 状态、释放 UART mutex，再通知 WakeHub，避免 lost wake 和
     锁序反转。公开的 `run_next()` 保持非阻塞，已有未来 timer 继续立即快进，因此本提交没有
-    引入实时时钟语义。
+    引入实时时钟语义。其 future-timer fast-forward 部分已被 `10cabc6`
+    的 timed wait 取代。
+
+19. `a0038d8 fix(cpu): honor interrupt target privilege`
+
+    pending interrupt 现在逐候选结合 `MIDELEG` 判断目标特权。S-mode 即使
+    `SIE=0` 也会立即进入更高特权的 MTI；delegated STI 仍受 SIE 约束，
+    且不能反向中断 M-mode。WFI 唤醒仍与 global enable/delegation 解耦。
+
+20. `10cabc6 fix(core): drive CLINT from host monotonic time`
+
+    production `mtime` 的初始 guest anchor 为 0，之后按
+    `guest_anchor + host monotonic elapsed × 10 MHz` 推进；MMIO 写 `mtime` 会同时重设
+    guest/host anchor，随后继续实时推进。`TIME` 是同一计数器的 live read-only 视图，
+    DTB 从同一常量生成 frequency。active execution 始终使用 1024 budget，timer delta
+    不再映射为指令数；WFI 以 absolute `Instant` deadline + WakeHub generation 等待，
+    UART 可提前打断。`ManualClock` 只是测试注入，不是 production deterministic/turbo mode。
+
+21. `258fdf6 fix(demo): rearm RustSBI timer relay`
+
+    历史 RustSBI 的 MachineTimer handler 会置 STIP 并清 MTIE。SBI TIME
+    `set_timer` 现在按“屏蔽 MTIE → 更新 `mtimecmp` → 清旧 STIP → 重开 MTIE”
+    首次建立并在后续重装中继，避免旧 deadline 竞态；未打 patch 时，当前初始化路径
+    不会打开 MTIE，Linux 无法可靠获得 MTIP→STIP timer relay。
 
 ## 当前验证状态
 
@@ -219,20 +271,22 @@ compile failure 为 0。TLB 为 384,604,333 hit / 552,731 miss（约 99.86% hit�
 
 - `cargo +nightly-2024-09-05 test --workspace --locked`
   - `valheim-asm` 11 个测试；
-  - `valheim-core` 60 个测试；
+  - `valheim-core` 74 个测试；
   - `valheim-jit` 34 个单元测试；
-  - 9 个 native/naive differential tests；
+  - 10 个 native/naive differential tests；
   - 4 个 native memory fast-path integration tests；
   - `xtask` 4 个测试。
-- `cargo +nightly-2024-09-05 test --locked --package valheim-core --features trace`：61/61。
+- 上述 workspace 合计 137/137；
+  `cargo +nightly-2024-09-05 test --locked --package valheim-core --features trace`：75/75。
 - `cargo +nightly-2024-09-05 test --release --locked --package valheim-jit`，让
-  34 + 9 + 4 项 JIT tests 真正在 release verifier-off 配置执行。
+  34 + 10 + 4 项 JIT tests 真正在 release verifier-off 配置执行。
 - `cargo +nightly-2024-09-05 build --release --locked --package valheim-cli`。
 - 当前树的 debug xtask 在 naive 与 JIT 下均通过 96/96 `riscv-tests`。
-- 最终代码树串行实跑三个 demo 的 naive/JIT 六种组合：xv6 两种引擎均进入 `$` 并成功
-  执行 `echo`；RustSBI 两种引擎均输出完整 success marker；Debian 两种引擎均进入真实
-  `debian13#`，`cat /etc/debian_version` 均返回 `13.6`。Debian JIT 还在 prompt 空闲约 5 秒后
-  由 UART 输入成功唤醒。
+- `258fdf6` 代码树实跑三个 demo 的 naive/JIT 六种组合：xv6 两种引擎
+  均进入 `$` 并成功执行 `echo`；RustSBI 两种引擎均输出完整 success marker；
+  Debian 两种引擎均进入真实 `debian13#`，版本为 `13.6`。Debian 还验证
+  `SBI TIME`、10 MHz `sched_clock`、`sleep 1`、持续增长的 timer IRQ 及 prompt
+  宿主空闲。
 
 `cargo fmt --all -- --check` 会要求把仓库既有的 2 空格 Rust 风格整体改成 rustfmt 默认布局，
 因此当前不能作为局部改动的有效格式门禁。本轮只运行过只读 `--check`，失败后没有产生文件
@@ -242,6 +296,8 @@ compile failure 为 0。TLB 为 384,604,333 hit / 552,731 miss（约 99.86% hit�
 
 以下优先级是基于当前代码结构和已有统计的工程判断，不是性能结论。下一轮应先用 `perf` 和
 新的低开销 counters 确认热点，再一次只实现并提交一个方向。
+除明确标为 realtime 的数据外，本节引用的 profile/stats 数值均来自 `0265308`
+realtime 切换前的快照，不能假定热点占比在当前树上完全不变。
 
 ### 已测但未采用
 
@@ -259,7 +315,8 @@ compile failure 为 0。TLB 为 384,604,333 hit / 552,731 miss（约 99.86% hit�
 
 本机已安装 `rustfilt 0.2.1`，并验证
 `/usr/lib/linux-tools/5.15.0-1103-kvm/perf` 可用 software `cpu-clock:u` 采样。Cranelift JIT
-代码已经能在报告中显示为 `[JIT] tid ...` / `.Lfn...`；最新 leaf profile 中
+代码已经能在报告中显示为 `[JIT] tid ...` / `.Lfn...`；realtime 切换前
+`0265308` 的最新 leaf profile 中
 `JitExecutor::execute` 为 35.50%、解释器 `RV64Cpu::execute` 5.81%、`translate_to_host()`
 4.75%、`Bus::read` 1.92%、`GuestBlock::translate` 1.25%、`Machine::dispatch_next` 1.00%。
 release 关闭 verifier 后，verifier 热点已经消失。
@@ -278,22 +335,26 @@ WSL 中 `cycles`、`instructions`、`branches` 和 `branch-misses` 仍报告 `<n
 
 1. 细分并 lower 高频 system/CSR fallback。
 
-   当前 stats-on 快照有 679,131 次 system fallback，解释器执行本身占 profile 5.81%。先按
-   opcode/CSR 计数；若 `cycle/time/instret` 等纯读占主导，可把 dispatcher 基准计数和 TB 内
-   instruction offset 显式传给 native code。ECALL、xRET、WFI、SATP/MSTATUS 写和 fence 仍应
-   保留边界，时间 CSR 必须与当前“一条 guest 指令一个 tick”模型一致。
+   realtime 切换前的 stats-on 快照有 679,131 次 system fallback，解释器执行
+   本身占 profile 5.81%。先按
+   opcode/CSR 计数；若 `cycle/instret` 等纯读占主导，可把 dispatcher 基准计数
+   和 TB 内 instruction offset 显式传给 native code。`time/rdtime` 必须每次从
+   host-clock-backed CLINT live 读取（或调用等价 helper），绝不能从 instruction
+   offset 合成。ECALL、xRET、WFI、SATP/MSTATUS 写和 fence 仍应保留边界。
 
 2. 为 TB builder 增加 page-local fetch translation cache。
 
-   `GuestBlock::translate()` 当前对同一 code page 内的每条指令调用 `fetch_mem()`，并在最新
-   profile 占 1.25%。TB 已限制在单页内，可通过 core 的 `translate_to_host()` 对该页执行一次
+   `GuestBlock::translate()` 当前对同一 code page 内的每条指令调用 `fetch_mem()`，
+   并在 realtime 前 profile 占 1.25%。TB 已限制在单页内，可通过 core 的
+   `translate_to_host()` 对该页执行一次
    Fetch 翻译，再从返回的 DRAM host page 解码后续 parcel。不能复制 Sv39 权限逻辑；跨页
    32-bit 指令、MMIO endpoint、A-bit 更新和 fault guest VA 仍由共享接口决定。
 
 3. 继续降低 JIT 编译与 finalize 成本。
 
-   默认 threshold 已调到 750，release verifier 已关闭，但 stats-on 快照仍有 4496 个 compiled
-   TB、1.813 s 累计编译时间。可评估批量 finalize、多函数 module 提交，或由独立 backend
+   默认 threshold 已调到 750，release verifier 已关闭，但 realtime 前 stats-on 快照仍有
+   4496 个 compiled TB、1.813 s 累计编译时间。可评估批量 finalize、多函数 module 提交，
+   或由独立 backend
    后台编译后在 dispatcher 安全点安装。后台编译和 module 生命周期风险较高，必须先把
    compile/finalize 子阶段单独计时；`speed_and_size` 已实测无益，不应重复。
 
@@ -305,8 +366,9 @@ WSL 中 `cycles`、`instructions`、`branches` 和 `branch-misses` 仍报告 `<n
 
 5. 最后再评估 context-tagged / packed software TLB。
 
-   当前 256-entry direct-mapped TLB 的最新 hit rate 已约 99.86%，单纯增加 replacement 复杂度
-   很难成为首选。若 guest-PC/profile 显示 4.75% 的 `translate_to_host()` 主要来自 context
+   当前 256-entry direct-mapped TLB 在 realtime 前快照中的 hit rate 约 99.86%，单纯增加
+   replacement 复杂度很难成为首选。若 guest-PC/profile 显示 4.75% 的
+   `translate_to_host()` 主要来自 context
    invalidation 而不是 decoded/fallback fetch，再考虑 16-byte packed tag、近期多 context 或
    superpage entry；任何压缩 tag 都必须证明无 false hit，`SFENCE.VMA` 仍须使旧翻译不可达。
 
@@ -336,36 +398,37 @@ WSL 中 `cycles`、`instructions`、`branches` 和 `branch-misses` 仍报告 `<n
 
 4. 完善 level-triggered PLIC/SEIP 与通用异步设备通知。
 
-   无 timer WFI 的 WakeHub 等待和 UART 通知已经在 `9348812` 完成，并且实际解决了 Debian
+   无 timer WFI 的 WakeHub 等待和 UART 通知已经在 `9348812` 完成，`10cabc6`
+   又将 future timer 接入 absolute-deadline timed wait，并且实际解决了 Debian
    prompt 的单核满载。剩余工作是让 PLIC 在 source enable/threshold/complete 变化时从 latched
    level 重新计算 claim/SEIP，并把未来真正异步的 VirtIO 等设备接入同一通知协议。当前 UART
    单脉冲若恰在 source 10 被 mask 时到达，可能要等后续同源 UART 脉冲再次更新 pending，不能
    把 WakeHub 验收解释为完整 level-triggered PLIC 已实现。
 
-5. 分离 realtime 与 deterministic CLINT clock mode。
+### 本轮已从候选移除
 
-   本轮按约定没有修正时钟语义：`mtime` 沿用现有 dispatcher/attempted-instruction tick 模型，
-   未来 timer 在 WFI 中立即快进，无 timer 的宿主阻塞期间 guest 时间暂停。若后续需要与 DTB
-   10 MHz 声明一致，应以宿主 monotonic clock 驱动 realtime 模式，并用 timer deadline 作为
-   WakeHub timeout；ISA 测试和可重复 benchmark 则保留 deterministic instruction clock。该
-   改动会影响启动等待和 guest 可见时间，必须独立设计、A/B 和提交。
+realtime CLINT 已在 `10cabc6` 完成：production 仅使用 host monotonic 10 MHz
+clock，WFI 不快进，`ClockSource`/`ManualClock` 仅用于无 sleep 的可重复测试。
+若未来需要 CLI 可选 deterministic benchmark mode，那是新功能，不是当前时钟的
+第二个 production 模式。
 
 ### 当前低优先级
 
-- 更复杂的 code LRU：当前峰值 live code 约 3.44 MiB，远低于默认 128 MiB 上限，且没有
-  code-cache flush；它不是当前 Debian 启动瓶颈。
-- 单独增加 TLB replacement 复杂度：最新快照 hit rate 约 99.86%。应先区分 compulsory、
+- 更复杂的 code LRU：realtime 前快照的峰值 live code 约 3.44 MiB，远低于默认
+  128 MiB 上限，且没有 code-cache flush；它不是当前 Debian 启动瓶颈。
+- 单独增加 TLB replacement 复杂度：realtime 前快照 hit rate 约 99.86%。应先区分 compulsory、
   direct-map conflict 和 context invalidation miss，再决定 2/4-way 是否值得。
-- F/D native lowering：到 prompt 的快照只有 2784 次 floating-point fallback，对 Debian
-  启动的潜在收益很低；它更像 ISA 覆盖工作。
+- F/D native lowering：realtime 前到 prompt 的快照只有 2784 次 floating-point
+  fallback，对 Debian 启动的潜在收益很低；它更像 ISA 覆盖工作。
 - 为少量 MMIO/cross-page slow path 增加专门机器码：这些路径必须以正确性为先，已有快照只有
-  1690 次，优先级低于 dispatcher、system fallback 和编译成本。
+  1690 次（realtime 前），优先级低于 dispatcher、system fallback 和编译成本。
 - persistent code cache 或跨进程复用：需要稳定 relocation、host feature、guest artifact 和
-  失效协议，复杂度与当前约 5 s 启动阶段不匹配。
+  失效协议，复杂度与当前约 8.4 s realtime 启动阶段不匹配。
 
 ## 建议的下一轮顺序
 
-1. 以当前 `0265308` 为基线，补 guest-PC JIT 符号和 stop-reason/system-opcode counters；计时
+1. 以当前 `258fdf6` realtime 树为基线，补 guest-PC JIT 符号和
+   stop-reason/system-opcode counters；计时
    始终关闭 stats。
 2. 在 system/CSR lowering 与 page-local fetch cache 中只选一个，独立实现、交错 A/B、独立
    commit；收益不稳定就完整回滚。
@@ -378,4 +441,6 @@ WSL 中 `cycles`、`instructions`、`branches` 和 `branch-misses` 仍报告 `<n
    涉及 core/设备时再补 naive、trace 和双引擎完整回归。
 
 所有后续实现继续遵守两个不变量：JIT 不复制 Sv39 翻译/权限逻辑；任何 batching/chaining
-都不能越过 Machine budget、精确 timer deadline 或 guest-visible side effect。
+都不能越过 Machine instruction budget 或 guest-visible side effect。realtime timer 的
+active-delivery latency 必须受 dispatcher ceiling 约束；WFI 的 timer 不得在
+deadline 前恢复 guest，且 timed wait 必须能被设备通知打断。

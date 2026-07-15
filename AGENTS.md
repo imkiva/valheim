@@ -18,8 +18,11 @@ Valheim 是一个用 Rust 编写、以学习和参考实现为目的的 RISC-V 6
 - JIT-enabled CLI 和完整 workspace 明确只支持 Linux x86_64 System V ABI；
   `valheim-core` 等不依赖 `valheim-jit` 的 crate 仍可单独构建。
 - UART 直接连接宿主标准输入和标准输出，并实现 Linux 8250 驱动需要的 DLAB、IIR、RX/TX 中断和状态位。
-- 完整 `Machine::run`/`run_for_test` 在 hart 已进入 WFI、没有可快进的本地 timer 时通过共享
-  WakeHub 阻塞宿主线程；UART 输入发布状态后唤醒。公开的 `run_next()` 仍是非阻塞单步接口。
+- CLINT `mtime` 由宿主 monotonic clock 以 DTB 声明的 10 MHz 实时驱动；`TIME`
+  CSR 是同一计数器的只读视图；MMIO 写 `mtime` 会重设 guest/host anchor，随后继续
+  实时推进。完整 `Machine::run`/`run_for_test` 在 WFI 上按
+  绝对 timer deadline 或 WakeHub 设备通知阻塞，宿主空闲时不忙轮询；公开的
+  `run_next()` 仍是非阻塞单步接口。
 
 ## Workspace 与模块职责
 
@@ -51,7 +54,7 @@ Valheim 是一个用 Rust 编写、以学习和参考实现为目的的 RISC-V 6
 | 有 BIOS | raw BIOS 加载到 `0x8000_0000`，raw kernel 加载到 `0x8020_0000` |
 | DTB | 带 32 字节前缀的副本仍位于 MROM `0x1000`；裸 FDT 另复制到 DRAM `0x87f0_0000`，guest 的 `a1/x11` 指向后者 |
 | RAM | `256 MiB @ 0x8000_0000` |
-| CLINT | `0x0200_0000` |
+| CLINT | `0x0200_0000`；10 MHz host-monotonic realtime `mtime` |
 | PLIC | `0x0c00_0000` |
 | UART | `0x1000_0000`，IRQ 10 |
 | VirtIO block | `0x1000_1000`，IRQ 1，legacy version 1 |
@@ -213,8 +216,8 @@ Rust workspace 单元测试：
 cargo +nightly-2024-09-05 test --workspace --locked
 ```
 
-该命令已验证为 122 个测试通过、0 个失败：`valheim-asm` 11 个，
-`valheim-core` 60 个，`valheim-jit` 34 个 unit + 9 个 native/naive differential +
+该命令已验证为 137 个测试通过、0 个失败：`valheim-asm` 11 个，
+`valheim-core` 74 个，`valheim-jit` 34 个 unit + 10 个 native/naive differential +
 4 个 memory fast-path integration tests，`xtask` 4 个。额外的 trace 语义回归为：
 
 ```bash
@@ -222,7 +225,7 @@ cargo +nightly-2024-09-05 test \
   --locked --package valheim-core --features trace
 ```
 
-该命令已验证 61 个测试通过。
+该命令已验证 75 个测试通过。
 
 完整 RISC-V ISA 测试需要交叉工具链和 `riscv-tests` 子模块：
 
@@ -270,7 +273,7 @@ cargo +nightly-2024-09-05 run \
 ```text
 demo/                                # Git 跟踪；只放最小静态入口
 ├── xv6/                           # run.sh + README.md
-├── rustsbi/                       # run.sh + README.md + 两个适配 patch
+├── rustsbi/                       # run.sh + README.md + 三个适配 patch
 └── linux/                         # run.sh + README.md + init
 
 target/demo/                         # Git 忽略；由 run.sh 创建
@@ -404,9 +407,12 @@ id
 
 2026-07-15 第一阶段在同一 release binary 与已构建 artifact 上，从宿主进程启动到真实行末
 `debian13# ` 各测三次：naive 中位数 69.603 s，JIT 中位数 13.447 s，加速 5.176×；设计与
-第一阶段数据见根 `JIT-PLAN.md`。后续性能提交在固定 CPU 16 上重测当前树：naive 中位数
-60.926 s，JIT 中位数 4.806 s，加速 12.677×；逐项交错 A/B、profile 和剩余方向见
-`JIT-PERF.md`。两轮调度条件不同，不能用绝对 checkpoint 的差值归因单个优化。
+第一阶段数据见根 `JIT-PLAN.md`。后续性能提交在固定 CPU 16 上重测
+realtime 切换前的性能树：naive 中位数 60.926 s，JIT 中位数 4.806 s，
+加速 12.677×。`10cabc6`/`258fdf6` 后 realtime JIT 三次中位数为
+8.379352 s；realtime naive 单次验收为 133.996711 s（非正式三次中位数）。
+旧语义会快进 guest 等待，新旧绝对时间不可直接对比；逐项
+交错 A/B、profile 和剩余方向见 `JIT-PERF.md`。
 
 固定版本和来源：
 
@@ -415,7 +421,8 @@ id
 - OCI riscv64 manifest：`sha256:7244fbb388f7b59c9f584bb2bb7ef3a60b23aa1e55f1ad1d0641bd5ec12390f3`。
 - rootfs layer：`sha256:3ed37bd5491de4685b6418abd6b83c4b16cc06b7a51e46da7f154c5a149a41a5`，内容为 Debian `13.6`。
 - kernel：upstream Linux `v5.17`，tarball SHA-256 `555fef61dddb591a83d62dd04e252792f9af4ba9ef14683f64840e46fa20b1b1`。
-- firmware：上文固定的 RustSBI-QEMU 2022-03 版本及 Valheim 适配 patch。
+- firmware：上文固定的 RustSBI-QEMU 2022-03 版本及 Valheim 适配 patch；
+  SBI TIME `set_timer` 会首次建立并在后续重装 machine-timer→STIP 中继。
 
 Linux `v5.17` 是根据项目 2022-03 的 demo 时间选择的同年代内核，不应误写成 README 历史 openEuler 录屏的原始内核；历史录屏使用的是 Linux `5.5.19` 和 OpenSBI `0.6`。
 
@@ -440,7 +447,9 @@ Linux `v5.17` 是根据项目 2022-03 的 demo 时间选择的同年代内核，
 ./demo/rustsbi/run.sh
 ```
 
-脚本会固定 RustSBI-QEMU 提交、应用有记录的单 hart 和 DTB 指针 patch、构建 BIOS 和 test kernel、复用共享 GNU objcopy 转 raw binary、构建 Valheim，然后运行并检查成功行。预期末尾：
+脚本会固定 RustSBI-QEMU 提交，应用有记录的单 hart、DTB 指针和 timer
+relay 三个 patch，构建 BIOS 和 test kernel，复用共享 GNU objcopy 转 raw binary，
+构建 Valheim，然后运行并检查成功行。预期末尾：
 
 ```text
 >> Hart 0 state return value: 0
@@ -448,7 +457,8 @@ Linux `v5.17` 是根据项目 2022-03 的 demo 时间选择的同年代内核，
 << Test-kernel: All hart SBI test SUCCESS, shutdown
 ```
 
-完整输出保存在 `target/demo/rustsbi/runtime/last-run.log`。2026-07-14 已从项目目录外执行脚本验证：退出码为 0，并检查到上述 success marker。
+完整输出保存在 `target/demo/rustsbi/runtime/last-run.log`。2026-07-15 已在当前
+三个 patch 上分别以 naive/JIT 验证：退出码为 0，并检查到上述 success marker。
 
 ### RustSBI 历史版本依据
 
@@ -462,7 +472,7 @@ Valheim README 在 2022-03-20 首次加入 RustSBI 截图。当时 RustSBI-QEMU 
 
 构建固定使用 `nightly-2022-02-14`，并复用 `target/demo/gcc-riscv64-elf-2022.03.09` 的 GNU objcopy。不要直接改回上游 `cargo make`：旧 xtask 会向 objcopy 传仅适合 `rust-objcopy` 的 `--binary-architecture=riscv64`，GNU Binutils 2.37 会拒绝它；当前脚本直接构建两个 package，再执行兼容的 `objcopy -O binary`。
 
-### 为什么存在单 hart patch
+### 为什么需要三个适配 patch
 
 Valheim 原截图不是未修改的上游 test kernel；原始 binary 也从未提交。上游 `999e355` 硬编码测试 hart 1–4，而 Valheim 只声明 hart 0。未修改版本已经实际诊断运行：BASE、time、非法指令转交和 hart 0 查询成功，随后固定停在：
 
@@ -473,6 +483,12 @@ Valheim 原截图不是未修改的上游 test kernel；原始 binary 也从未�
 `demo/rustsbi/single-hart-valheim.patch` 保留可在 hart 0 上运行的测试，并在 success marker 后执行 `ebreak`。这是退出适配：旧 RustSBI 原本通过 QEMU SiFive test finisher `0x0010_0000` 关机，Valheim 没有该设备。输出仍保留历史截图的 `All hart` 文本，但它只表示适用于单 hart 的测试通过，不能解释为实际测试了 hart 1–4。
 
 该历史 firmware 在 Valheim 上未打 patch 实跑时，S-mode test kernel 观察到 `a1=0`。`demo/rustsbi/valheim-dtb-pointer.patch` 将 supervisor 入口的 DTB 指针显式固定为当前 DRAM 地址 `0x87f0_0000`，因此 test kernel 和 Linux 都能得到有效 FDT。这个常量必须与 `Machine` 中的 `RV64_DTB_ADDR` 同步；它属于 Valheim 单 hart/启动布局适配，不能归因为已确认的上游通用 bug，也不能误报为未修改上游的逐字节复现。
+
+`demo/rustsbi/valheim-time-relay.patch` 修复该历史 firmware 的 SBI TIME 中继首次建立和
+后续重装路径：machine-timer trap 会设置 STIP 并关闭 MTIE，每次 `set_timer` 必须在替换
+`mtimecmp` 后清 STIP、重新打开 MTIE。去掉该 patch 时，当前初始化路径不会打开 MTIE，
+Linux 无法可靠获得 MTIP→STIP timer relay；RustSBI test kernel 本身不覆盖该路径，必须用
+Linux `sleep`/`/proc/interrupts` 验收。
 
 Linux demo 只需要构建 firmware、不需要启动 test kernel，可用：
 
@@ -511,10 +527,11 @@ openEuler 演示没有固定的 BIOS、kernel、rootfs、下载脚本或版本 h
 - Linux 内核必须在同一个 `fakeroot` 元数据状态下打包 initramfs，否则 OCI 层中的 `root:shadow` 等属主信息会被宿主用户 UID 污染。
 - Linux demo 使用内建 initramfs，成功不代表现代 Linux 的 VirtIO block 路径已兼容；切换到磁盘 rootfs 前必须单独修复和验证 VirtIO。
 - UART RX/TX 目前以单次事件脉冲适配 Valheim 的简化 PLIC。xv6/Linux 的正常初始化顺序已验证；若字节恰在 PLIC source 10 被 mask 时到达，简化 PLIC 不会在之后 enable 时从 pending 重算 claim，事件可能暂时卡住。完整 level-triggered 语义需要连同 PLIC/SEIP 路径一起修复。
-- WFI 的宿主阻塞只消除了无可快进 timer 时的忙轮询，没有把 CLINT 改为宿主实时时钟。
-  `mtime` 沿用现有 dispatcher/attempted-instruction tick 模型，启用的未来 `mtimecmp` 仍立即
-  快进；WFI 阻塞期间不推进 guest 时间。需要 realtime/deterministic clock mode 时必须作为
-  单独语义改动实现和验证。
+- production CLINT 只支持 host-monotonic realtime：`mtime` 以 10 MHz 在 guest 执行、
+  WFI 和宿主被抢占期间持续流逝，不得恢复 instruction-tick 或 WFI fast-forward。
+  `ClockSource` 注入只用于无 sleep 的可重复测试，不是面向 CLI 的 deterministic/turbo
+  mode。WFI 的 timer wait 必须使用绝对宿主 deadline 并与 WakeHub generation
+  一起防止 poll-to-wait lost wake。
 - DTB 先由 `Machine::new` 放到 `0x87f0_0000`，CLI 随后才加载 BIOS/kernel，当前没有镜像范围与 DTB overlap 检查；现有约 40 MiB Linux Image 安全，但不要传入会延伸到该地址的大型 raw image。
 - `Memory` 现已对完整宽度/完整 slice 做 checked 半开区间检查，非对齐读写使用
   unaligned primitives；bus 也使用完整宽度的半开区间匹配。但 `Machine::load_memory`
@@ -576,3 +593,8 @@ RESET_DISK=1 ./demo/xv6/run.sh --engine jit
 echo RUN_SH_OK
 cat /etc/debian_version
 ```
+
+修改 CLINT、TIME CSR、WFI 或 RustSBI timer relay 时，Debian 还必须确认启动日志包含
+`SBI TIME extension detected` 和 10 MHz `sched_clock`，`time sleep 1` 约为一秒、
+`/proc/interrupts` 中 `riscv-timer` 计数持续增长，且宿主 `pidstat` 在 Bash
+prompt 空闲窗口不再稳定占用一个 core。

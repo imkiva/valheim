@@ -83,9 +83,14 @@ glibc 声明的最低 Linux ABI 为 4.15，因此可以在这个 5.17 kernel 上
 
 ## 启动与验收
 
-当前固定 CPU 16 的 release 验证中，默认 JIT 到 shell 的中位数约为 4.806 秒；显式
-`--engine naive` 的中位数约为 60.926 秒，硬件不同会变化。kernel 日志中的时间来自 guest
-虚拟时钟，不能把它当成宿主 wall-clock。看到下面提示即启动成功：
+realtime 切换前的历史固定 CPU 16 release 基线是 JIT 4.806 秒、naive
+60.926 秒；该时钟会快进 guest 等待。`10cabc6`/`258fdf6` 后的 realtime JIT
+三次为 8.903906 / 8.379352 / 8.321334 秒，中位数 8.379352 秒。硬件不同
+会变化，且新旧口径不可直接比较。realtime naive 单次验收为
+133.996711 秒，不是正式三次中位数。kernel timestamp 来自 host-monotonic 驱动的
+10 MHz `mtime`，与宿主 elapsed time 等速推进；CLINT 在 `Machine`/CPU 构造期间建立
+anchor，计数包含随后 DTB 生成及 kernel/BIOS 的读取和装载，但不包含此前的 CLI 参数解析和
+JIT executor 构造。它不是宿主日历时间，也不能代替进程级外部计时。看到下面提示即启动成功：
 
 ```text
 Debian 13 (trixie) official slim rootfs on Valheim
@@ -102,7 +107,13 @@ uname -a
 printf 'BASH=%s\n' "$BASH_VERSION"
 id
 echo DEBIAN13_SHELL_OK
+grep riscv-timer /proc/interrupts
+time sleep 1
+grep riscv-timer /proc/interrupts
 ```
+
+`SBI TIME extension detected`、`sched_clock: 64 bits at 10MHz`、`sleep 1` 约一秒且
+前后两次 `riscv-timer` IRQ 计数增加，是 realtime/timer-relay 验收的一部分。
 
 固定 layer 应报告 Debian 13/trixie（完整版本 `13.6`），`uname` 应报告 Linux
 `5.17.0`、架构 `riscv64`，`id` 应报告 `uid=0(root)`。按宿主终端的 `Ctrl-C`
