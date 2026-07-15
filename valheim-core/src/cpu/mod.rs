@@ -18,6 +18,8 @@ pub mod data;
 pub mod irq;
 pub mod mmu;
 
+pub use self::execute::GuestCsrOp;
+
 #[derive(Debug)]
 pub struct RV64Cpu {
   pub regs: regs::Regs,

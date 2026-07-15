@@ -184,6 +184,18 @@ macro_rules! update_fflags {
   };
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuestCsrOp {
+  /// Read the CSR without attempting a write.
+  Read,
+  /// Replace the CSR with the operand.
+  Write,
+  /// Write the CSR with the operand bits set, even when the operand is zero.
+  Set,
+  /// Write the CSR with the operand bits cleared, even when the operand is zero.
+  Clear,
+}
+
 impl RV64Cpu {
   pub(crate) fn refresh_local_interrupts(&mut self) {
     let mask = MSIP_MASK | MTIP_MASK;
@@ -209,6 +221,36 @@ impl RV64Cpu {
     } else {
       self.csrs.write(addr, val)
     }
+  }
+
+  /// Execute one architectural CSR operation and return the value observed before any write.
+  ///
+  /// Callers must use [`GuestCsrOp::Read`] for CSRRS/CSRRC encodings whose source register is
+  /// `x0`, or for immediate forms whose source is zero. A nonzero source register containing zero
+  /// still selects [`GuestCsrOp::Set`] or [`GuestCsrOp::Clear`] and performs a write.
+  pub fn execute_guest_csr(
+    &mut self,
+    csr: CSRAddr,
+    op: GuestCsrOp,
+    operand: u64,
+  ) -> Result<u64, Exception> {
+    let old = self.read_guest_csr(csr);
+    let new = match op {
+      GuestCsrOp::Read => None,
+      GuestCsrOp::Write => Some(operand),
+      GuestCsrOp::Set => Some(old | operand),
+      GuestCsrOp::Clear => Some(old & !operand),
+    };
+
+    if let Some(new) = new {
+      self.write_guest_csr(csr, new)?;
+      if csr.value() == SATP {
+        self.sync_pagetable();
+        self.translation_epoch = self.translation_epoch.wrapping_add(1);
+      }
+    }
+
+    Ok(old)
   }
 
   pub fn fetch(&mut self) -> Result<(VirtAddr, Bytecode, Bytecode16), Exception> {
@@ -244,21 +286,6 @@ impl RV64Cpu {
       false => std::mem::size_of::<Bytecode>() as u64,
     };
     let mut next_pc = VirtAddr(pc.0.wrapping_add(delta));
-    let writes_csr = match instr {
-      RV64(CSRRW(_, _, _)) | RV64(CSRRWI(_, _, _)) => true,
-      RV64(CSRRS(_, rs1, _)) | RV64(CSRRC(_, rs1, _)) => !is_zero_reg(rs1.0),
-      RV64(CSRRSI(_, imm, _)) | RV64(CSRRCI(_, imm, _)) => imm.value() != 0,
-      _ => false,
-    };
-    let writes_satp = writes_csr && match instr {
-      RV64(CSRRW(_, _, csr)) |
-      RV64(CSRRS(_, _, csr)) |
-      RV64(CSRRC(_, _, csr)) |
-      RV64(CSRRWI(_, _, csr)) |
-      RV64(CSRRSI(_, _, csr)) |
-      RV64(CSRRCI(_, _, csr)) => csr.value() == SATP,
-      _ => false,
-    };
     let fences_translation = matches!(instr, RV64(SFENCE_VMA(_, _)));
     let fences_instructions = matches!(instr, RV64(FENCE_I(_, _, _)));
 
@@ -557,41 +584,40 @@ impl RV64Cpu {
 
       // CSR
       RV64(CSRRW(rd, rs1, csr)) => {
-        let old = self.read_guest_csr(csr);
-        self.write_guest_csr(csr, rs1.read(self))?;
+        let operand = rs1.read(self);
+        let old = self.execute_guest_csr(csr, GuestCsrOp::Write, operand)?;
         rd.write(self, old);
       }
       RV64(CSRRS(rd, rs1, csr)) => {
-        let old = self.read_guest_csr(csr);
-        if !is_zero_reg(rs1.0) {
-          self.write_guest_csr(csr, old | rs1.read(self))?;
-        }
+        let (op, operand) = if is_zero_reg(rs1.0) {
+          (GuestCsrOp::Read, 0)
+        } else {
+          (GuestCsrOp::Set, rs1.read(self))
+        };
+        let old = self.execute_guest_csr(csr, op, operand)?;
         rd.write(self, old);
       }
       RV64(CSRRC(rd, rs1, csr)) => {
-        let old = self.read_guest_csr(csr);
-        if !is_zero_reg(rs1.0) {
-          self.write_guest_csr(csr, old & (!rs1.read(self)))?;
-        }
+        let (op, operand) = if is_zero_reg(rs1.0) {
+          (GuestCsrOp::Read, 0)
+        } else {
+          (GuestCsrOp::Clear, rs1.read(self))
+        };
+        let old = self.execute_guest_csr(csr, op, operand)?;
         rd.write(self, old);
       }
       RV64(CSRRWI(rd, imm, csr)) => {
-        let old = self.read_guest_csr(csr);
-        self.write_guest_csr(csr, imm.value() as u64)?;
+        let old = self.execute_guest_csr(csr, GuestCsrOp::Write, imm.value() as u64)?;
         rd.write(self, old);
       }
       RV64(CSRRSI(rd, imm, csr)) => {
-        let old = self.read_guest_csr(csr);
-        if imm.value() != 0 {
-          self.write_guest_csr(csr, old | imm.value() as u64)?;
-        }
+        let op = if imm.value() == 0 { GuestCsrOp::Read } else { GuestCsrOp::Set };
+        let old = self.execute_guest_csr(csr, op, imm.value() as u64)?;
         rd.write(self, old);
       }
       RV64(CSRRCI(rd, imm, csr)) => {
-        let old = self.read_guest_csr(csr);
-        if imm.value() != 0 {
-          self.write_guest_csr(csr, old & (!imm.value() as u64))?;
-        }
+        let op = if imm.value() == 0 { GuestCsrOp::Read } else { GuestCsrOp::Clear };
+        let old = self.execute_guest_csr(csr, op, imm.value() as u64)?;
         rd.write(self, old);
       }
 
@@ -856,10 +882,7 @@ impl RV64Cpu {
     // Commit cache-visible generations only after the instruction's fallible
     // work above has completed. Cache implementations may conservatively drop
     // all entries when either wrapping generation changes.
-    if writes_satp {
-      self.sync_pagetable();
-    }
-    if writes_satp || fences_translation {
+    if fences_translation {
       self.translation_epoch = self.translation_epoch.wrapping_add(1);
     }
     if fences_translation {
@@ -939,7 +962,7 @@ mod tests {
   use valheim_asm::isa::rv64::{CSRAddr, UImm};
 
   use crate::cpu::bus::RV64_MEMORY_BASE;
-  use crate::cpu::csr::CSRMap::{MCYCLE, TIME};
+  use crate::cpu::csr::CSRMap::{MCYCLE, MSCRATCH, TIME};
   use crate::device::clint::{ClockSource, TIMEBASE_FREQUENCY};
 
   #[derive(Default)]
@@ -973,6 +996,91 @@ mod tests {
     assert_eq!(cpu.translation_epoch, 0);
     assert_eq!(cpu.sfence_epoch, 0);
     assert_eq!(cpu.icache_epoch, 0);
+  }
+
+  #[test]
+  fn guest_csr_entry_supports_read_write_set_and_clear() {
+    let mut cpu = RV64Cpu::new(None);
+    let mscratch = CSRAddr(Imm32::from(MSCRATCH as u32));
+
+    assert_eq!(cpu.execute_guest_csr(mscratch, GuestCsrOp::Read, u64::MAX), Ok(0));
+    assert_eq!(cpu.execute_guest_csr(mscratch, GuestCsrOp::Write, 0x30), Ok(0));
+    assert_eq!(cpu.execute_guest_csr(mscratch, GuestCsrOp::Set, 0x05), Ok(0x30));
+    assert_eq!(cpu.execute_guest_csr(mscratch, GuestCsrOp::Clear, 0x11), Ok(0x35));
+    assert_eq!(cpu.execute_guest_csr(mscratch, GuestCsrOp::Read, 0), Ok(0x24));
+  }
+
+  #[test]
+  fn guest_csr_entry_preserves_live_read_only_csrs_on_failed_writes() {
+    let clock = Arc::new(ManualClock::default());
+    let mut cpu = RV64Cpu::new_with_clock(None, clock.clone());
+    let time = CSRAddr(Imm32::from(TIME as u32));
+    let mcycle = CSRAddr(Imm32::from(MCYCLE as u32));
+
+    clock.set_ticks(42);
+    assert_eq!(cpu.execute_guest_csr(time, GuestCsrOp::Read, 0), Ok(42));
+    clock.set_ticks(99);
+    assert_eq!(cpu.execute_guest_csr(time, GuestCsrOp::Read, 0), Ok(99));
+
+    assert_eq!(
+      cpu.execute_guest_csr(time, GuestCsrOp::Write, 1),
+      Err(Exception::IllegalInstruction),
+    );
+    assert_eq!(
+      cpu.execute_guest_csr(mcycle, GuestCsrOp::Set, 0),
+      Err(Exception::IllegalInstruction),
+    );
+    assert_eq!(cpu.bus.clint.mtime(), 99);
+    assert_eq!(cpu.csrs.read_unchecked(MCYCLE), 0);
+    assert_eq!(cpu.translation_epoch, 0);
+  }
+
+  #[test]
+  fn guest_csr_entry_commits_satp_epoch_for_each_write_operation() {
+    let mut cpu = RV64Cpu::new(None);
+    let satp = CSRAddr(Imm32::from(SATP as u32));
+
+    assert_eq!(cpu.execute_guest_csr(satp, GuestCsrOp::Read, 0), Ok(0));
+    assert_eq!(cpu.translation_epoch, 0);
+
+    assert_eq!(cpu.execute_guest_csr(satp, GuestCsrOp::Set, 0), Ok(0));
+    assert_eq!(cpu.translation_epoch, 1);
+    assert_eq!(cpu.execute_guest_csr(satp, GuestCsrOp::Clear, 0), Ok(0));
+    assert_eq!(cpu.translation_epoch, 2);
+
+    assert_eq!(cpu.execute_guest_csr(satp, GuestCsrOp::Write, 1), Ok(0));
+    assert_eq!(cpu.translation_epoch, 3);
+    assert_eq!(cpu.vmppn, 1 << 12);
+
+    assert_eq!(cpu.execute_guest_csr(satp, GuestCsrOp::Set, 2), Ok(1));
+    assert_eq!(cpu.translation_epoch, 4);
+    assert_eq!(cpu.vmppn, 3 << 12);
+
+    assert_eq!(cpu.execute_guest_csr(satp, GuestCsrOp::Clear, 1), Ok(3));
+    assert_eq!(cpu.translation_epoch, 5);
+    assert_eq!(cpu.vmppn, 2 << 12);
+  }
+
+  #[test]
+  fn csrrw_captures_source_before_writing_the_same_register() {
+    let mut cpu = RV64Cpu::new(None);
+    cpu.write_pc(VirtAddr(RV64_MEMORY_BASE));
+    let mscratch = CSRAddr(Imm32::from(MSCRATCH as u32));
+    let source_and_destination = Reg::X(Fin::new(5));
+    cpu.csrs.write_unchecked(MSCRATCH, 0x55).unwrap();
+    cpu.write_reg(source_and_destination, 0xaa);
+
+    execute_rv64(
+      &mut cpu,
+      RV64Instr::CSRRW(
+        Rd(source_and_destination),
+        Rs1(source_and_destination),
+        mscratch,
+      ),
+    );
+
+    assert_eq!(cpu.csrs.read_unchecked(MSCRATCH), 0xaa);
+    assert_eq!(cpu.read_reg(source_and_destination), Some(0x55));
   }
 
   #[test]
@@ -1046,6 +1154,18 @@ mod tests {
       RV64Instr::CSRRCI(Rd(Reg::ZERO), UImm(Imm32::from(1)), satp),
     );
     assert_eq!(cpu.translation_epoch, 6);
+
+    cpu.write_reg(source, 0);
+    execute_rv64(
+      &mut cpu,
+      RV64Instr::CSRRS(Rd(Reg::ZERO), Rs1(source), satp),
+    );
+    assert_eq!(cpu.translation_epoch, 7);
+    execute_rv64(
+      &mut cpu,
+      RV64Instr::CSRRC(Rd(Reg::ZERO), Rs1(source), satp),
+    );
+    assert_eq!(cpu.translation_epoch, 8);
     assert_eq!(cpu.sfence_epoch, 0);
     assert_eq!(cpu.icache_epoch, 0);
   }
