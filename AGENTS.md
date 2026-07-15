@@ -12,12 +12,13 @@ Valheim 是一个用 Rust 编写、以学习和参考实现为目的的 RISC-V 6
 - 256 MiB guest RAM；Debian 13 demo 现从外部 ext4 block rootfs 启动，不再把完整
   rootfs 内嵌进 kernel，但保留该内存规模供 Linux、page cache 和真实用户空间使用。
 - guest kernel/BIOS 必须是 raw binary，CLI 不解析 ELF。
-- VirtIO block 是 legacy VirtIO-MMIO version 1，队列长度为 8，支持 direct split-queue
-  descriptor chain、读写和 FLUSH；Linux 5.17 的 legacy 驱动已通过 writable ext4 root
-  验证，要求 version 2 或 indirect descriptor 的 guest 驱动仍不兼容。
+- VirtIO block 是 legacy VirtIO-MMIO version 1，队列上限为 128，支持 direct split-queue
+  descriptor chain、读写、FLUSH 和 `SEG_MAX=126`；Linux 5.17 的 legacy 驱动已通过
+  writable ext4 root 验证，要求 version 2 或 indirect descriptor 的 guest 驱动仍不兼容。
 - CLI 默认执行器是 `NaiveInterpreter`；`--engine jit` 启用 decoded-TB + Cranelift 分层
-  JIT，不支持的 system/F/D 指令精确回退到解释器。native 路径可在一个 Machine budget
-  内批量执行多个 TB，并用 generation-guarded successor cache 连接常见边。
+  JIT。system/F/D 等无法 native lower 的指令作为 fallback TB 起点且完整 fetch/decode 后，
+  negative cache 会保存完整 `GuestInst`；命中后直接调用共享 CPU 语义执行。native 路径可在
+  一个 Machine budget 内批量执行多个 TB，并用 generation-guarded successor cache 连接常见边。
 - JIT-enabled CLI 和完整 workspace 明确只支持 Linux x86_64 System V ABI；
   `valheim-core` 等不依赖 `valheim-jit` 的 crate 仍可单独构建。
 - UART 直接连接宿主标准输入和标准输出，并实现 Linux 8250 驱动需要的 DLAB、IIR、RX/TX 中断和状态位。
@@ -39,7 +40,7 @@ Valheim 是一个用 Rust 编写、以学习和参考实现为目的的 RISC-V 6
 | `valheim-core/src/interp/` | 共享 `RV64Executor`/`ExecOutcome` 执行器契约与朴素解释器实现。 |
 | `valheim-core/src/device/` | CLINT、level-aware PLIC、NS16550A UART 和支持 split queue/FLUSH 的 legacy VirtIO block。 |
 | `valheim-core/src/machine/` | 将 CPU、可注入执行器、DTB、UART、kernel、BIOS 和磁盘组合成可运行的虚拟机。 |
-| `valheim-jit/` | decoded TB/cache/runtime、Cranelift RV64I/M lowering、A 扩展 helper、software TLB 和 DRAM fast path。 |
+| `valheim-jit/` | decoded TB/cache/runtime、页内 fetch translation cache、Cranelift RV64I/M lowering、A 扩展 helper、software TLB 和 DRAM fast path。 |
 | `valheim-cli/` | `valheim-cli` 命令行入口，负责参数解析和加载镜像。 |
 | `xtask/` | 自动构建、转换并运行上游 `riscv-tests`。 |
 | `dts/` | 启动时由 `dtc` 编译的设备树模板。 |
@@ -219,8 +220,8 @@ Rust workspace 单元测试：
 cargo +nightly-2024-09-05 test --workspace --locked
 ```
 
-该命令已验证为 158 个测试通过、0 个失败：`valheim-asm` 11 个，
-`valheim-core` 95 个，`valheim-jit` 34 个 unit + 10 个 native/naive differential +
+该命令已验证为 171 个测试通过、0 个失败：`valheim-asm` 11 个，
+`valheim-core` 102 个，`valheim-jit` 40 个 unit + 10 个 native/naive differential +
 4 个 memory fast-path integration tests，`xtask` 4 个。额外的 trace 语义回归为：
 
 ```bash
@@ -228,7 +229,7 @@ cargo +nightly-2024-09-05 test \
   --locked --package valheim-core --features trace
 ```
 
-该命令已验证 96 个测试通过。
+该命令已验证 103 个测试通过。
 
 完整 RISC-V ISA 测试需要交叉工具链和 `riscv-tests` 子模块：
 
@@ -420,6 +421,11 @@ realtime 切换前的性能树：naive 中位数 60.926 s，JIT 中位数 4.806 
 快进 guest 等待，新旧绝对时间也不可直接对比。逐项交错 A/B、profile 和剩余方向见
 `JIT-PERF.md`。
 
+当前 ext4 direct-root 口径固定 CPU 16、显式 threshold 750、关闭 stats，并为每次启动复制
+base image 得到全新的可写副本。`ded32a0` 与当前 `746684b` 各三次交错结果的中位数分别为
+3.957267 s 和 3.371372 s，当前树累计缩短 14.806%（1.1738×）。这是本轮 VirtIO、PLIC 和
+JIT 优化的累计结果，不能归因给任一单独 commit；逐项数据见 `JIT-PERF.md`。
+
 固定版本和来源：
 
 - userspace：Docker Official Image 的 `debian:13-slim` / `trixie-slim` riscv64 rootfs；脚本按不可变 OCI digest 从 Docker Hub 的 `library/debian` 下载。
@@ -540,9 +546,9 @@ openEuler 演示没有固定的 BIOS、kernel、rootfs、下载脚本或版本 h
   Fetch/Read/Write 类型报告 guest VA；跨页数据访问应报告实际故障 fragment 的 VA，不能
   把页表或 endpoint 的物理地址泄漏进 `mtval/stval`。解释器与 JIT slow path 共用该不变量。
 - 测试和普通运行循环都没有 watchdog/超时，坏 guest 可能永久循环。
-- 当前 VirtIO 是 legacy version 1、queue size 8，只公布 FLUSH feature，并只接受 direct
-  descriptor chain；必须选择明确支持 legacy VirtIO-MMIO v1 且不要求 indirect descriptor
-  的 guest 驱动，不能只根据 guest 的发布年份判断。
+- 当前 VirtIO 是 legacy version 1，QueueNumMax 为 128，公布 FLUSH 和 SEG_MAX（126）并只
+  接受 direct descriptor chain；必须选择明确支持 legacy VirtIO-MMIO v1 且不要求 indirect
+  descriptor 的 guest 驱动，不能只根据 guest 的发布年份判断。
 - RustSBI 历史 test kernel 的 success marker 来自明确记录的单 hart patch；不要声称未修改的上游多 hart HSM 测试在 Valheim 上完整通过。
 - Debian 13 demo 的 rootfs 必须继续来自已固定并校验的官方 OCI artifact；不要用 BusyBox、手写 `/etc/os-release` 或自制目录树冒充 Debian。
 - Linux ext4 base 必须在同一个 `fakeroot` 会话中解包 OCI layer、创建 overlay/device node

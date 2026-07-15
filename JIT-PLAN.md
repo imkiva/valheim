@@ -14,7 +14,9 @@ dispatcher 和编译期开销优化。superblock、direct machine-code chaining 
   32-bit 取指会分别以 Fetch 权限翻译两个
   16-bit parcel；页表隐式访问与最终 endpoint fault 都保留原访问类型和 guest VA。
 - `valheim-jit` 提供 decoded TB、negative cache、Cranelift RV64I/M、A helper、SSA GPR、
-  software TLB、DRAM direct access、精确 exception/MMIO side exit，以及有界 code arena。
+  software TLB、DRAM direct access、页内 fetch translation cache、精确 exception/MMIO
+  side exit，以及有界 code arena。negative cache 保存完整的已解码 fallback 指令，命中时
+  不再重复 fetch/decode。
 - JIT 可在一个 Machine budget 内连续执行多个已编译 TB，并用 generation-guarded successor
   cache 连接常见边；decoded/fallback、atomic、system、WFI、budget 或 side exit 会结束 batch。
   MMIO 若位于 native 前缀之后，会先返回 dispatcher，并在下一次
@@ -39,7 +41,8 @@ dispatcher 和编译期开销优化。superblock、direct machine-code chaining 
 
 上表和下方计时保留第一阶段的内建-initramfs 历史快照。后续 level-triggered PLIC、
 legacy VirtIO block 与 ext4 direct-root 增加回归后，当前 workspace/trace 已分别为
-158/158、96/96，Debian 两种 engine 都从 read-write ext4 启动；这些新结果及剩余方向见
+171/171、103/103，release JIT 为 54/54；Debian 两种 engine 都从 read-write ext4 启动，
+naive/JIT 的 ISA 测试仍为 96/96；这些新结果及剩余方向见
 `JIT-PERF.md`，不能与下方旧 workload 的绝对启动时间直接比较。
 
 第一阶段性能环境为 Linux 6.6.87.2 WSL2、AMD Ryzen 9 9950X3D、32 logical CPUs，基于
@@ -244,12 +247,14 @@ pub struct GuestBlock {
 - conditional branch、JAL、JALR 在执行后结束 TB。
 - CSR、ECALL、EBREAK、MRET、SRET、WFI、`FENCE.I` 和 `SFENCE.VMA` 是终止点。
 - 普通 `FENCE` 可以编译为 no-op。
-- 不支持的指令位于 TB 第一条时，记录 negative cache entry 并 naive 单步。
+- 不支持的指令位于 TB 第一条时，只有在完整 fetch/decode 成功后才把 `GuestInst` 写入
+  negative cache，并调用共享 `cpu.execute()` 单步；后续命中不再 fetch/decode。
 - 不支持的指令位于 TB 中间时，只编译其之前的合法前缀。
 - RVC 解码后继续记录 `len = 2`，其余为 `len = 4`。
 - 编译后续指令发生 fetch/decode fault 时，如果 TB 已有合法前缀，只在此前结束，不能提前向
   guest 抛异常；空 TB 才按当前 PC 返回真实 fetch/decode 异常。
-- 页尾和当前 fetch 行为无法安全等价时，首版回退到 naive。
+- 页尾、odd PC、MMIO 或 direct host page 无法安全等价时，builder 回到共享 `fetch_mem()`；
+  跨页 32-bit 指令的两个 parcel 继续分别翻译，不能把 fault 提前或错误缓存。
 
 TB builder 应使用无 trace 的翻译 fetch。它不能在预译后续代码时产生额外 Journal 记录，也
 不能让后续页面的 fault 或页表副作用提前发生。因此首版严格限制在首条指令所在代码页。
@@ -389,8 +394,9 @@ x86_64 特别注意：
 - RISC-V 的除零和 `MIN / -1` 有规定结果，必须显式 guard，不能触发 host `#DE`。
 - MULH/MULHU/MULHSU 的 signedness 和高 64 位必须分别验证。
 
-CSR、ECALL、EBREAK、MRET、SRET、WFI、FENCE.I、SFENCE.VMA 和 F/D 继续 naive 单步；
-A 扩展通过专用 helper 保持 LR/SC reservation 和 AMO 语义。
+CSR、ECALL、EBREAK、MRET、SRET、WFI、FENCE.I、SFENCE.VMA 和 F/D 继续走缓存完整指令的
+fallback，并调用共享 CPU 语义单步；A 扩展通过专用 helper 保持 LR/SC reservation 和 AMO
+语义。
 
 ## 访存、MMU 与 software TLB
 
@@ -562,8 +568,9 @@ native block 只返回整数 exit code 和 `JitFrame` 数据；Rust runtime 负�
 
 fallback 规则：
 
-- unsupported 位于 TB 起点：同一 executor dispatch 内 naive 单步一次。
-- unsupported 位于已执行前缀之后：先返回 dispatcher，下一次调度再单步。
+- unsupported 位于 TB 起点：成功 fetch/decode 后缓存完整 `GuestInst`，同一 executor
+  dispatch 内调用共享 `cpu.execute()` 单步一次；后续命中不重复 fetch/decode。
+- unsupported 位于已执行前缀之后：先返回 dispatcher，下一次调度再按上述缓存路径单步。
 - MMIO instruction 未执行前退出，下一次由 slow path 执行，避免设备 side effect 重复。
 - CSR/特权指令 fallback 成功后，JIT runtime 检查可能影响 cache key、TLB 或 privilege 的状态。
 - FENCE.I、SFENCE.VMA 和 SATP 写入最好在 core 的统一语义位置更新 epoch，而不是由 JIT 猜测。
@@ -598,7 +605,7 @@ CLI 增加：
 - 生成代码精确字节数与 live/peak 字节数
 - software TLB hit/miss
 - MMIO/fault slow-path 次数
-- naive fallback 指令分类
+- fallback 指令分类
 
 启用当前完整 `valheim-core/trace` feature 或传入 trace 文件时，首版强制使用 naive 并给出清楚
 提示。后续若需要 JIT trace，应单独设计 block-level 或 instrumented JIT，而不是让 fast path 默认

@@ -9,9 +9,9 @@
 历史 RustSBI 的 timer relay 适配实现于 `258fdf6`。level-triggered PLIC、可供 Linux
 使用的 legacy VirtIO block 和 writable ext4 Debian root 分别实现于 `e14e41e`、
 `bcd378d`、`ded32a0`。后三项首先是设备正确性和 workload 变更，不应把它们当作 JIT
-提速提交。下面
-“尚可评估的优化”均未实现，也不代表已经验证会更快。每个已落地优化都先独立验证、再单独
-提交；没有收益的实验已经完整回滚。
+提速提交。ext4 workload 上的本轮设备/JIT 优化实现到 `746684b`；每项先独立验证、再单独
+提交，没有把多个优化压进同一个 commit。下面“尚可评估的优化”均未实现，也不代表已经
+验证会更快；没有收益的实验已经完整回滚或明确记录为性能中性。
 
 ## 范围与当前结论
 
@@ -20,8 +20,8 @@
   和 gzip 压缩的内建 initramfs 不变。realtime 验收为兼容旧 RustSBI 新增 timer relay
   patch；它是时钟正确性适配，不混入旧性能改动的归因。
 - `ded32a0` 起 Debian 改为从 `/dev/vda` 的 read-write ext4 启动，kernel 不再内嵌
-  initramfs。当前还没有这项新 workload 的正式三次启动基线；旧时间和 profile 不包含
-  VirtIO/ext4 I/O，不能据此判断新路径的耗时或热点。
+  initramfs。本轮已建立固定 CPU 16、threshold 750 的正式三次交错 A/B 和 software
+  `cpu-clock:u` profile；旧 initramfs 数据仍只作历史对照。
 - 性能主指标仍是宿主进程启动到真实行末 `debian13# ` prompt，包含 JIT 编译时间。
 - 初始 JIT 的历史中位数为 13.447 s；上一轮 `b7bc41a` 工作树为 7.014 s。
 - realtime 切换前的 `0265308` 在固定 CPU 16 上三次为
@@ -39,8 +39,11 @@
   不是三次中位数，不用它声称新的正式加速比。
 - Debian JIT prompt 后的 WFI 忙轮询已经修复：修复前稳定占用一个 host core；实测两个
   约 5 秒窗口均为 0 个 user/system tick，同时 UART 唤醒和超过 80 字节的连续输入输出通过。
+- ext4 初始树 `ded32a0` 与当前 `746684b` 的三次交错中位数为 3.957267 s 与
+  3.371372 s，累计缩短 14.806%（1.1738×）。这个累计数包含 VirtIO、PLIC 和 JIT 多项提交，
+  不能用于声称任何单项的独立收益。
 
-当前运行时、设备和 demo 代码终点是 `ded32a0`；其后单独提交本文档，不混入代码改动。
+当前运行时、设备和 JIT 代码终点是 `746684b`；其后单独提交本文档，不混入代码改动。
 
 ## 测量口径
 
@@ -48,8 +51,8 @@
 32 logical CPUs，历史 kernel/rootfs/initramfs artifacts 固定。realtime 前后使用表中各自标明的
 release binary，realtime firmware 另含 timer relay patch；只有每项独立 A/B 才保证
 除被测改动外的条件相同。外部计时从进程启动开始，到检测到真实行末 prompt 为止；
-因此镜像加载和全部运行期 JIT 编译成本都被计入。下表截止于旧 initramfs workload；
-`ded32a0` ext4 direct-root 必须建立新基线后才能追加。
+因此镜像加载和全部运行期 JIT 编译成本都被计入。下表前半保留旧 initramfs workload，
+末两行是本轮 ext4 direct-root 的新口径，二者不能交叉比较绝对时间。
 
 计时运行默认关闭 `--jit-stats`，避免统计本身改变热路径。早期累计 checkpoint 如下：
 
@@ -69,6 +72,8 @@ release binary，realtime firmware 另含 timer relay patch；只有每项独立
 | realtime 前 `0265308`，固定 CPU 16 | 4.814 / 4.757 / 4.806 s；中位数 4.806 s |
 | realtime JIT，`258fdf6`，固定 CPU 16 | 8.903906 / 8.379352 / 8.321334 s；中位数 8.379352 s |
 | realtime naive，`258fdf6`，固定 CPU 16 | 单次验收 133.996711 s；非正式中位数 |
+| ext4 初始树 `ded32a0`，固定 CPU 16 | 3.787534 / 4.023637 / 3.957267 s；中位数 3.957267 s |
+| ext4 当前树 `746684b`，固定 CPU 16 | 3.263766 / 3.371372 / 3.540285 s；中位数 3.371372 s |
 
 这些 checkpoint 在开发工作树上累计测得，之后才按职责拆成独立 Git commit；因此 Git 拓扑
 顺序与测量顺序并不一一对应，不能用相邻行之差宣称单个 commit 的独立收益。可以单独引用的
@@ -114,6 +119,34 @@ realtime 切换前的 stats-on 快照记录 4496 个 compiled TB、1.813 s 累�
 277,803,697 次 native TB 执行、273,461,839 次 successor hit 和 3,305,991 次 miss，且
 compile failure 为 0。TLB 为 384,604,333 hit / 552,731 miss（约 99.86% hit）；统计开启会
 显著改变运行时间，这些数值只用于热点排序，不能与 stats-off 的 4.806 s 直接比较。
+
+### ext4 workload 本轮 A/B（`ded32a0..746684b`）
+
+本轮 prompt 计时固定 CPU 16、显式 `--jit-hot-threshold 750`、关闭 stats，并为每次启动从
+已校验的只读 ext4 base 创建新的 reflink/sparse 可写副本。kernel、RustSBI、rootfs、cmdline
+和 host 环境保持一致；六次按旧/新、新/旧、旧/新顺序交错。Bash 会在 prompt 前输出
+bracketed-paste 控制序列，harness 精确匹配真实的 `ESC[?2004hdebian13# `，不会误命中
+`/init` 的说明文字。两个 endpoint 之间还包含纯文档提交
+`0cc8a5e docs: record writable ext4 block root`；它不属于下文十个优化，也不影响机器码 A/B。
+
+| 独立优化 | 旧版三次 | 新版三次 | 中位数与结论 |
+| --- | --- | --- | --- |
+| 缓存完整 fallback 指令，`479004c→676393d` | 3.183915 / 3.612101 / 3.371539 s | 3.314642 / 3.517692 / 3.293438 s | 3.371539→3.314642 s；时间 -1.688%，1.0172×；收益小且单次噪声明显 |
+| TB 页内 fetch translation cache，`281a608→746684b` | 3.342623 / 3.318830 / 3.471942 s | 3.203207 / 3.216653 / 3.259755 s | 3.342623→3.216653 s；时间 -3.769%，1.0392×；三个配对方向一致 |
+| 本轮累计，`ded32a0→746684b` | 3.787534 / 4.023637 / 3.957267 s | 3.263766 / 3.371372 / 3.540285 s | 3.957267→3.371372 s；时间 -14.806%，1.1738×；不可拆给单项归因 |
+
+当前树另采一份 stats-on 快照；最后一行恰在 9,800,000 次 dispatch，略早于真实 prompt，
+所以它只用于数量级和热点排序：88,608,106 条 guest instruction、8,863,850 次 decoded TB、
+9,851,944 次 native TB、322,766 条 fallback（其中 system 298,865、F/D 5,220、other
+17,067、memory 1,614），negative cache hit 276,766；编译 2,241 个 TB，累计 658.298 ms，
+compile failure 为 0。software TLB 为 15,374,824 hit / 90,748 miss（99.413% hit）。stats-on
+到 prompt 用时 6.373452 s，不能与 stats-off 的约 3.4 s 比较。
+
+software `cpu-clock:u` 的相邻 TB fetch-page-translation-cache A/B 各约 3,000 个样本、
+lost sample 为 0。
+`translate_to_host()` 的 leaf share 从 9.69% 降到 8.10%；结合各自 event count，采样 CPU 时间
+约从 339.1 ms 降到 249.7 ms（-26.35%）。`GuestBlock::translate()` 约从 207.5 ms 降到
+188.7 ms（-9.07%）。百分比会受其他热点占比变化影响，因此以交错 prompt A/B 作为主结论。
 
 ## 已完成并独立提交的优化
 
@@ -292,7 +325,87 @@ ext4 workload，主要属于设备正确性和覆盖，不作 JIT 启动提速�
     固定 Debian OCI layer 现在在单个 fakeroot 会话中转换为经过 fsck/debugfs 校验的 256 MiB
     sparse ext4 base，再复制成受锁保护的持久化 runtime。Linux 5.17 以内建 VirtIO block/ext4
     直接挂载 `/dev/vda` 为 `rw`；`RESET_DISK=1` 显式重置。实跑验证写入、`sync`、journal
-    recovery、跨进程持久化、重置和 prompt 空闲，但该 workload 尚未建立正式启动性能基线。
+    recovery、跨进程持久化、重置和 prompt 空闲；该提交当时尚未建立正式启动性能基线，
+    本轮基线与优化数据见上文。
+
+### ext4 workload 的设备与 JIT 优化
+
+设备吞吐 A/B 同样固定 CPU 16、JIT threshold 750；每个样本从只读 base 新建独立
+`cp --reflink=auto` 可写盘。guest 写命令为
+`dd if=/dev/zero of=/root/io-bench.bin bs=1M count=64 conv=fsync status=none`；同一 clone 随后
+读三次，每次先在计时区间外执行 `sync` 和 `echo 3 > /proc/sys/vm/drop_caches`，再计时
+`dd if=/root/io-bench.bin of=/dev/null bs=1M status=none`。因此数据是 guest-cold、host-hot 的
+emulator/VirtIO 路径，不是宿主裸盘测试；吞吐统一用 64 MiB 除以 Bash `EPOCHREALTIME`
+测得的 dd 时间。除最早 queue-8 基线为两个 clone（2 写/6 读）外，各 variant 都是三个
+clone（3 写/9 读），并核对 `/dev/root` 为 `rw,relatime` ext4。
+
+25. `2edde12 perf(plic): skip unchanged source updates`
+
+    pending bit 已经为 1 或 electrical level 没有变化时，不再重算两个 context 的 claim。
+    新 pending、claim/complete、priority/enable/threshold 和 asserted-level re-pend 仍走原有
+    路径，因而只消除重复通知，不改变 PLIC 可见状态。
+
+26. `21e5b44 perf(virtio): expand the legacy block queue`
+
+    QueueNumMax 从 8 扩到 128；设备继续按 guest 实际写入的 QueueNum 工作，测试同时覆盖 8
+    和 128。真实 Linux 冷读吞吐相对 queue 8 提升约 9.4%（耗时约减少 8.6%），三组观察点的
+    VirtIO IRQ 分别减少约 40% / 27% / 30%；写入没有可信提升。
+
+27. `055b3f9 perf(virtio): advertise block segment limits`
+
+    feature/config 正确公布 `VIRTIO_BLK_F_SEG_MAX`、FLUSH、`size_max=0` 和
+    `seg_max=126`。128 个 direct descriptors 扣除 header/status 后可完整服务 126 个 data
+    segment；Linux 实测 `/sys/block/vda/queue/max_segments=126`。固定冷读中位数从
+    0.984040 s 降到 0.917611 s（-6.75%，1.0724×，约 65.04→69.75 MiB/s），写中位数
+    3.270611→3.271469 s，实质不变。
+
+28. `7b9a925 perf(virtio): reuse descriptor chain storage`
+
+    device 内复用 descriptor vector，并用 QueueNum 上界终止 cycle，不再为每个 request 分配
+    descriptor/visited storage。该 variant 的写/读中位数为 3.470095 / 0.924044 s：写入波动
+    较大，读取与相邻稳定基线接近，未证明稳定吞吐收益。保留原因是降低每请求固定分配，并为
+    未来抽取通用队列解析器减少热路径分配。
+
+29. `81a697f perf(virtio): reuse block transfer scratch`
+
+    非 mmap backend 的 64 KiB transfer scratch 在挂载 backend 时分配一次，并明确
+    `read_at` 必须完整填充或报错。该 variant 的写/读中位数为 3.335542 / 0.947467 s，
+    同样没有稳定收益；这是去掉热路径 allocation 的结构性改进。
+
+30. `cc7a20e perf(virtio): copy mapped block data directly`
+
+    mmap backend 可借用经过 checked-range 验证的 slice，guest DRAM 也提供只读 checked slice；
+    IN/OUT 因而各只保留必需的一次 copy，其他 backend 仍用 scratch。三次写中位数
+    3.460905 s，波动较大；九次冷读中位数 0.914786 s（69.96 MiB/s），与 SEG_MAX 稳定基线
+    0.917611 s 实质相同，不能声称额外吞吐提升。
+
+31. `479004c perf(plic): scan only enabled pending sources`
+
+    claim recompute 改为逐 word 计算 `pending & enable`，再用 `trailing_zeros` 只枚举候选。
+    word/bit 升序和严格 `priority > best` 保留“最高优先级、同级最低 IRQ”；跨 word、未 enable
+    高优先级源和 level complete 均有回归。
+
+32. `676393d perf(jit): cache decoded fallback instructions`
+
+    negative cache 保存 fallback 的 `pc/raw/len/decoded`，命中时设置 `cpu.instr` 并直接调用
+    共享 `cpu.execute()`，不再让 naive 重复 fetch/decode。TIME/CSR/WFI 仍读取 live CPU/CLINT
+    状态；FENCE.I/SFENCE epoch 继续整体失效。页尾 compressed 和 32-bit 第二 parcel 只有
+    fetch/decode 成功后才可缓存。Debian 独立 A/B 为 -1.688%，属于小幅收益。
+
+33. `281a608 perf(virtio): batch used index publication`
+
+    一次 notify drain 先写所有 used element，最后只发布一次最终 `used.idx`。只有 index 发布
+    成功才报告 completion/IRQ；request data/status 的 DMA 标记、malformed request、
+    `NO_INTERRUPT` 和 `u16` wrap 语义保持不变。
+
+34. `746684b perf(jit): cache TB fetch page translation`
+
+    TB builder 对普通 DRAM code page 只调用一次共享 `translate_to_host(Fetch)`，后续 parcel
+    复用返回的 4 KiB host page。它不复制 Sv39 walker/权限逻辑；odd PC、页尾和 MMIO 仍走
+    `fetch_mem()`，16-bit low parcel 判定为 32-bit 后才读取 high parcel。Sv39 X/A、非同址
+    映射、MMIO、guest fault VA、非对齐 host pointer 和跨页第二 parcel 均有测试。独立 prompt
+    A/B 为 -3.769%，且采样中的 `translate_to_host()` CPU 时间约下降 26.35%。默认 hot
+    threshold 在整个本轮始终保持 750。
 
 ## 当前验证状态
 
@@ -300,22 +413,28 @@ ext4 workload，主要属于设备正确性和覆盖，不作 JIT 启动提速�
 
 - `cargo +nightly-2024-09-05 test --workspace --locked`
   - `valheim-asm` 11 个测试；
-  - `valheim-core` 95 个测试；
-  - `valheim-jit` 34 个单元测试；
+  - `valheim-core` 102 个测试；
+  - `valheim-jit` 40 个单元测试；
   - 10 个 native/naive differential tests；
   - 4 个 native memory fast-path integration tests；
   - `xtask` 4 个测试。
-- 上述 workspace 合计 158/158；
-  `cargo +nightly-2024-09-05 test --locked --package valheim-core --features trace`：96/96。
+- 上述 workspace 合计 171/171；
+  `cargo +nightly-2024-09-05 test --locked --package valheim-core --features trace`：103/103。
 - `cargo +nightly-2024-09-05 test --release --locked --package valheim-jit`，让
-  34 + 10 + 4 项 JIT tests 真正在 release verifier-off 配置执行。
+  40 + 10 + 4 = 54 项 JIT tests 真正在 release verifier-off 配置执行。
 - `cargo +nightly-2024-09-05 build --release --locked --package valheim-cli`。
 - 当前树的 debug xtask 在 naive 与 JIT 下均通过 96/96 `riscv-tests`。
-- 当前 `ded32a0` 代码树实跑三个 demo 的 naive/JIT 六种组合：xv6 两种引擎
+- 当前 `746684b` 代码树实跑三个 demo 的 naive/JIT 六种组合：xv6 两种引擎
   均进入 `$` 并成功执行 `echo`；RustSBI 两种引擎均输出完整 success marker；
-  Debian 两种引擎均从 read-write ext4 进入真实 `debian13#`，版本为 `13.6`。
-  Debian JIT 还验证写入、`sync`、journal recovery、跨运行持久化、显式 reset、
-  非零 VirtIO IRQ 和持续增长的 timer IRQ；prompt 空闲三次 `pidstat` 平均 0.33% host CPU。
+- Debian 两种引擎均从 read-write ext4 进入真实 `debian13#`，版本为 `13.6`，
+  `/dev/root` 均为 `rw,relatime` ext4，`max_segments` 为 126。JIT 进程写入并 `sync` 的
+  marker 可由随后启动的 naive 进程读取，验证了跨进程持久化。
+- Debian 两种引擎均输出 `SBI TIME extension detected`，且 `riscv-timer` IRQ 持续增长。
+  从提交完整命令到观察到 guest `TIMER_END` marker 计时，`sleep 1` 为 JIT 1.482 s、naive
+  1.819 s；对应 timer IRQ 分别从 783 增至 836、从 2072 增至 2169。另一次独立的 prompt
+  空闲 5.005 s 窗口中，宿主进程分别只增加 3 和 12 个 `CLK_TCK=100` CPU tick，约为 0.6%
+  和 2.4% 单核占用，均未恢复成满核忙轮询。
+- Debian JIT 还验证写入、`sync`、journal recovery、显式 reset 和非零 VirtIO IRQ。
   backend FLUSH 的成功/失败和 mmap 落盘语义由独立单元测试覆盖，不能从 guest `sync`
   单独归因某一次具体 request。
 
@@ -325,10 +444,9 @@ ext4 workload，主要属于设备正确性和覆盖，不作 JIT 启动提速�
 
 ## 尚可评估的优化
 
-以下优先级是基于当前代码结构和已有统计的工程判断，不是性能结论。下一轮应先用 `perf` 和
-新的低开销 counters 确认热点，再一次只实现并提交一个方向。
-除明确标为 realtime 的数据外，本节引用的 profile/stats 数值均来自 `0265308`
-realtime 切换前的快照，不能假定热点占比在当前树上完全不变。
+以下优先级是基于当前 `746684b` ext4 workload 的 profile、stats 和代码结构作出的工程判断，
+不是尚未测量方向的性能承诺。后续仍应一次只实现、验证并提交一个优化；独立 A/B 没有稳定
+收益时应回滚代码，只在本文档记录结论。
 
 ### 已测但未采用
 
@@ -346,71 +464,97 @@ realtime 切换前的快照，不能假定热点占比在当前树上完全不�
 
 本机已安装 `rustfilt 0.2.1`，并验证
 `/usr/lib/linux-tools/5.15.0-1103-kvm/perf` 可用 software `cpu-clock:u` 采样。Cranelift JIT
-代码已经能在报告中显示为 `[JIT] tid ...` / `.Lfn...`；realtime 切换前
-`0265308` 的最新 leaf profile 中
-`JitExecutor::execute` 为 35.50%、解释器 `RV64Cpu::execute` 5.81%、`translate_to_host()`
-4.75%、`Bus::read` 1.92%、`GuestBlock::translate` 1.25%、`Machine::dispatch_next` 1.00%。
-release 关闭 verifier 后，verifier 热点已经消失。
+代码已经能在报告中显示为 `[JIT] tid ...` / `.Lfn...`。当前 ext4 stats-off profile 的 leaf
+share 中，`JitExecutor::execute` 为 19.32%、`RV64Cpu::execute` 为 14.28%、
+`translate_to_host()` 为 8.10%、`GuestBlock::translate()` 为 6.12%、`Bus::read` 为 3.35%；
+host realtime clock 相关 leaf 合计仍约 8%–9%。`Virtio::service_queue` 只有 0.42%，PLIC
+低于 0.2%。leaf 百分比会随调用内联和其他热点占比变化，不能相加成路径占比，但足以说明当前
+Debian 启动首先应继续看 JIT、共享执行/MMU 和时钟，而不是继续猜测 VirtIO/PLIC 微优化。
 
-以上样本全部来自旧 initramfs 启动。下一轮第一步必须在 `ded32a0` 上分别建立 ext4
-direct-root 的 JIT/naive 三次 prompt 基线，再采一份 stats-off `perf record` 和独立的
-stats-on counters；至少要把 JIT dispatch/compile、VirtIO queue service、PLIC recompute、
-guest-memory copy 和 mmap FLUSH 分开。不能把旧 profile 百分比直接用于安排 block-root 优先级。
-
-WSL 中 `cycles`、`instructions`、`branches` 和 `branch-misses` 仍报告 `<not supported>`；需要
-可靠硬件计数时必须在 native Linux x86_64 复测，不能把空计数当作结果。下一步可观测性工作：
+当前 stats-on 数据也显示 system 占 322,766 条 fallback 中的 298,865 条；同时 native
+software TLB 已有 99.413% hit。下一轮最有价值的可观测性工作是：
 
 1. 给 `.Lfn...` 增加 guest PC、SATP/privilege 和 code range 元数据或 jitdump，使生成代码
    样本能按 guest TB 聚合，而不只是看到匿名函数。
-2. 只在 `--jit-stats` 下增加 batch stop-reason、每 dispatch 的 native TB 数、atomic helper、
-   SFENCE/FENCE.I 和 TLB context invalidation 原因；stats-off 机器码不得新增 counter 分支。
-3. 继续使用同一 prompt harness 和交错 A/B；在 native Linux 上补 `perf stat -r 5`，再用
-   `perf record -g` 定位累计 CPU 热点。stats-on 与 stats-off 时间不可直接比较。
+2. 只在 `--jit-stats` 下细分 system opcode/CSR、batch stop reason、每 dispatch 的 native TB
+   数、翻译调用方与 miss 原因、atomic helper、SFENCE/FENCE.I 和 TLB context invalidation；
+   stats-off 的 Rust/native 热路径不得新增 counter 分支。
+3. 把 658.298 ms 累计编译时间继续拆成 translate、Cranelift compile、finalize 和 module
+   rotation，避免未分段就选择批量提交或后台编译。
+4. 继续使用同一 prompt harness 和交错 A/B；stats-on 与 stats-off 时间不可直接比较。
+
+WSL 中 `cycles`、`instructions`、`branches` 和 `branch-misses` 仍报告 `<not supported>`；需要
+可靠硬件计数时必须在 native Linux x86_64 复测，不能把空计数当作结果。
 
 ### P1：优先做的下一批实验
 
 1. 细分并 lower 高频 system/CSR fallback。
 
-   realtime 切换前的 stats-on 快照有 679,131 次 system fallback，解释器执行
-   本身占 profile 5.81%。先按
-   opcode/CSR 计数；若 `cycle/instret` 等纯读占主导，可把 dispatcher 基准计数
-   和 TB 内 instruction offset 显式传给 native code。`time/rdtime` 必须每次从
-   host-clock-backed CLINT live 读取（或调用等价 helper），绝不能从 instruction
-   offset 合成。ECALL、xRET、WFI、SATP/MSTATUS 写和 fence 仍应保留边界。
+   当前快照中 system 是 fallback 的绝对主体，但必须先按 opcode/CSR 计数；若
+   `cycle/instret` 等纯读占主导，可把 dispatcher 基准计数和 TB 内 instruction offset
+   显式传给 native code。`time/rdtime` 必须每次从 host-clock-backed CLINT live 读取或调用
+   等价 helper，绝不能从 instruction offset 合成。ECALL、xRET、WFI、SATP/MSTATUS 写、
+   `FENCE.I` 和 `SFENCE.VMA` 仍应保留精确边界。
 
-2. 为 TB builder 增加 page-local fetch translation cache。
+2. 为 decoded/解释器路径增加共享的 core translation cache。
 
-   `GuestBlock::translate()` 当前对同一 code page 内的每条指令调用 `fetch_mem()`，
-   并在 realtime 前 profile 占 1.25%。TB 已限制在单页内，可通过 core 的
-   `translate_to_host()` 对该页执行一次
-   Fetch 翻译，再从返回的 DRAM host page 解码后续 parcel。不能复制 Sv39 权限逻辑；跨页
-   32-bit 指令、MMIO endpoint、A-bit 更新和 fault guest VA 仍由共享接口决定。
+   TB 页内 fetch cache 已把普通 DRAM code page 内的 builder 重复页翻译去掉，但当前
+   `translate_to_host()` 仍有 8.10% leaf share；native software TLB 的 99.413% hit 并不能覆盖
+   decoded/fallback、取指和 core slow path。可在 core 层按 VPN、访问类型、privilege、
+   MPRV/SUM/MXR、SATP/ASID 与 generation 缓存普通 DRAM translation target，所有 miss
+   仍只能调用唯一的
+   `translate_to_host()` 填充。必须保留 PTE A/D 更新、最终 endpoint fault、fragment guest VA、
+   `SFENCE.VMA`/SATP/MSTATUS 失效和 MMIO side effect；JIT 不得私自维护第二份 Sv39 权限逻辑。
 
-3. 继续降低 JIT 编译与 finalize 成本。
+3. 测量并削减 realtime clock 热路径。
 
-   默认 threshold 已调到 750，release verifier 已关闭，但 realtime 前 stats-on 快照仍有
-   4496 个 compiled TB、1.813 s 累计编译时间。可评估批量 finalize、多函数 module 提交，
-   或由独立 backend
-   后台编译后在 dispatcher 安全点安装。后台编译和 module 生命周期风险较高，必须先把
-   compile/finalize 子阶段单独计时；`speed_and_size` 已实测无益，不应重复。
+   host clock 相关 leaf 合计仍约 8%–9%。先按 interrupt poll、TIME CSR、CLINT MMIO 和 WFI
+   deadline 细分调用次数；随后可独立评估减少同一 dispatcher 内的重复 `Instant::now()`，以及
+   用秒/纳秒的 10 MHz 精确换算替代通用 `u128` 路径。TIME 必须保持 live read，MTIP 不得提前，
+   WFI 仍使用绝对 deadline 并允许 WakeHub 提前唤醒，不能为了 benchmark 恢复 instruction clock。
 
-4. 基于 guest-PC profile 决定是否 inline Linux 热点原子操作。
+4. 继续降低 JIT 编译与 finalize 成本。
+
+   当前 stats-on 到 prompt 编译 2,241 个 TB、累计 658.298 ms。分段计时后可评估批量 finalize、
+   多函数 module 提交，或由独立 backend 后台编译后在 dispatcher 安全点安装。后台编译和 module
+   生命周期风险较高；`speed_and_size` 已实测无益，不应重复。
+
+5. 基于 guest-PC profile 决定是否 inline Linux 热点原子操作。
 
    当前所有 LR/SC/AMO 都调用 Rust helper 并终止 TB。只有 profile 证实它是热点时，才对对齐
    DRAM fast path 做 x86_64/Cranelift lowering，并继续保留 terminator。必须保留 LR/SC
    reservation、A/D 位、MMIO、异常 PC 和 guest memory-order 语义，不能以“单 hart”为由删边界。
 
-5. 最后再评估 context-tagged / packed software TLB。
-
-   当前 256-entry direct-mapped TLB 在 realtime 前快照中的 hit rate 约 99.86%，单纯增加
-   replacement 复杂度很难成为首选。若 guest-PC/profile 显示 4.75% 的
-   `translate_to_host()` 主要来自 context
-   invalidation 而不是 decoded/fallback fetch，再考虑 16-byte packed tag、近期多 context 或
-   superpage entry；任何压缩 tag 都必须证明无 false hit，`SFENCE.VMA` 仍须使旧翻译不可达。
-
 ### P2：结构性优化
 
-1. page-local trace/superblock，再评估 direct native block chaining。
+1. 实现 VirtIO indirect descriptors。
+
+   queue 128 + `SEG_MAX=126` 已明显改善冷读，但仍只有 direct split descriptors。indirect table
+   可减少主 descriptor table 压力。该 feature 必须单独协商、实现和提交，并覆盖 table
+   对齐/长度、越界、cycle、indirect nesting 和 descriptor 方向。
+   legacy version 1 与现代 version 2 是另一项兼容工作，不能在同一优化中顺带切换。
+
+2. 实现 VirtIO `EVENT_IDX`。
+
+   当前一次 notify drain 已批量发布 used index，但 guest/device 通知仍使用基础 flag 语义。
+   `EVENT_IDX` 可按 ring event index 更精确地抑制通知；必须单独协商、A/B 和提交，正确处理
+   `u16` wrap、`vring_need_event`、空批次、`NO_NOTIFY`/`NO_INTERRUPT` fallback 和 level IRQ。
+
+3. 为真实 block backend 设计异步请求生命周期。
+
+   当前 mmap backend 在 Machine 线程内同步执行 copy/flush；对 host-hot 256 MiB image 足够，
+   但真实文件或更大 rootfs 会把宿主 I/O latency 串行化。后台 I/O 需要拥有稳定的 request
+   元数据；worker 只通过 WakeHub 通知完成，Machine 线程再发布 DMA/status、used ring 和 level
+   IRQ，并正确处理 reset、queue reconfigure、guest buffer 生命周期与 emulator 退出。应先用
+   host-cold 或受控 backend latency 证明收益。
+
+4. 按 dirty range 缩小 FLUSH 工作量。
+
+   当前 mmap FLUSH 面向整个 mapping。若 write-heavy profile 证明它是热点，可跟踪 block-aligned
+   dirty range 并合并 flush；必须保证 guest 已完成的 OUT 在成功 FLUSH 后具备原有持久性，处理
+   overlap、reset 和 host page alignment。不能用延迟或丢弃 FLUSH 换取表面吞吐。
+
+5. page-local trace/superblock，再评估 direct native block chaining。
 
    Rust 侧 generation-guarded successor cache 已完成，但每个 TB 仍返回 Rust、间接调用下一
    generated function 并写回架构状态。superblock 可跨常见 branch，把多个 TB 的 GPR 保留在
@@ -418,30 +562,19 @@ WSL 中 `cycles`、`instructions`、`branches` 和 `branch-misses` 仍报告 `<n
    限制，并为 exception、MMIO、TLB miss、atomic、system、WFI 和 IRQ 保留精确 side exit。
    native target patch 还要处理 module rotation、code arena 回收及旧 target 的原子失效。
 
-2. context-tagged/superpage-aware TLB 与 page-walk cache。
+6. context-tagged/superpage-aware TLB 与 page-walk cache。
 
    现有 TLB 以 4 KiB host page 填充，即使 Sv39 leaf 是 2 MiB/1 GiB 也不能复用更大 span。
    可以让 core 的 `TranslationTarget` 返回经过验证的 page size/span，再由 JIT 填充 superpage
    entry；也可缓存中间页表层级。页表遍历和 PTE 权限/A/D 更新仍只能由
    `translate_to_host()` 的共享逻辑决定，JIT 不得另写一份 Sv39 walker。
 
-3. 精细化 `SFENCE.VMA` 失效。
+7. 精细化 `SFENCE.VMA` 失效。
 
    当前任意显式 SFENCE 都保守清空全部 decoded/native cache。可让 core 记录 rs1 VA、rs2
    ASID 和 fence generation，按 RISC-V 规则只失效匹配 TLB/TB；代码页依赖也需要记录 guest
    VA 到物理页的关系。该优化很容易制造 stale-code 或 stale-permission bug，只有统计显示
    SFENCE 导致大量重译时才值得做。
-
-4. 按新 ext4 profile 缩减 VirtIO/PLIC host 开销。
-
-   `bcd378d` 已一次 drain notify 时可见的全部 request，但每个 IN/OUT 仍分配 64 KiB copy
-   buffer，每条 chain 也会分配 descriptor/visited vectors；可先把这些 scratch storage 复用到
-   device 内，再做独立 A/B。PLIC 的 `set_source_level(true)` 即使 source 已 pending，也可能重复
-   扫描 1023 个 source × 两个 context；可在状态未变时跳过 recompute，但 claim、complete、
-   priority、enable 和 threshold 的可见性不能改变。若 queue depth 8 确认限制吞吐，再单独扩大
-   `QUEUE_SIZE` 及 QueueNumMax 返回值，随后才考虑 `VIRTIO_RING_F_INDIRECT_DESC` 和 block
-   `SEG_MAX`；这些会扩大 guest 可提交的 DMA 图，必须补 malformed/cycle/overflow 和 Linux
-   持久化测试，不能一次混做。
 
 ### 本轮已从候选移除
 
@@ -453,34 +586,41 @@ clock，WFI 不快进，`ClockSource`/`ManualClock` 仅用于无 sleep 的可重
 level-triggered PLIC/SEIP 与 VirtIO IRQ 1 已分别在 `e14e41e`/`bcd378d` 完成；后续只把
 经 profile 证明的冗余扫描当作性能实验，不再把基础中断正确性列为未实现项。
 
+本轮还已完成并独立提交 queue 128、`SEG_MAX=126`、descriptor/transfer scratch 复用、mmap
+direct copy、used index 批量发布、两项 PLIC 扫描削减、完整 fallback 指令缓存和 TB 页内 fetch
+translation cache。它们不再列作下一轮候选；其中结构性改进和性能中性结果也保留在上文，避免
+以后重复实验。
+
 ### 当前低优先级
 
 - 更复杂的 code LRU：realtime 前快照的峰值 live code 约 3.44 MiB，远低于默认
   128 MiB 上限，且没有 code-cache flush；它不是当前 Debian 启动瓶颈。
-- 单独增加 TLB replacement 复杂度：realtime 前快照 hit rate 约 99.86%。应先区分 compulsory、
+- 单独增加 native TLB replacement 复杂度：当前快照 hit rate 为 99.413%。应先区分 compulsory、
   direct-map conflict 和 context invalidation miss，再决定 2/4-way 是否值得。
-- F/D native lowering：realtime 前到 prompt 的快照只有 2784 次 floating-point
+- F/D native lowering：当前到 prompt 前的快照只有 5,220 次 floating-point
   fallback，对 Debian 启动的潜在收益很低；它更像 ISA 覆盖工作。
-- 为少量 MMIO/cross-page slow path 增加专门机器码：这些路径必须以正确性为先，已有快照只有
-  1690 次（realtime 前），优先级低于 dispatcher、system fallback 和编译成本。
+- 为少量 memory/MMIO/cross-page slow path 增加专门机器码：这些路径必须以正确性为先，当前
+  memory fallback 只有 1,614 次，优先级低于 system fallback、共享翻译和时钟成本。
 - persistent code cache 或跨进程复用：需要稳定 relocation、host feature、guest artifact 和
-  失效协议，复杂度与当前约 8.4 s realtime 启动阶段不匹配。
+  失效协议；当前累计编译时间约 658 ms，复杂度仍高于先优化运行期热点。
 
 ## 建议的下一轮顺序
 
-1. 以当前 `ded32a0` ext4 direct-root 树建立 JIT/naive 三次 prompt 基线，并重采
-   stats-off `perf`；同时补 guest-PC JIT 符号和 stop-reason/system-opcode counters，计时始终
-   关闭 stats。
-2. 根据新 profile 先判断热点属于 JIT 还是 block/PLIC；设备侧只在命中热点时从 scratch
-   reuse、冗余 PLIC scan、queue depth 三者中选一个做独立 A/B。
-3. 若 JIT 仍占主导，在 system/CSR lowering 与 page-local fetch cache 中只选一个，独立实现、交错 A/B、独立
-   commit；收益不稳定就完整回滚。
+1. 增加 stats-only 的 system opcode/CSR、translation caller/reason 和 compile phase counters，
+   同时补 guest-PC JIT 符号；prompt 计时继续关闭 stats。
+2. 根据新 counters，在 system/CSR native lowering 与 core 共享 translation cache 中只选一个，
+   独立实现、交错 A/B、独立 commit；收益不稳定就完整回滚。
+3. 单独测量 realtime clock 的调用来源；只有确认热点后才优化换算或去除冗余采样，并用
+   `sleep 1`、timer IRQ 和 prompt 空闲共同验收语义。
 4. 把 compile/finalize 分段计时后，再决定批量 finalize 或后台编译是否值得；不要重复已经
    否决的 `speed_and_size` 实验。
-5. 只有 guest-PC profile 证实热点后，才选 inline atomic 或 context-tagged TLB。
-6. 小步优化不能继续降低 `JitExecutor::execute` 热点时，再进入 superblock/direct native
+5. 只有 guest-PC profile 证实热点后，才选 inline atomic、superpage/native TLB 或更细
+   `SFENCE.VMA` 失效。
+6. 设备侧下一步在 indirect descriptors 与 `EVENT_IDX` 中只选一个独立实验和提交；异步
+   backend 和 dirty range flush 只在更真实的 I/O workload 证明当前同步路径受限后开展。
+7. 小步优化不能继续降低 `JitExecutor::execute` 热点时，再进入 superblock/direct native
    chaining，并先设计 budget/side-exit/module-rotation 协议。
-7. 每个落地优化继续跑 workspace、release JIT tests、96 个 `riscv-tests` 及三个 JIT demo；
+8. 每个落地优化继续跑 workspace、release JIT tests、96 个 `riscv-tests` 及三个 JIT demo；
    涉及 core/设备时再补 naive、trace 和双引擎完整回归。
 
 所有后续实现继续遵守两个不变量：JIT 不复制 Sv39 翻译/权限逻辑；任何 batching/chaining
