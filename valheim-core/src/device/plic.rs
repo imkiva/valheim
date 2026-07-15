@@ -85,7 +85,7 @@ impl Plic {
       return;
     };
     let irq = irq as usize;
-    if self.in_service_context[irq].get() == NO_CONTEXT {
+    if self.in_service_context[irq].get() == NO_CONTEXT && self.pending[word].get() & mask == 0 {
       self.pending[word].set(self.pending[word].get() | mask);
       self.recompute_claims();
     }
@@ -111,11 +111,15 @@ impl Plic {
     let Some((word, mask)) = Self::source_position(irq) else {
       return;
     };
+    let old_level = self.level[word].get();
+    if (old_level & mask != 0) == asserted {
+      return;
+    }
     if asserted {
-      self.level[word].set(self.level[word].get() | mask);
+      self.level[word].set(old_level | mask);
       self.set_pending(irq);
     } else {
-      self.level[word].set(self.level[word].get() & !mask);
+      self.level[word].set(old_level & !mask);
     }
   }
 
