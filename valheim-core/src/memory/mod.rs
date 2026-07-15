@@ -137,6 +137,32 @@ impl Memory {
     Some(())
   }
 
+  /// Copies bytes from DRAM into `dst` after validating the complete guest-physical range.
+  pub fn read_bytes(&self, addr: VirtAddr, dst: &mut [u8]) -> Option<()> {
+    if dst.is_empty() {
+      self.to_phys_with_width(addr, 0)?;
+      return Some(());
+    }
+    let phys = self.to_phys_with_width(addr, dst.len())?;
+    unsafe {
+      std::ptr::copy_nonoverlapping(phys.0.cast_const(), dst.as_mut_ptr(), dst.len());
+    }
+    Some(())
+  }
+
+  /// Copies `src` into DRAM after validating the complete guest-physical range.
+  pub fn write_bytes(&mut self, addr: VirtAddr, src: &[u8]) -> Option<()> {
+    if src.is_empty() {
+      self.to_phys_with_width(addr, 0)?;
+      return Some(());
+    }
+    let phys = self.to_phys_with_width(addr, src.len())?;
+    unsafe {
+      std::ptr::copy_nonoverlapping(src.as_ptr(), phys.0, src.len());
+    }
+    Some(())
+  }
+
   pub fn load<T: CanIO>(&mut self, offset: usize, mem: &[T]) -> Option<()> {
     let byte_len = mem.len().checked_mul(std::mem::size_of::<T>())?;
     if byte_len == 0 {
@@ -216,5 +242,18 @@ mod test {
     assert_eq!(mem.load(0x1004, &[1_u8, 2, 3, 4]), Some(()));
     assert_eq!(mem.read::<u32>(VirtAddr(0x1004)), Some(0x0403_0201));
     assert_eq!(mem.load(0x1005, &[1_u8, 2, 3, 4]), None);
+  }
+
+  #[test]
+  fn memory_bulk_copy_checks_the_whole_slice() {
+    let mut mem = Memory::new(0x1000, 8).unwrap();
+    let source = [1_u8, 2, 3, 4];
+    let mut destination = [0_u8; 4];
+
+    assert_eq!(mem.write_bytes(VirtAddr(0x1004), &source), Some(()));
+    assert_eq!(mem.read_bytes(VirtAddr(0x1004), &mut destination), Some(()));
+    assert_eq!(destination, source);
+    assert_eq!(mem.write_bytes(VirtAddr(0x1005), &source), None);
+    assert_eq!(mem.read_bytes(VirtAddr(0x0fff), &mut destination), None);
   }
 }

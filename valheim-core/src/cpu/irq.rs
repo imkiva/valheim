@@ -1,6 +1,5 @@
 use crate::cpu::{PrivilegeMode, RV64Cpu};
 use crate::cpu::csr::CSRMap::{MCAUSE, MEDELEG, MEIP_MASK, MEPC, MIDELEG, MIE, MIP, MSIP_MASK, MTIP_MASK, MTVAL, MTVEC, SCAUSE, SEIP_MASK, SEPC, SSIP_MASK, STIP_MASK, STVAL, STVEC};
-use crate::device::virtio::Virtio;
 use crate::memory::VirtAddr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +53,15 @@ impl RV64Cpu {
   pub fn pending_interrupt(&mut self) -> Option<IRQ> {
     self.refresh_local_interrupts();
 
+    // Queue service is device progress, not interrupt delivery. It must continue while global
+    // interrupt enables are clear; otherwise a guest can deadlock after submitting block I/O in
+    // a critical section. DMA writes invalidate every LR/SC reservation conservatively because
+    // reservations currently store guest virtual addresses and may alias the physical target.
+    let virtio = self.bus.service_virtio();
+    if virtio.dma_write {
+      self.reserved.clear();
+    }
+
     // 3.1.6.1 Privilege and Global Interrupt-Enable Stack in mstatus register
     // Global interrupt-enable bits, MIE and SIE, are provided for M-mode and S-mode respectively.
     // When a hart is executing in privilege mode x, interrupts are globally enabled
@@ -93,37 +101,15 @@ impl RV64Cpu {
     //    Software interrupts can be avoided when high-precision timing is required,
     //    or high-precision timer interrupts can be routed via a different interrupt path.
 
-    // In our implementation, external devices is only UART, currently. We may support
-    // VirtIO disks, which is also a external devices.
-
-    // check builtin virtio disk
-    // Preserve one-shot external events until their target privilege can take them. A waiting hart
-    // still polls because any individually enabled pending event must wake WFI even when its target
-    // privilege's global enable is clear.
+    // Pulse-based devices retain their event until polled. Do not consume a second UART pulse
+    // while the first is still being handled with SIE clear: the PLIC gateway coalesces requests
+    // for an in-service source. A waiting hart must still poll regardless of the global enable.
+    // VirtIO is deliberately serviced above this gate because queue progress is not a pulse.
     if self.wfi || self.interrupt_globally_enabled(SEIP_MASK) {
-      let external_irq = match self.bus.virtio.pending_interrupt() {
-        Some(virtio_irq) => {
-          // TODO: replace with our own DMA implementation
-          // TODO: exception handling
-          Virtio::disk_access(self).expect("failed to access the disk");
-          Some(virtio_irq)
+      for dev in self.bus.devices.iter() {
+        if let Some(irq_id) = dev.is_interrupting() {
+          self.bus.plic.update_pending(irq_id);
         }
-        _ => {
-          let mut irq = None;
-          // check other external devices like UART
-          for dev in self.bus.devices.iter() {
-            if let Some(irq_id) = dev.is_interrupting() {
-              irq = Some(irq_id);
-              break;
-            }
-          }
-          irq
-        }
-      };
-
-      if let Some(irq_id) = external_irq {
-        // tell PLIC that we have an external irq
-        self.bus.plic.update_pending(irq_id);
       }
     }
 
@@ -179,7 +165,10 @@ impl RV64Cpu {
 
 #[cfg(test)]
 mod tests {
+  use memmap2::MmapMut;
+
   use super::{IRQ, RV64Cpu};
+  use crate::cpu::bus::{PLIC_BASE, VIRTIO_BASE};
   use crate::cpu::csr::CSRMap::{
     MCAUSE, MEPC, MIDELEG, MIE, MIP, MTIE_MASK, MTIP_MASK, MTVEC, STIE_MASK, STIP_MASK,
   };
@@ -323,6 +312,97 @@ mod tests {
     assert_eq!(cpu.bus.plic.read(VirtAddr(S_CLAIM)).unwrap(), IRQ as u32);
     assert_eq!(cpu.pending_interrupt(), None);
     assert_eq!(cpu.csrs.read_unchecked(MIP) & SEIP_MASK, 0);
+  }
+
+  #[test]
+  fn virtio_progress_is_independent_of_global_interrupts_and_invalidates_reservations() {
+    const QUEUE_BASE: u64 = 0x8000_1000;
+    const AVAIL_BASE: u64 = QUEUE_BASE + 16 * 8;
+    const USED_BASE: u64 = 0x8000_2000;
+    const HEADER: u64 = 0x8000_4000;
+    const STATUS_BYTE: u64 = 0x8000_4100;
+
+    let mut cpu = RV64Cpu::new(None);
+    cpu.bus
+      .virtio
+      .set_image(MmapMut::map_anon(512).unwrap())
+      .unwrap();
+    cpu.bus
+      .plic
+      .write(VirtAddr(PLIC_BASE + 4), 1)
+      .unwrap();
+    cpu.bus
+      .plic
+      .write(VirtAddr(PLIC_BASE + 0x2080), 1 << 1)
+      .unwrap();
+    cpu.bus
+      .write::<u32>(VirtAddr(VIRTIO_BASE + 0x28), 0x1000)
+      .unwrap();
+    cpu.bus
+      .write::<u32>(VirtAddr(VIRTIO_BASE + 0x38), 8)
+      .unwrap();
+    cpu.bus
+      .write::<u32>(VirtAddr(VIRTIO_BASE + 0x40), (QUEUE_BASE / 0x1000) as u32)
+      .unwrap();
+    cpu.bus
+      .write::<u32>(VirtAddr(VIRTIO_BASE + 0x70), 4)
+      .unwrap();
+
+    let mut header = [0_u8; 16];
+    header[0..4].copy_from_slice(&4_u32.to_le_bytes());
+    cpu.bus.mem.write_bytes(VirtAddr(HEADER), &header).unwrap();
+
+    let mut descriptor = [0_u8; 16];
+    descriptor[0..8].copy_from_slice(&HEADER.to_le_bytes());
+    descriptor[8..12].copy_from_slice(&16_u32.to_le_bytes());
+    descriptor[12..14].copy_from_slice(&1_u16.to_le_bytes());
+    descriptor[14..16].copy_from_slice(&1_u16.to_le_bytes());
+    cpu
+      .bus
+      .mem
+      .write_bytes(VirtAddr(QUEUE_BASE), &descriptor)
+      .unwrap();
+
+    descriptor = [0; 16];
+    descriptor[0..8].copy_from_slice(&STATUS_BYTE.to_le_bytes());
+    descriptor[8..12].copy_from_slice(&1_u32.to_le_bytes());
+    descriptor[12..14].copy_from_slice(&2_u16.to_le_bytes());
+    cpu
+      .bus
+      .mem
+      .write_bytes(VirtAddr(QUEUE_BASE + 16), &descriptor)
+      .unwrap();
+    cpu
+      .bus
+      .mem
+      .write_bytes(VirtAddr(AVAIL_BASE + 2), &1_u16.to_le_bytes())
+      .unwrap();
+    cpu
+      .bus
+      .mem
+      .write_bytes(VirtAddr(AVAIL_BASE + 4), &0_u16.to_le_bytes())
+      .unwrap();
+    cpu.bus.mem.write::<u8>(VirtAddr(STATUS_BYTE), 0xff).unwrap();
+
+    cpu.reserved.push(VirtAddr(0x8000_5000));
+    cpu.bus
+      .write::<u32>(VirtAddr(VIRTIO_BASE + 0x50), 0)
+      .unwrap();
+    assert_eq!(cpu.pending_interrupt(), None);
+
+    assert!(cpu.reserved.is_empty());
+    assert_eq!(cpu.bus.mem.read::<u8>(VirtAddr(STATUS_BYTE)), Some(0));
+    assert_eq!(cpu.bus.mem.read::<u16>(VirtAddr(USED_BASE + 2)), Some(1));
+
+    // Claiming marks IRQ 1 in service. The VirtIO ACK must lower the PLIC input immediately,
+    // before completion, or the still-high cached level would spuriously re-pend the source.
+    let claim = VirtAddr(PLIC_BASE + 0x201004);
+    assert_eq!(cpu.bus.plic.read(claim).unwrap(), 1);
+    cpu.bus
+      .write::<u32>(VirtAddr(VIRTIO_BASE + 0x64), 1)
+      .unwrap();
+    cpu.bus.plic.write(claim, 1).unwrap();
+    assert!(!cpu.bus.plic.supervisor_irq_pending());
   }
 }
 

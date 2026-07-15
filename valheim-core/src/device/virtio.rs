@@ -1,604 +1,1365 @@
-// TODO: rewrite this file.
-#![allow(dead_code)]
+use std::io::{self, ErrorKind};
 
 use memmap2::MmapMut;
+
 use crate::cpu::bus::VIRTIO_BASE;
 use crate::cpu::irq::Exception;
-use crate::cpu::RV64Cpu;
-use crate::memory::{CanIO, VirtAddr};
+use crate::memory::{CanIO, Memory, VirtAddr};
 
-/// The interrupt request of virtio.
+/// The PLIC source used by the VirtIO block device.
 pub const VIRTIO_IRQ: u64 = 1;
 
-/// The size of `VRingDesc` struct.
 const VRING_DESC_SIZE: u64 = 16;
-/// The number of virtio descriptors. It must be a power of two.
-const QUEUE_SIZE: u64 = 8;
-/// The size of a sector.
+const QUEUE_SIZE: u16 = 8;
 const SECTOR_SIZE: u64 = 512;
+const COPY_CHUNK_SIZE: usize = 64 * 1024;
 
-/// This marks a buffer as continuing via the next field.
 const VIRTQ_DESC_F_NEXT: u16 = 1;
-/// This marks a buffer as device write-only (otherwise device read-only).
 const VIRTQ_DESC_F_WRITE: u16 = 2;
-/// This means the buffer contains a list of buffer descriptors.
-const _VIRTQ_DESC_F_INDIRECT: u64 = 4;
+const VIRTQ_DESC_F_INDIRECT: u16 = 4;
+const VIRTQ_AVAIL_F_NO_INTERRUPT: u16 = 1;
 
-// 4.2.2 MMIO Device Register Layout
-// https://docs.oasis-open.org/virtio/virtio/v1.1/csprd01/virtio-v1.1-csprd01.html#x1-1460002
-/// Magic value. Always return 0x74726976 (a Little Endian equivalent of the "virt" string).
+const VIRTIO_BLK_F_FLUSH: u32 = 1 << 9;
+const VIRTIO_BLK_T_IN: u32 = 0;
+const VIRTIO_BLK_T_OUT: u32 = 1;
+const VIRTIO_BLK_T_FLUSH: u32 = 4;
+const VIRTIO_BLK_S_OK: u8 = 0;
+const VIRTIO_BLK_S_IOERR: u8 = 1;
+const VIRTIO_BLK_S_UNSUPP: u8 = 2;
+
+const VIRTIO_STATUS_DRIVER_OK: u32 = 4;
+const VIRTIO_MMIO_INT_VRING: u32 = 1;
+
 const MAGIC: u64 = VIRTIO_BASE;
 const MAGIC_END: u64 = VIRTIO_BASE + 0x3;
-
-/// Device version number. 1 is legacy.
 const VERSION: u64 = VIRTIO_BASE + 0x4;
 const VERSION_END: u64 = VIRTIO_BASE + 0x7;
-
-/// Virtio Subsystem Device ID. 1 is network, 2 is block device.
 const DEVICE_ID: u64 = VIRTIO_BASE + 0x8;
 const DEVICE_ID_END: u64 = VIRTIO_BASE + 0xb;
-
-/// Virtio Subsystem Vendor ID. Always return 0x554d4551
 const VENDOR_ID: u64 = VIRTIO_BASE + 0xc;
 const VENDOR_ID_END: u64 = VIRTIO_BASE + 0xf;
-
-/// Flags representing features the device supports. Access to this register returns bits
-/// DeviceFeaturesSel ∗ 32 to (DeviceFeaturesSel ∗ 32) + 31.
 const DEVICE_FEATURES: u64 = VIRTIO_BASE + 0x10;
 const DEVICE_FEATURES_END: u64 = VIRTIO_BASE + 0x13;
-
-/// Device (host) features word selection.
 const DEVICE_FEATURES_SEL: u64 = VIRTIO_BASE + 0x14;
 const DEVICE_FEATURES_SEL_END: u64 = VIRTIO_BASE + 0x17;
-
-/// Flags representing device features understood and activated by the driver. Access to this
-/// register sets bits DriverFeaturesSel ∗ 32 to (DriverFeaturesSel ∗ 32) + 31.
 const DRIVER_FEATURES: u64 = VIRTIO_BASE + 0x20;
 const DRIVER_FEATURES_END: u64 = VIRTIO_BASE + 0x23;
-
-/// Activated (guest) features word selection.
 const DRIVER_FEATURES_SEL: u64 = VIRTIO_BASE + 0x24;
 const DRIVER_FEATURES_SEL_END: u64 = VIRTIO_BASE + 0x27;
-
-// 4.2.4 Legacy interface
-// https://docs.oasis-open.org/virtio/virtio/v1.1/csprd01/virtio-v1.1-csprd01.html#x1-1560004
-/// Guest page size. The driver writes the guest page size in bytes to the register during
-/// initialization, before any queues are used. This value should be a power of 2 and is used by
-/// the device to calculate the Guest address of the first queue page. Write-only.
 const GUEST_PAGE_SIZE: u64 = VIRTIO_BASE + 0x28;
 const GUEST_PAGE_SIZE_END: u64 = VIRTIO_BASE + 0x2b;
-
-/// Virtual queue index. Writing to this register selects the virtual queue that the following
-/// operations on the QueueNumMax, QueueNum, QueueAlign and QueuePFN registers apply to. The index
-/// number of the first queue is zero (0x0). Write-only.
 const QUEUE_SEL: u64 = VIRTIO_BASE + 0x30;
 const QUEUE_SEL_END: u64 = VIRTIO_BASE + 0x33;
-
-/// Maximum virtual queue size. Reading from the register returns the maximum size of the queue the
-/// device is ready to process or zero (0x0) if the queue is not available. This applies to the
-/// queue selected by writing to QueueSel and is allowed only when QueuePFN is set to zero (0x0),
-/// so when the queue is not actively used. Read-only. In QEMU, `VIRTIO_COUNT = 8`.
 const QUEUE_NUM_MAX: u64 = VIRTIO_BASE + 0x34;
 const QUEUE_NUM_MAX_END: u64 = VIRTIO_BASE + 0x37;
-
-/// Virtual queue size. Queue size is the number of elements in the queue, therefore size of the
-/// descriptor table and both available and used rings. Writing to this register notifies the
-/// device what size of the queue the driver will use. This applies to the queue selected by
-/// writing to QueueSel. Write-only.
 const QUEUE_NUM: u64 = VIRTIO_BASE + 0x38;
 const QUEUE_NUM_END: u64 = VIRTIO_BASE + 0x3b;
-
-/// Used Ring alignment in the virtual queue.
 const QUEUE_ALIGN: u64 = VIRTIO_BASE + 0x3c;
 const QUEUE_ALIGN_END: u64 = VIRTIO_BASE + 0x3f;
-
-/// Guest physical page number of the virtual queue. Writing to this register notifies the device
-/// about location of the virtual queue in the Guest’s physical address space. This value is the
-/// index number of a page starting with the queue Descriptor Table. Value zero (0x0) means
-/// physical address zero (0x00000000) and is illegal. When the driver stops using the queue it
-/// writes zero (0x0) to this register. Reading from this register returns the currently used page
-/// number of the queue, therefore a value other than zero (0x0) means that the queue is in use.
-/// Both read and write accesses apply to the queue selected by writing to QueueSel.
 const QUEUE_PFN: u64 = VIRTIO_BASE + 0x40;
 const QUEUE_PFN_END: u64 = VIRTIO_BASE + 0x43;
-
-// 4.2.2 MMIO Device Register Layout
-// https://docs.oasis-open.org/virtio/virtio/v1.1/csprd01/virtio-v1.1-csprd01.html#x1-1460002
-/// Queue notifier. Writing a queue index to this register notifies the device that there are new
-/// buffers to process in the queue. Write-only.
 const QUEUE_NOTIFY: u64 = VIRTIO_BASE + 0x50;
 const QUEUE_NOTIFY_END: u64 = VIRTIO_BASE + 0x53;
-
-/// Interrupt status. Reading from this register returns a bit mask of events that caused the
-/// device interrupt to be asserted.
 const INTERRUPT_STATUS: u64 = VIRTIO_BASE + 0x60;
 const INTERRUPT_STATUS_END: u64 = VIRTIO_BASE + 0x63;
-
-/// Interrupt acknowledge. Writing a value with bits set as defined in InterruptStatus to this
-/// register notifies the device that events causing the interrupt have been handled.
 const INTERRUPT_ACK: u64 = VIRTIO_BASE + 0x64;
 const INTERRUPT_ACK_END: u64 = VIRTIO_BASE + 0x67;
-
-/// Device status. Reading from this register returns the current device status flags. Writing
-/// non-zero values to this register sets the status flags, indicating the driver progress. Writing
-/// zero (0x0) to this register triggers a device reset.
 const STATUS: u64 = VIRTIO_BASE + 0x70;
 const STATUS_END: u64 = VIRTIO_BASE + 0x73;
-
-/// Configuration space.
 const CONFIG: u64 = VIRTIO_BASE + 0x100;
 const CONFIG_END: u64 = VIRTIO_BASE + 0x107;
 
-/// https://docs.oasis-open.org/virtio/virtio/v1.1/csprd01/virtio-v1.1-csprd01.html#x1-230005
-/// "Each virtqueue can consist of up to 3 parts:
-///     Descriptor Area - used for describing buffers
-///     Driver Area - extra data supplied by driver to the device
-///     Device Area - extra data supplied by device to driver"
-/// "Note: Note that previous versions of this spec used different names for these parts
-///     Descriptor Table - for the Descriptor Area
-///     Available Ring - for the Driver Area
-///     Used Ring - for the Device Area"
-/// ```c
-/// struct virtq {
-///   struct virtq_desc desc[ Queue Size ];
-///   struct virtq_avail avail;
-///   u8 pad[ Padding ]; // Padding to the next Queue Align boundary.
-///   struct virtq_used used;
-/// };
-/// ```
+/// Storage operations required by the VirtIO block transport.
+pub trait BlockBackend {
+  fn len(&self) -> u64;
+  fn read_at(&self, offset: u64, buffer: &mut [u8]) -> io::Result<()>;
+  fn write_at(&mut self, offset: u64, buffer: &[u8]) -> io::Result<()>;
+  fn flush(&mut self) -> io::Result<()>;
+}
+
+fn checked_backend_range(
+  length: usize,
+  offset: u64,
+  width: usize,
+) -> io::Result<std::ops::Range<usize>> {
+  let start = usize::try_from(offset)
+    .map_err(|_| io::Error::new(ErrorKind::UnexpectedEof, "block offset does not fit usize"))?;
+  let end = start
+    .checked_add(width)
+    .filter(|end| *end <= length)
+    .ok_or_else(|| io::Error::new(ErrorKind::UnexpectedEof, "block access is out of range"))?;
+  Ok(start..end)
+}
+
+impl BlockBackend for MmapMut {
+  fn len(&self) -> u64 {
+    AsRef::<[u8]>::as_ref(self).len() as u64
+  }
+
+  fn read_at(&self, offset: u64, buffer: &mut [u8]) -> io::Result<()> {
+    let range = checked_backend_range(AsRef::<[u8]>::as_ref(self).len(), offset, buffer.len())?;
+    buffer.copy_from_slice(&self[range]);
+    Ok(())
+  }
+
+  fn write_at(&mut self, offset: u64, buffer: &[u8]) -> io::Result<()> {
+    let range = checked_backend_range(AsRef::<[u8]>::as_ref(self).len(), offset, buffer.len())?;
+    self[range].copy_from_slice(buffer);
+    Ok(())
+  }
+
+  fn flush(&mut self) -> io::Result<()> {
+    MmapMut::flush(self)
+  }
+}
+
 #[derive(Debug, Copy, Clone)]
 struct VirtqueueAddr {
-  /// The address that starts actual descriptors (16 bytes each).
   desc_addr: u64,
-  /// The address that starts a ring of available descriptors.
   avail_addr: u64,
-  /// The address that starts a ring of used descriptors.
   used_addr: u64,
 }
 
 impl VirtqueueAddr {
-  /// Create a new virtqueue descriptor based on the address that stores the content of the
-  /// descriptor.
-  fn new(virtio: &Virtio) -> Self {
-    // https://docs.oasis-open.org/virtio/virtio/v1.1/csprd01/virtio-v1.1-csprd01.html#x1-240006
-    // Virtqueue Part   | Alignment | Size
-    // -------------------------------------------------
-    // Descriptor Table | 16        | 16∗(Queue Size)
-    // Available Ring   | 2         | 6 + 2∗(Queue Size)
-    // Used Ring        | 4         | 6 + 8∗(Queue Size)
-
-    let base_addr = virtio.queue_pfn as u64 * virtio.guest_page_size as u64;
-    let align = virtio.queue_align as u64;
-    let size = virtio.queue_num as u64;
-    let avail_ring_end = base_addr + (16 * size) + (6 + 2 * size);
-
-    Self {
-      desc_addr: base_addr,
-      avail_addr: base_addr + 16 * size,
-      // Used ring starts with the `queue_align` boundary after the available ring ends.
-      used_addr: (avail_ring_end.wrapping_div(align) + 1).wrapping_mul(align),
+  fn from_device(virtio: &Virtio) -> Option<Self> {
+    let size = u64::from(virtio.queue_num);
+    let page_size = u64::from(virtio.guest_page_size);
+    let align = u64::from(virtio.queue_align);
+    if virtio.queue_pfn == 0
+      || size == 0
+      || size > u64::from(QUEUE_SIZE)
+      || !size.is_power_of_two()
+      || page_size == 0
+      || !page_size.is_power_of_two()
+      || align == 0
+      || !align.is_power_of_two()
+    {
+      return None;
     }
+
+    let desc_addr = u64::from(virtio.queue_pfn).checked_mul(page_size)?;
+    let avail_addr = desc_addr.checked_add(VRING_DESC_SIZE.checked_mul(size)?)?;
+    let avail_end = avail_addr.checked_add(6_u64.checked_add(2_u64.checked_mul(size)?)?)?;
+    let used_addr = avail_end.checked_add(align - 1)? & !(align - 1);
+    Some(Self {
+      desc_addr,
+      avail_addr,
+      used_addr,
+    })
+  }
+
+  fn fully_mapped(self, memory: &Memory, queue_num: u16) -> bool {
+    let size = usize::from(queue_num);
+    let Some(desc_len) = size.checked_mul(VRING_DESC_SIZE as usize) else {
+      return false;
+    };
+    let Some(avail_len) = size.checked_mul(2).and_then(|length| length.checked_add(6)) else {
+      return false;
+    };
+    let Some(used_len) = size.checked_mul(8).and_then(|length| length.checked_add(6)) else {
+      return false;
+    };
+    memory.contains(VirtAddr(self.desc_addr), desc_len)
+      && memory.contains(VirtAddr(self.avail_addr), avail_len)
+      && memory.contains(VirtAddr(self.used_addr), used_len)
   }
 }
 
-/// "The descriptor table refers to the buffers the driver is using for the device. addr is a
-/// physical address, and the buffers can be chained via next. Each descriptor describes a buffer
-/// which is read-only for the device (“device-readable”) or write-only for the device
-/// (“device-writable”), but a chain of descriptors can contain both device-readable and
-/// device-writable buffers."
-///
-/// https://docs.oasis-open.org/virtio/virtio/v1.1/csprd01/virtio-v1.1-csprd01.html#x1-320005
-///
-/// ```c
-/// /* This marks a buffer as continuing via the next field. */
-/// #define VIRTQ_DESC_F_NEXT 1
-/// /* This marks a buffer as device write-only (otherwise device read-only). */
-/// #define VIRTQ_DESC_F_WRITE 2
-/// /* This means the buffer contains a list of buffer descriptors. */
-/// #define VIRTQ_DESC_F_INDIRECT 4
-///
-/// struct virtq_desc {
-///   le64 addr;
-///   le32 len;
-///   le16 flags;
-///   le16 next;
-/// };
-/// ```
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone)]
 struct VirtqDesc {
-  /// Address (guest-physical).
   addr: u64,
-  /// Length.
   len: u32,
-  /// The flags as indicated VIRTQ_DESC_F_NEXT/VIRTQ_DESC_F_WRITE/VIRTQ_DESC_F_INDIRECT.
   flags: u16,
-  /// Next field if flags & NEXT.
   next: u16,
 }
 
 impl VirtqDesc {
-  /// Creates a new virtqueue descriptor based on the address that stores the content of the
-  /// descriptor.
-  fn new(cpu: &mut RV64Cpu, addr: VirtAddr) -> Result<Self, Exception> {
-    Ok(Self {
-      addr: cpu.bus.read::<u64>(addr)?,
-      len: cpu.bus.read::<u32>(VirtAddr(addr.0.wrapping_add(8)))?,
-      flags: cpu.bus.read::<u16>(VirtAddr(addr.0.wrapping_add(12)))?,
-      next: cpu.bus.read::<u16>(VirtAddr(addr.0.wrapping_add(14)))?,
+  fn read(memory: &Memory, queue: VirtqueueAddr, index: u16) -> Option<Self> {
+    let offset = VRING_DESC_SIZE.checked_mul(u64::from(index))?;
+    let address = queue.desc_addr.checked_add(offset)?;
+    let mut bytes = [0_u8; VRING_DESC_SIZE as usize];
+    memory.read_bytes(VirtAddr(address), &mut bytes)?;
+    Some(Self {
+      addr: u64::from_le_bytes(bytes[0..8].try_into().ok()?),
+      len: u32::from_le_bytes(bytes[8..12].try_into().ok()?),
+      flags: u16::from_le_bytes(bytes[12..14].try_into().ok()?),
+      next: u16::from_le_bytes(bytes[14..16].try_into().ok()?),
     })
   }
 }
 
-/// "The driver uses the available ring to offer buffers to the device: each ring entry refers to
-/// the head of a descriptor chain. It is only written by the driver and read by the device."
-///
-/// https://docs.oasis-open.org/virtio/virtio/v1.1/csprd01/virtio-v1.1-csprd01.html#x1-380006
-///
-/// ```c
-/// #define VIRTQ_AVAIL_F_NO_INTERRUPT 1
-/// struct virtq_avail {
-///   le16 flags;
-///   le16 idx;
-///   le16 ring[ /* Queue Size */ ];
-///   le16 used_event; /* Only if VIRTIO_F_EVENT_IDX */
-/// };
-/// ```
-#[derive(Debug)]
-struct VirtqAvail {
-  flags: u16,
-  idx: u16,
-  ring_start_addr: u64,
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
+pub struct VirtioServiceResult {
+  /// Number of requests published to the used ring during this call.
+  pub completed: u16,
+  /// Current level of the VirtIO interrupt-status line, including older unacknowledged work.
+  pub interrupt_asserted: bool,
+  /// At least one byte was written to guest DRAM by device DMA in this call, including request
+  /// status and used-ring updates.
+  pub dma_write: bool,
 }
 
-impl VirtqAvail {
-  fn new(cpu: &mut RV64Cpu, addr: VirtAddr) -> Result<Self, Exception> {
-    Ok(Self {
-      flags: cpu.bus.read::<u16>(addr)? as u16,
-      idx: cpu.bus.read::<u16>(VirtAddr(addr.0.wrapping_add(2)))? as u16,
-      ring_start_addr: addr.0.wrapping_add(4),
-    })
-  }
+struct RequestResult {
+  status: u8,
+  written: u32,
+  dma_write: bool,
 }
 
-/// Para-virtualized drivers for IO virtualization.
+/// Legacy VirtIO-MMIO version 1 block device with a single split virtqueue.
 pub struct Virtio {
-  id: u64,
   device_features: [u32; 2],
   device_features_sel: u32,
   driver_features: [u32; 2],
   driver_features_sel: u32,
   guest_page_size: u32,
+  queue_sel: u32,
   queue_num: u32,
   queue_align: u32,
   queue_pfn: u32,
-  queue_notify: u32,
+  notify_pending: bool,
   interrupt_status: u32,
   status: u32,
   capacity: u64,
-  virtqueue: Option<VirtqueueAddr>,
-  image: Option<MmapMut>,
+  last_avail_idx: u16,
+  used_idx: u16,
+  backend: Option<Box<dyn BlockBackend>>,
 }
 
 impl Virtio {
-  /// `capacity` how many 512-byte blocks?
   pub fn new(capacity: u64) -> Self {
-    // https://docs.oasis-open.org/virtio/virtio/v1.1/csprd01/virtio-v1.1-csprd01.html#x1-2440004
-    // 5.2.4 Device configuration layout
-    // struct virtio_blk_config {
-    //   le64 capacity;
-    // }
-
     Self {
-      id: 0,
-      device_features: Virtio::device_features(),
+      device_features: [VIRTIO_BLK_F_FLUSH, 0],
       device_features_sel: 0,
       driver_features: [0; 2],
       driver_features_sel: 0,
       guest_page_size: 0,
+      queue_sel: 0,
       queue_num: 0,
-      // default value to avoid division by 0.
       queue_align: 0x1000,
       queue_pfn: 0,
-      queue_notify: u32::MAX,
+      notify_pending: false,
       interrupt_status: 0,
       status: 0,
       capacity,
-      image: None,
-      virtqueue: None,
+      last_avail_idx: 0,
+      used_idx: 0,
+      backend: None,
     }
   }
 
-  pub fn set_image(&mut self, image: MmapMut) {
-    // "virtio_blk virtio0: [vda] `capacity` 512-byte logical blocks (XXX XB/XXX XiB)"
-    self.capacity = (image.len() as u64) / 512;
-    self.image = Some(image);
+  /// Installs a writable mmap backend. Empty and partial-sector images are rejected.
+  pub fn set_image(&mut self, image: MmapMut) -> io::Result<()> {
+    self.set_backend(image)
   }
 
-  /// Returns device features.
-  fn device_features() -> [u32; 2] {
-    let mut features = [0; 2];
-    // VIRTIO_F_IN_ORDER(Bit 35). This feature indicates that all buffers are used by the device
-    // in the same order in which they have been made available.
-    features[1] = features[1] | (1 << 3);
-    return features;
-  }
-
-  /// Initializes a virtqueue once the device initialization is finished by setting the DRIVER_OK
-  /// status bit (0x4).
-  fn init_virtqueue(&mut self) {
-    let queue = VirtqueueAddr::new(self);
-    self.virtqueue = Some(queue);
-  }
-
-  /// Gets `VirtqueueAddr` struct if it exists. If not, creates a new one based on the virtio
-  /// configuration values.
-  fn virtqueue(&self) -> VirtqueueAddr {
-    match self.virtqueue {
-      Some(queue) => queue,
-      None => VirtqueueAddr::new(self),
+  pub fn set_backend<B: BlockBackend + 'static>(&mut self, backend: B) -> io::Result<()> {
+    let length = backend.len();
+    if length == 0 || length % SECTOR_SIZE != 0 {
+      return Err(io::Error::new(
+        ErrorKind::InvalidInput,
+        "VirtIO block image must be non-empty and 512-byte aligned",
+      ));
     }
+    self.capacity = length / SECTOR_SIZE;
+    self.backend = Some(Box::new(backend));
+    self.reset_transport();
+    Ok(())
   }
 
-  /// Resets the device when `status` is written to 0.
-  fn reset(&mut self) {
-    self.id = 0;
-    // 4.2.2.1 Device Requirements: MMIO Device Register Layout
-    // "Upon reset, the device MUST clear all bits in InterruptStatus and ready bits in the
-    // QueueReady register for all queues in the device."
+  pub fn interrupt_asserted(&self) -> bool {
+    self.interrupt_status != 0
+  }
+
+  fn reset_transport(&mut self) {
+    self.device_features_sel = 0;
+    self.driver_features = [0; 2];
+    self.driver_features_sel = 0;
+    // Linux writes the legacy GuestPageSize during transport probe, before virtio core resets the
+    // device status. Real virtio-mmio transports retain this transport property across that reset;
+    // clearing it here makes the first queue notification impossible to locate.
+    self.queue_sel = 0;
+    self.queue_num = 0;
+    self.queue_align = 0x1000;
+    self.queue_pfn = 0;
+    self.notify_pending = false;
     self.interrupt_status = 0;
+    self.status = 0;
+    self.last_avail_idx = 0;
+    self.used_idx = 0;
   }
 
-  /// Returns true if an interrupt is pending.
-  pub fn pending_interrupt(&mut self) -> Option<u64> {
-    if self.queue_notify != u32::MAX {
-      self.queue_notify = u32::MAX;
-      return Some(VIRTIO_IRQ);
+  fn reset_queue_indices(&mut self) {
+    self.last_avail_idx = 0;
+    self.used_idx = 0;
+    self.notify_pending = false;
+  }
+
+  fn selected_feature(features: &[u32; 2], selector: u32) -> u32 {
+    usize::try_from(selector)
+      .ok()
+      .and_then(|index| features.get(index))
+      .copied()
+      .unwrap_or(0)
+  }
+
+  fn io_width<T: CanIO>(addr: u64, base: u64, register_width: u64) -> Option<(u64, u32)> {
+    let width = std::mem::size_of::<T>() as u64;
+    if !matches!(width, 1 | 2 | 4) {
+      return None;
+    }
+    let offset = addr.checked_sub(base)?;
+    if offset.checked_add(width)? > register_width {
+      return None;
+    }
+    Some((offset, width as u32))
+  }
+
+  fn read_register<T: CanIO>(addr: u64, base: u64, value: u32) -> Option<u32> {
+    let (offset, width) = Self::io_width::<T>(addr, base, 4)?;
+    let mask = match width {
+      1 => 0xff,
+      2 => 0xffff,
+      4 => u32::MAX,
+      _ => return None,
+    };
+    Some((value >> (offset * 8)) & mask)
+  }
+
+  fn merge_register_write<T: CanIO>(addr: u64, base: u64, old: u32, value: u32) -> Option<u32> {
+    let (offset, width) = Self::io_width::<T>(addr, base, 4)?;
+    let value_mask = match width {
+      1 => 0xff,
+      2 => 0xffff,
+      4 => u32::MAX,
+      _ => return None,
+    };
+    let shift = (offset * 8) as u32;
+    let mask = value_mask << shift;
+    Some((old & !mask) | ((value & value_mask) << shift))
+  }
+
+  fn written_register_bits<T: CanIO>(addr: u64, base: u64, value: u32) -> Option<u32> {
+    Self::merge_register_write::<T>(addr, base, 0, value)
+  }
+
+  pub fn read<T: CanIO>(&self, addr: VirtAddr) -> Result<u32, Exception> {
+    let address = addr.0;
+    let value = match address {
+      MAGIC..=MAGIC_END => Self::read_register::<T>(address, MAGIC, 0x7472_6976),
+      VERSION..=VERSION_END => Self::read_register::<T>(address, VERSION, 1),
+      DEVICE_ID..=DEVICE_ID_END => Self::read_register::<T>(
+        address,
+        DEVICE_ID,
+        if self.backend.is_some() { 2 } else { 0 },
+      ),
+      VENDOR_ID..=VENDOR_ID_END => {
+        Self::read_register::<T>(address, VENDOR_ID, 0x554d_4551)
+      }
+      DEVICE_FEATURES..=DEVICE_FEATURES_END => Self::read_register::<T>(
+        address,
+        DEVICE_FEATURES,
+        Self::selected_feature(&self.device_features, self.device_features_sel),
+      ),
+      QUEUE_NUM_MAX..=QUEUE_NUM_MAX_END => Self::read_register::<T>(
+        address,
+        QUEUE_NUM_MAX,
+        if self.queue_sel == 0 { u32::from(QUEUE_SIZE) } else { 0 },
+      ),
+      QUEUE_PFN..=QUEUE_PFN_END => Self::read_register::<T>(
+        address,
+        QUEUE_PFN,
+        if self.queue_sel == 0 { self.queue_pfn } else { 0 },
+      ),
+      INTERRUPT_STATUS..=INTERRUPT_STATUS_END => {
+        Self::read_register::<T>(address, INTERRUPT_STATUS, self.interrupt_status)
+      }
+      STATUS..=STATUS_END => Self::read_register::<T>(address, STATUS, self.status),
+      CONFIG..=CONFIG_END => {
+        let Some((offset, width)) = Self::io_width::<T>(address, CONFIG, 8) else {
+          return Err(Exception::LoadAccessFault(addr));
+        };
+        let bytes = self.capacity.to_le_bytes();
+        let mut result = 0_u32;
+        for index in 0..width {
+          result |= u32::from(bytes[(offset + u64::from(index)) as usize]) << (index * 8);
+        }
+        Some(result)
+      }
+      _ => None,
+    };
+    value.ok_or(Exception::LoadAccessFault(addr))
+  }
+
+  pub fn write<T: CanIO>(&mut self, addr: VirtAddr, value: u32) -> Result<(), Exception> {
+    let address = addr.0;
+    match address {
+      DEVICE_FEATURES_SEL..=DEVICE_FEATURES_SEL_END => {
+        self.device_features_sel = Self::merge_register_write::<T>(
+          address,
+          DEVICE_FEATURES_SEL,
+          self.device_features_sel,
+          value,
+        )
+        .ok_or(Exception::StoreAccessFault(addr))?;
+      }
+      DRIVER_FEATURES..=DRIVER_FEATURES_END => {
+        let selector = usize::try_from(self.driver_features_sel).ok();
+        let old = selector
+          .and_then(|index| self.driver_features.get(index))
+          .copied()
+          .unwrap_or(0);
+        let new = Self::merge_register_write::<T>(address, DRIVER_FEATURES, old, value)
+          .ok_or(Exception::StoreAccessFault(addr))?;
+        if let Some(feature) = selector.and_then(|index| self.driver_features.get_mut(index)) {
+          *feature = new;
+        }
+      }
+      DRIVER_FEATURES_SEL..=DRIVER_FEATURES_SEL_END => {
+        self.driver_features_sel = Self::merge_register_write::<T>(
+          address,
+          DRIVER_FEATURES_SEL,
+          self.driver_features_sel,
+          value,
+        )
+        .ok_or(Exception::StoreAccessFault(addr))?;
+      }
+      GUEST_PAGE_SIZE..=GUEST_PAGE_SIZE_END => {
+        self.guest_page_size = Self::merge_register_write::<T>(
+          address,
+          GUEST_PAGE_SIZE,
+          self.guest_page_size,
+          value,
+        )
+        .ok_or(Exception::StoreAccessFault(addr))?;
+        self.reset_queue_indices();
+      }
+      QUEUE_SEL..=QUEUE_SEL_END => {
+        self.queue_sel = Self::merge_register_write::<T>(
+          address,
+          QUEUE_SEL,
+          self.queue_sel,
+          value,
+        )
+        .ok_or(Exception::StoreAccessFault(addr))?;
+      }
+      QUEUE_NUM..=QUEUE_NUM_END => {
+        let old = if self.queue_sel == 0 { self.queue_num } else { 0 };
+        let new = Self::merge_register_write::<T>(address, QUEUE_NUM, old, value)
+          .ok_or(Exception::StoreAccessFault(addr))?;
+        if self.queue_sel == 0 {
+          self.queue_num = new;
+          self.reset_queue_indices();
+        }
+      }
+      QUEUE_ALIGN..=QUEUE_ALIGN_END => {
+        let old = if self.queue_sel == 0 { self.queue_align } else { 0 };
+        let new = Self::merge_register_write::<T>(address, QUEUE_ALIGN, old, value)
+          .ok_or(Exception::StoreAccessFault(addr))?;
+        if self.queue_sel == 0 {
+          self.queue_align = new;
+          self.reset_queue_indices();
+        }
+      }
+      QUEUE_PFN..=QUEUE_PFN_END => {
+        let old = if self.queue_sel == 0 { self.queue_pfn } else { 0 };
+        let new = Self::merge_register_write::<T>(address, QUEUE_PFN, old, value)
+          .ok_or(Exception::StoreAccessFault(addr))?;
+        if self.queue_sel == 0 {
+          self.queue_pfn = new;
+          self.reset_queue_indices();
+        }
+      }
+      QUEUE_NOTIFY..=QUEUE_NOTIFY_END => {
+        let queue = Self::merge_register_write::<T>(address, QUEUE_NOTIFY, 0, value)
+          .ok_or(Exception::StoreAccessFault(addr))?;
+        if queue == 0 {
+          self.notify_pending = true;
+        }
+      }
+      INTERRUPT_ACK..=INTERRUPT_ACK_END => {
+        let acknowledged = Self::written_register_bits::<T>(address, INTERRUPT_ACK, value)
+          .ok_or(Exception::StoreAccessFault(addr))?;
+        self.interrupt_status &= !acknowledged;
+      }
+      STATUS..=STATUS_END => {
+        let new = Self::merge_register_write::<T>(address, STATUS, self.status, value)
+          .ok_or(Exception::StoreAccessFault(addr))?;
+        if new == 0 {
+          self.reset_transport();
+        } else {
+          self.status = new;
+        }
+      }
+      _ => return Err(Exception::StoreAccessFault(addr)),
+    }
+    Ok(())
+  }
+
+  fn read_u16(memory: &Memory, address: u64) -> Option<u16> {
+    let mut bytes = [0_u8; 2];
+    memory.read_bytes(VirtAddr(address), &mut bytes)?;
+    Some(u16::from_le_bytes(bytes))
+  }
+
+  fn write_u16(memory: &mut Memory, address: u64, value: u16) -> bool {
+    memory
+      .write_bytes(VirtAddr(address), &value.to_le_bytes())
+      .is_some()
+  }
+
+  fn descriptor_chain(
+    memory: &Memory,
+    queue: VirtqueueAddr,
+    queue_num: u16,
+    head: u16,
+  ) -> Option<Vec<VirtqDesc>> {
+    if head >= queue_num {
+      return None;
+    }
+    let mut descriptors = Vec::with_capacity(usize::from(queue_num));
+    let mut visited = vec![false; usize::from(queue_num)];
+    let mut index = head;
+    for _ in 0..queue_num {
+      if index >= queue_num || visited[usize::from(index)] {
+        return None;
+      }
+      visited[usize::from(index)] = true;
+      let descriptor = VirtqDesc::read(memory, queue, index)?;
+      if descriptor.flags & VIRTQ_DESC_F_INDIRECT != 0 {
+        return None;
+      }
+      descriptors.push(descriptor);
+      if descriptor.flags & VIRTQ_DESC_F_NEXT == 0 {
+        return Some(descriptors);
+      }
+      index = descriptor.next;
     }
     None
   }
 
-  pub fn read<T: CanIO>(&self, addr: VirtAddr) -> Result<u32, Exception> {
-    let addr = addr.0;
-    // `reg` is the value of a target register in the virtio block device and `offset` is the
-    // byte of the start position in the register.
-    let (reg, offset) = match addr {
-      // A Little Endian equivalent of the “virt” string.
-      MAGIC..=MAGIC_END => (0x74726976, addr - MAGIC),
-      // Legacy devices (see 4.2.4 Legacy interface) used 0x1.
-      VERSION..=VERSION_END => (0x1, addr - VERSION),
-      // Block device.
-      DEVICE_ID..=DEVICE_ID_END => (0x2, addr - DEVICE_ID),
-      // See https://github.com/mit-pdos/xv6-riscv/blob/riscv/kernel/virtio_disk.c#L86
-      VENDOR_ID..=VENDOR_ID_END => (0x554d4551, addr - VENDOR_ID),
-      DEVICE_FEATURES..=DEVICE_FEATURES_END => (
-        self.device_features[self.device_features_sel as usize],
-        addr - DEVICE_FEATURES,
-      ),
-      QUEUE_NUM_MAX..=QUEUE_NUM_MAX_END => (QUEUE_SIZE as u32, addr - QUEUE_NUM_MAX),
-      QUEUE_PFN..=QUEUE_PFN_END => (self.queue_pfn, addr - QUEUE_PFN),
-      INTERRUPT_STATUS..=INTERRUPT_STATUS_END => {
-        (self.interrupt_status, addr - INTERRUPT_STATUS)
+  fn block_range(&self, sector: u64, length: u64) -> Option<u64> {
+    let start = sector.checked_mul(SECTOR_SIZE)?;
+    let end = start.checked_add(length)?;
+    (end <= self.backend.as_ref()?.len()).then_some(start)
+  }
+
+  fn validate_data_ranges(memory: &Memory, descriptors: &[VirtqDesc]) -> Option<u64> {
+    let mut total = 0_u64;
+    for descriptor in descriptors {
+      let length = usize::try_from(descriptor.len).ok()?;
+      if !memory.contains(VirtAddr(descriptor.addr), length) {
+        return None;
       }
-      STATUS..=STATUS_END => (self.status, addr - STATUS),
-      CONFIG..=CONFIG_END => {
-        if std::mem::size_of::<T>() != 1 {
-          return Err(Exception::StoreAccessFault(VirtAddr(addr)));
-        }
-        let index = addr - CONFIG;
-        (self.capacity.to_le_bytes()[index as usize] as u32, 0)
-      }
-      _ => return Err(Exception::LoadAccessFault(VirtAddr(addr))),
+      total = total.checked_add(u64::from(descriptor.len))?;
+    }
+    Some(total)
+  }
+
+  fn transfer_in(
+    &mut self,
+    memory: &mut Memory,
+    sector: u64,
+    descriptors: &[VirtqDesc],
+  ) -> RequestResult {
+    if descriptors
+      .iter()
+      .any(|descriptor| descriptor.flags & VIRTQ_DESC_F_WRITE == 0)
+    {
+      return RequestResult::io_error();
+    }
+    let Some(total) = Self::validate_data_ranges(memory, descriptors) else {
+      return RequestResult::io_error();
+    };
+    let Some(start) = self.block_range(sector, total) else {
+      return RequestResult::io_error();
     };
 
-    let value = match std::mem::size_of::<T>() {
-      1 => (reg >> (offset * 8)) & 0xff,
-      2 => (reg >> (offset * 8)) & 0xffff,
-      4 => (reg >> (offset * 8)) & 0xffffffff,
-      _ => return Err(Exception::LoadAccessFault(VirtAddr(addr))),
+    let mut result = RequestResult::success();
+    let Some(backend) = self.backend.as_ref() else {
+      return RequestResult::io_error();
+    };
+    let mut disk_offset = start;
+    let mut buffer = vec![0_u8; COPY_CHUNK_SIZE];
+    for descriptor in descriptors {
+      let mut descriptor_offset = 0_usize;
+      let descriptor_len = descriptor.len as usize;
+      while descriptor_offset < descriptor_len {
+        let chunk_len = COPY_CHUNK_SIZE.min(descriptor_len - descriptor_offset);
+        let chunk = &mut buffer[..chunk_len];
+        if backend.read_at(disk_offset, chunk).is_err()
+          || memory
+            .write_bytes(
+              VirtAddr(descriptor.addr + descriptor_offset as u64),
+              chunk,
+            )
+            .is_none()
+        {
+          result.status = VIRTIO_BLK_S_IOERR;
+          return result;
+        }
+        result.written = result.written.saturating_add(chunk_len as u32);
+        result.dma_write = true;
+        descriptor_offset += chunk_len;
+        disk_offset += chunk_len as u64;
+      }
+    }
+    result
+  }
+
+  fn transfer_out(
+    &mut self,
+    memory: &Memory,
+    sector: u64,
+    descriptors: &[VirtqDesc],
+  ) -> RequestResult {
+    if descriptors
+      .iter()
+      .any(|descriptor| descriptor.flags & VIRTQ_DESC_F_WRITE != 0)
+    {
+      return RequestResult::io_error();
+    }
+    let Some(total) = Self::validate_data_ranges(memory, descriptors) else {
+      return RequestResult::io_error();
+    };
+    let Some(start) = self.block_range(sector, total) else {
+      return RequestResult::io_error();
     };
 
-    Ok(value)
-  }
-
-  pub fn write<T: CanIO>(&mut self, addr: VirtAddr, value: u32) -> Result<(), Exception> {
-    let addr = addr.0;
-    // `reg` is the value of a target register in the virtio block device and `offset` is the
-    // byte of the start position in the register.
-    let (mut reg, offset) = match addr {
-      DEVICE_FEATURES_SEL..=DEVICE_FEATURES_SEL_END => {
-        (self.device_features_sel, addr - DEVICE_FEATURES_SEL)
-      }
-      DRIVER_FEATURES..=DRIVER_FEATURES_END => (
-        self.driver_features[self.driver_features_sel as usize],
-        addr - DRIVER_FEATURES,
-      ),
-      DRIVER_FEATURES_SEL..=DRIVER_FEATURES_SEL_END => {
-        (self.driver_features_sel, addr - DRIVER_FEATURES_SEL)
-      }
-      GUEST_PAGE_SIZE..=GUEST_PAGE_SIZE_END => (self.guest_page_size, addr - GUEST_PAGE_SIZE),
-      QUEUE_SEL..=QUEUE_SEL_END => {
-        if value != 0 {
-          panic!("Multiple virtual queues are not supported.");
-        }
-        return Ok(());
-      }
-      QUEUE_NUM..=QUEUE_NUM_END => (self.queue_num, addr - QUEUE_NUM),
-      QUEUE_ALIGN..=QUEUE_ALIGN_END => (self.queue_align, addr - QUEUE_ALIGN),
-      QUEUE_PFN..=QUEUE_PFN_END => (self.queue_pfn, addr - QUEUE_PFN),
-      QUEUE_NOTIFY..=QUEUE_NOTIFY_END => (self.queue_notify, addr - QUEUE_NOTIFY),
-      INTERRUPT_ACK..=INTERRUPT_ACK_END => {
-        (self.interrupt_status, addr - INTERRUPT_ACK)
-      }
-      STATUS..=STATUS_END => (self.status, addr - STATUS),
-      CONFIG..=CONFIG_END => {
-        if std::mem::size_of::<T>() != 1 {
-          return Err(Exception::StoreAccessFault(VirtAddr(addr)));
-        }
-        let index = addr - CONFIG;
-        let mut bytes = self.capacity.to_le_bytes();
-        bytes[index as usize] = (value >> (index * 8)) as u8;
-        self.capacity = u64::from_le_bytes(bytes);
-        return Ok(());
-      }
-      _ => return Err(Exception::StoreAccessFault(VirtAddr(addr))),
+    let Some(backend) = self.backend.as_mut() else {
+      return RequestResult::io_error();
     };
-
-    // Calculate the new value of the target register based on `size` and `offset`.
-    match std::mem::size_of::<T>() {
-      1 => {
-        // Clear the target byte.
-        reg = reg & (!(0xff << (offset * 8)));
-        // Set the new `value` to the target byte.
-        reg = reg | ((value & 0xff) << (offset * 8));
+    let mut disk_offset = start;
+    let mut buffer = vec![0_u8; COPY_CHUNK_SIZE];
+    for descriptor in descriptors {
+      let mut descriptor_offset = 0_usize;
+      let descriptor_len = descriptor.len as usize;
+      while descriptor_offset < descriptor_len {
+        let chunk_len = COPY_CHUNK_SIZE.min(descriptor_len - descriptor_offset);
+        let chunk = &mut buffer[..chunk_len];
+        if memory
+          .read_bytes(
+            VirtAddr(descriptor.addr + descriptor_offset as u64),
+            chunk,
+          )
+          .is_none()
+          || backend.write_at(disk_offset, chunk).is_err()
+        {
+          return RequestResult::io_error();
+        }
+        descriptor_offset += chunk_len;
+        disk_offset += chunk_len as u64;
       }
-      2 => {
-        reg = reg & (!(0xffff << (offset * 8)));
-        reg = reg | ((value & 0xffff) << (offset * 8));
-      }
-      4 => {
-        reg = value;
-      }
-      _ => return Err(Exception::StoreAccessFault(VirtAddr(addr))),
     }
-
-    // Store the new register value to the target register.
-    match addr {
-      DEVICE_FEATURES_SEL..=DEVICE_FEATURES_SEL_END => self.device_features_sel = reg,
-      DRIVER_FEATURES..=DRIVER_FEATURES_END => {
-        self.driver_features[self.driver_features_sel as usize] = reg
-      }
-      DRIVER_FEATURES_SEL..=DRIVER_FEATURES_SEL_END => self.driver_features_sel = reg,
-      GUEST_PAGE_SIZE..=GUEST_PAGE_SIZE_END => self.guest_page_size = reg,
-      QUEUE_NUM..=QUEUE_NUM_END => self.queue_num = reg,
-      QUEUE_ALIGN..=QUEUE_ALIGN_END => self.queue_align = reg,
-      QUEUE_PFN..=QUEUE_PFN_END => self.queue_pfn = reg,
-      QUEUE_NOTIFY..=QUEUE_NOTIFY_END => self.queue_notify = reg,
-      INTERRUPT_ACK..=INTERRUPT_ACK_END => self.interrupt_status = reg,
-      STATUS..=STATUS_END => {
-        self.status = reg;
-        // "Writing 0 into this field resets the device."
-        if self.status == 0 {
-          self.reset();
-        }
-        // DRIVER_OK bit (4) was set, so initialize `VirtqueueAddr`.
-        if self.status & 0x4 == 1 {
-          self.init_virtqueue();
-        }
-        // FAILED (128) bit. Indicates that something went wrong in the guest.
-        if (self.status & 128) == 1 {
-          panic!("virtio: device status FAILED");
-        }
-      }
-      _ => return Err(Exception::StoreAccessFault(VirtAddr(addr))),
-    }
-
-    Ok(())
+    RequestResult::success()
   }
 
-  fn read_disk(&self, addr: u64) -> Result<u8, Exception> {
-    match &self.image {
-      Some(mm) => Ok(mm[addr as usize]),
-      None => Err(Exception::LoadAccessFault(VirtAddr(addr))),
+  fn process_request(
+    &mut self,
+    memory: &mut Memory,
+    descriptors: &[VirtqDesc],
+  ) -> RequestResult {
+    if descriptors.len() < 2 {
+      return RequestResult::io_error();
     }
-  }
-
-  fn write_disk(&mut self, addr: u64, value: u8) -> Result<(), Exception> {
-    match &mut self.image {
-      Some(mm) => Ok(mm[addr as usize] = value),
-      None => Err(Exception::StoreAccessFault(VirtAddr(addr))),
+    let header = descriptors[0];
+    let status_descriptor = descriptors[descriptors.len() - 1];
+    if status_descriptor.flags & VIRTQ_DESC_F_WRITE == 0
+      || status_descriptor.len == 0
+      || !memory.contains(VirtAddr(status_descriptor.addr), 1)
+    {
+      return RequestResult::io_error();
     }
-  }
 
-  /// Accesses the disk via virtio. This is an associated function which takes a `cpu` object to
-  /// read and write with a memory directly (DMA).
-  pub fn disk_access(cpu: &mut RV64Cpu) -> Result<(), Exception> {
-    // https://docs.oasis-open.org/virtio/virtio/v1.1/csprd01/virtio-v1.1-csprd01.html#x1-1460002
-    // "Used Buffer Notification
-    //     - bit 0 - the interrupt was asserted because the device has used a buffer in at
-    //     least one of the active virtual queues."
-    cpu.bus.virtio.interrupt_status |= 0x1;
-
-    let virtq = cpu.bus.virtio.virtqueue();
-
-    let avail = VirtqAvail::new(cpu, VirtAddr(virtq.avail_addr))?;
-
-    let head_index = cpu.bus.read::<u16>(VirtAddr(avail.ring_start_addr + avail.idx as u64 % QUEUE_SIZE))?;
-
-    // First descriptor.
-    let desc0 = VirtqDesc::new(cpu, VirtAddr(virtq.desc_addr + VRING_DESC_SIZE * head_index as u64))?;
-    assert_eq!(desc0.flags & VIRTQ_DESC_F_NEXT, 1);
-
-    // Second descriptor.
-    let desc1 = VirtqDesc::new(cpu, VirtAddr(virtq.desc_addr + VRING_DESC_SIZE * desc0.next as u64))?;
-    assert_eq!(desc1.flags & VIRTQ_DESC_F_NEXT, 1);
-
-    // 5.2.6 Device Operation
-    // https://docs.oasis-open.org/virtio/virtio/v1.1/csprd01/virtio-v1.1-csprd01.html#x1-2500006
-    // struct virtio_blk_req {
-    //   le32 type;
-    //   le32 reserved;
-    //   le64 sector;
-    //   u8 data[][512];
-    //   u8 status;
-    // };
-    let sector = cpu.bus.read::<u64>(VirtAddr(desc0.addr.wrapping_add(8)))?;
-
-    // Write to a device if the second bit of `flags` is set.
-    match (desc1.flags & VIRTQ_DESC_F_WRITE) == 0 {
-      true => {
-        // Read memory data and write it to a disk.
-        for i in 0..desc1.len {
-          let data = cpu.bus.read::<u8>(VirtAddr(desc1.addr + i as u64))?;
-          cpu.bus.virtio.write_disk(sector * SECTOR_SIZE + i as u64, data)?;
+    let mut header_bytes = [0_u8; 16];
+    let mut result = if header.flags & VIRTQ_DESC_F_WRITE != 0
+      || header.len < 16
+      || memory
+        .read_bytes(VirtAddr(header.addr), &mut header_bytes)
+        .is_none()
+    {
+      RequestResult::io_error()
+    } else {
+      let request_type = u32::from_le_bytes([
+        header_bytes[0],
+        header_bytes[1],
+        header_bytes[2],
+        header_bytes[3],
+      ]);
+      let sector = u64::from_le_bytes([
+        header_bytes[8],
+        header_bytes[9],
+        header_bytes[10],
+        header_bytes[11],
+        header_bytes[12],
+        header_bytes[13],
+        header_bytes[14],
+        header_bytes[15],
+      ]);
+      let data = &descriptors[1..descriptors.len() - 1];
+      match request_type {
+        VIRTIO_BLK_T_IN => self.transfer_in(memory, sector, data),
+        VIRTIO_BLK_T_OUT => self.transfer_out(memory, sector, data),
+        VIRTIO_BLK_T_FLUSH if data.is_empty() => {
+          if self
+            .backend
+            .as_mut()
+            .map_or(false, |backend| backend.flush().is_ok())
+          {
+            RequestResult::success()
+          } else {
+            RequestResult::io_error()
+          }
         }
-      }
-      false => {
-        // Read disk data and write it to memory.
-        for i in 0..desc1.len {
-          let data = cpu.bus.virtio.read_disk(sector * SECTOR_SIZE + i as u64)?;
-          cpu.bus.write::<u8>(VirtAddr(desc1.addr + i as u64), data)?;
-        }
+        VIRTIO_BLK_T_FLUSH => RequestResult::io_error(),
+        _ => RequestResult::unsupported(),
       }
     };
 
-    // Third descriptor address.
-    let desc2 = VirtqDesc::new(cpu, VirtAddr(virtq.desc_addr + VRING_DESC_SIZE * desc1.next as u64))?;
-    assert_eq!(desc2.flags & VIRTQ_DESC_F_NEXT, 0);
-    // Tell success.
-    cpu.bus.write::<u8>(VirtAddr(desc2.addr), 0)?;
+    if memory
+      .write_bytes(VirtAddr(status_descriptor.addr), &[result.status])
+      .is_some()
+    {
+      result.written = result.written.saturating_add(1);
+      result.dma_write = true;
+    } else {
+      result.status = VIRTIO_BLK_S_IOERR;
+    }
+    result
+  }
 
-    // 2.6.7.2 Device Requirements: Used Buffer Notification Suppression
-    // https://docs.oasis-open.org/virtio/virtio/v1.1/csprd01/virtio-v1.1-csprd01.html#x1-400007
-    // After the device writes a descriptor index into the used ring:
-    //   If flags is 1, the device SHOULD NOT send a notification.
-    //   If flags is 0, the device MUST send a notification.
-    // TODO: check the flags in the available ring.
+  fn publish_used(
+    &mut self,
+    memory: &mut Memory,
+    queue: VirtqueueAddr,
+    head: u16,
+    length: u32,
+  ) -> bool {
+    let slot = self.used_idx % self.queue_num as u16;
+    let Some(element_address) = queue
+      .used_addr
+      .checked_add(4)
+      .and_then(|address| address.checked_add(u64::from(slot) * 8))
+    else {
+      return false;
+    };
+    let mut element = [0_u8; 8];
+    element[0..4].copy_from_slice(&u32::from(head).to_le_bytes());
+    element[4..8].copy_from_slice(&length.to_le_bytes());
+    if memory
+      .write_bytes(VirtAddr(element_address), &element)
+      .is_none()
+    {
+      return false;
+    }
+    self.used_idx = self.used_idx.wrapping_add(1);
+    Self::write_u16(memory, queue.used_addr + 2, self.used_idx)
+  }
 
-    // "The used ring is where the device returns buffers once it is done with them: it is only
-    // written to by the device, and read by the driver."
-    //
-    // https://docs.oasis-open.org/virtio/virtio/v1.1/csprd01/virtio-v1.1-csprd01.html#x1-430008
-    //
-    // ```c
-    // #define VIRTQ_USED_F_NO_NOTIFY 1
-    // struct virtq_used {
-    //   le16 flags;
-    //   le16 idx;
-    //   struct virtq_used_elem ring[ /* Queue Size */];
-    //   le16 avail_event; /* Only if VIRTIO_F_EVENT_IDX */
-    // };
-    // ```
-    cpu.bus.write::<u32>(
-      VirtAddr(virtq
-        .used_addr
-        .wrapping_add(4)
-        .wrapping_add((cpu.bus.virtio.id as u64 % QUEUE_SIZE) * 8)),
-      head_index as u32,
-    )?;
+  /// Drains every descriptor chain published before the current available index.
+  ///
+  /// Guest queue mistakes and backend failures are represented in request status bytes and never
+  /// escape as CPU exceptions. Calling this without a pending queue notification is a no-op.
+  pub fn service_queue(&mut self, memory: &mut Memory) -> VirtioServiceResult {
+    let mut result = VirtioServiceResult {
+      interrupt_asserted: self.interrupt_asserted(),
+      ..VirtioServiceResult::default()
+    };
+    if !self.notify_pending {
+      return result;
+    }
+    self.notify_pending = false;
+    if self.backend.is_none() || self.status & VIRTIO_STATUS_DRIVER_OK == 0 {
+      return result;
+    }
+    let Some(queue) = VirtqueueAddr::from_device(self) else {
+      return result;
+    };
+    let queue_num = self.queue_num as u16;
+    if !queue.fully_mapped(memory, queue_num) {
+      return result;
+    }
+    let Some(avail_flags) = Self::read_u16(memory, queue.avail_addr) else {
+      return result;
+    };
+    let Some(avail_idx) = Self::read_u16(memory, queue.avail_addr + 2) else {
+      return result;
+    };
+    let available = avail_idx.wrapping_sub(self.last_avail_idx);
+    if available > queue_num {
+      self.last_avail_idx = avail_idx;
+      return result;
+    }
 
-    cpu.bus.virtio.id = cpu.bus.virtio.id.wrapping_add(1);
-    cpu.bus.write::<u16>(VirtAddr(virtq.used_addr.wrapping_add(2)), cpu.bus.virtio.id as u16)?;
+    for _ in 0..available {
+      let slot = self.last_avail_idx % queue_num;
+      let Some(ring_address) = queue
+        .avail_addr
+        .checked_add(4)
+        .and_then(|address| address.checked_add(u64::from(slot) * 2))
+      else {
+        self.last_avail_idx = self.last_avail_idx.wrapping_add(1);
+        continue;
+      };
+      let head = Self::read_u16(memory, ring_address).unwrap_or(queue_num);
+      self.last_avail_idx = self.last_avail_idx.wrapping_add(1);
+      let request = match Self::descriptor_chain(memory, queue, queue_num, head) {
+        Some(descriptors) => self.process_request(memory, &descriptors),
+        None => RequestResult::io_error(),
+      };
+      let published = self.publish_used(memory, queue, head, request.written);
+      if published {
+        result.completed = result.completed.saturating_add(1);
+        result.dma_write = true;
+      }
+      result.dma_write |= request.dma_write;
+    }
 
-    Ok(())
+    if result.completed != 0 && avail_flags & VIRTQ_AVAIL_F_NO_INTERRUPT == 0 {
+      self.interrupt_status |= VIRTIO_MMIO_INT_VRING;
+    }
+    result.interrupt_asserted = self.interrupt_asserted();
+    result
+  }
+}
+
+impl RequestResult {
+  fn success() -> Self {
+    Self {
+      status: VIRTIO_BLK_S_OK,
+      written: 0,
+      dma_write: false,
+    }
+  }
+
+  fn io_error() -> Self {
+    Self {
+      status: VIRTIO_BLK_S_IOERR,
+      written: 0,
+      dma_write: false,
+    }
+  }
+
+  fn unsupported() -> Self {
+    Self {
+      status: VIRTIO_BLK_S_UNSUPP,
+      written: 0,
+      dma_write: false,
+    }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use std::cell::RefCell;
+  use std::fs::{remove_file, File, OpenOptions};
+  use std::io::{Read, Seek, SeekFrom};
+  use std::rc::Rc;
+  use std::time::{SystemTime, UNIX_EPOCH};
+
+  use super::*;
+
+  const MEMORY_BASE: u64 = 0x8000_0000;
+  const QUEUE_BASE: u64 = MEMORY_BASE + 0x1000;
+  const BUFFER_BASE: u64 = MEMORY_BASE + 0x4000;
+
+  #[derive(Default)]
+  struct BackendState {
+    bytes: Vec<u8>,
+    flushes: usize,
+    fail_flush: bool,
+  }
+
+  #[derive(Clone)]
+  struct TestBackend(Rc<RefCell<BackendState>>);
+
+  impl TestBackend {
+    fn new(size: usize) -> Self {
+      Self(Rc::new(RefCell::new(BackendState {
+        bytes: vec![0; size],
+        ..BackendState::default()
+      })))
+    }
+  }
+
+  impl BlockBackend for TestBackend {
+    fn len(&self) -> u64 {
+      self.0.borrow().bytes.len() as u64
+    }
+
+    fn read_at(&self, offset: u64, buffer: &mut [u8]) -> io::Result<()> {
+      let state = self.0.borrow();
+      let range = checked_backend_range(state.bytes.len(), offset, buffer.len())?;
+      buffer.copy_from_slice(&state.bytes[range]);
+      Ok(())
+    }
+
+    fn write_at(&mut self, offset: u64, buffer: &[u8]) -> io::Result<()> {
+      let mut state = self.0.borrow_mut();
+      let range = checked_backend_range(state.bytes.len(), offset, buffer.len())?;
+      state.bytes[range].copy_from_slice(buffer);
+      Ok(())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+      let mut state = self.0.borrow_mut();
+      state.flushes += 1;
+      if state.fail_flush {
+        Err(io::Error::new(ErrorKind::Other, "injected flush failure"))
+      } else {
+        Ok(())
+      }
+    }
+  }
+
+  fn write_u16(memory: &mut Memory, address: u64, value: u16) {
+    memory
+      .write_bytes(VirtAddr(address), &value.to_le_bytes())
+      .unwrap();
+  }
+
+  fn read_u16(memory: &Memory, address: u64) -> u16 {
+    let mut bytes = [0; 2];
+    memory.read_bytes(VirtAddr(address), &mut bytes).unwrap();
+    u16::from_le_bytes(bytes)
+  }
+
+  fn read_u32(memory: &Memory, address: u64) -> u32 {
+    let mut bytes = [0; 4];
+    memory.read_bytes(VirtAddr(address), &mut bytes).unwrap();
+    u32::from_le_bytes(bytes)
+  }
+
+  fn configured(backend: TestBackend) -> (Virtio, Memory, VirtqueueAddr) {
+    let mut virtio = Virtio::new(0);
+    virtio.set_backend(backend).unwrap();
+    let memory = Memory::new(MEMORY_BASE, 0x20_000).unwrap();
+    virtio
+      .write::<u32>(VirtAddr(GUEST_PAGE_SIZE), 0x1000)
+      .unwrap();
+    virtio.write::<u32>(VirtAddr(QUEUE_NUM), 8).unwrap();
+    virtio
+      .write::<u32>(VirtAddr(QUEUE_ALIGN), 0x1000)
+      .unwrap();
+    virtio
+      .write::<u32>(VirtAddr(QUEUE_PFN), (QUEUE_BASE / 0x1000) as u32)
+      .unwrap();
+    virtio
+      .write::<u32>(VirtAddr(STATUS), VIRTIO_STATUS_DRIVER_OK)
+      .unwrap();
+    let queue = VirtqueueAddr::from_device(&virtio).unwrap();
+    (virtio, memory, queue)
+  }
+
+  fn write_desc(
+    memory: &mut Memory,
+    queue: VirtqueueAddr,
+    index: u16,
+    addr: u64,
+    len: u32,
+    flags: u16,
+    next: u16,
+  ) {
+    let mut bytes = [0_u8; 16];
+    bytes[0..8].copy_from_slice(&addr.to_le_bytes());
+    bytes[8..12].copy_from_slice(&len.to_le_bytes());
+    bytes[12..14].copy_from_slice(&flags.to_le_bytes());
+    bytes[14..16].copy_from_slice(&next.to_le_bytes());
+    memory
+      .write_bytes(
+        VirtAddr(queue.desc_addr + u64::from(index) * VRING_DESC_SIZE),
+        &bytes,
+      )
+      .unwrap();
+  }
+
+  fn write_header(memory: &mut Memory, address: u64, request_type: u32, sector: u64) {
+    let mut bytes = [0_u8; 16];
+    bytes[0..4].copy_from_slice(&request_type.to_le_bytes());
+    bytes[8..16].copy_from_slice(&sector.to_le_bytes());
+    memory.write_bytes(VirtAddr(address), &bytes).unwrap();
+  }
+
+  fn publish(memory: &mut Memory, queue: VirtqueueAddr, index: u16, head: u16) {
+    write_u16(
+      memory,
+      queue.avail_addr + 4 + u64::from(index % QUEUE_SIZE) * 2,
+      head,
+    );
+    write_u16(memory, queue.avail_addr + 2, index.wrapping_add(1));
+  }
+
+  fn notify(virtio: &mut Virtio) {
+    virtio.write::<u32>(VirtAddr(QUEUE_NOTIFY), 0).unwrap();
+  }
+
+  #[test]
+  fn backend_validation_and_device_discovery() {
+    let mut virtio = Virtio::new(99);
+    assert_eq!(virtio.read::<u32>(VirtAddr(DEVICE_ID)).unwrap(), 0);
+    assert_eq!(
+      virtio.read::<u32>(VirtAddr(DEVICE_FEATURES)).unwrap(),
+      VIRTIO_BLK_F_FLUSH
+    );
+    assert_eq!(
+      virtio.set_backend(TestBackend::new(0)).unwrap_err().kind(),
+      ErrorKind::InvalidInput
+    );
+    assert_eq!(
+      virtio.set_backend(TestBackend::new(513)).unwrap_err().kind(),
+      ErrorKind::InvalidInput
+    );
+    virtio.set_backend(TestBackend::new(1024)).unwrap();
+    assert_eq!(virtio.read::<u32>(VirtAddr(DEVICE_ID)).unwrap(), 2);
+    assert_eq!(virtio.read::<u32>(VirtAddr(CONFIG)).unwrap(), 2);
+  }
+
+  #[test]
+  fn mmap_backend_reads_writes_and_flushes() {
+    let unique = SystemTime::now()
+      .duration_since(UNIX_EPOCH)
+      .unwrap()
+      .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+      "valheim-virtio-mmap-{}-{unique}.img",
+      std::process::id()
+    ));
+    let file = OpenOptions::new()
+      .read(true)
+      .write(true)
+      .create_new(true)
+      .open(&path)
+      .unwrap();
+    file.set_len(512).unwrap();
+    let mut mmap = unsafe { MmapMut::map_mut(&file) }.unwrap();
+    BlockBackend::write_at(&mut mmap, 7, &[1, 2, 3]).unwrap();
+    let mut bytes = [0_u8; 3];
+    BlockBackend::read_at(&mmap, 7, &mut bytes).unwrap();
+    assert_eq!(bytes, [1, 2, 3]);
+    BlockBackend::flush(&mut mmap).unwrap();
+    assert!(BlockBackend::read_at(&mmap, 511, &mut bytes).is_err());
+    drop(mmap);
+    drop(file);
+
+    let mut file = File::open(&path).unwrap();
+    file.seek(SeekFrom::Start(7)).unwrap();
+    file.read_exact(&mut bytes).unwrap();
+    assert_eq!(bytes, [1, 2, 3]);
+    remove_file(path).unwrap();
+  }
+
+  #[test]
+  fn in_request_supports_nonzero_head_and_publishes_used_length() {
+    let backend = TestBackend::new(4096);
+    for (index, byte) in backend.0.borrow_mut().bytes[512..1024].iter_mut().enumerate() {
+      *byte = index as u8;
+    }
+    let (mut virtio, mut memory, queue) = configured(backend);
+    let header = BUFFER_BASE;
+    let data = BUFFER_BASE + 0x100;
+    let status = BUFFER_BASE + 0x400;
+    write_header(&mut memory, header, VIRTIO_BLK_T_IN, 1);
+    write_desc(&mut memory, queue, 5, header, 16, VIRTQ_DESC_F_NEXT, 6);
+    write_desc(
+      &mut memory,
+      queue,
+      6,
+      data,
+      512,
+      VIRTQ_DESC_F_NEXT | VIRTQ_DESC_F_WRITE,
+      7,
+    );
+    write_desc(&mut memory, queue, 7, status, 1, VIRTQ_DESC_F_WRITE, 0);
+    publish(&mut memory, queue, 0, 5);
+    notify(&mut virtio);
+
+    let result = virtio.service_queue(&mut memory);
+    assert_eq!(result.completed, 1);
+    assert!(result.interrupt_asserted);
+    assert!(result.dma_write);
+    let mut bytes = [0_u8; 512];
+    memory.read_bytes(VirtAddr(data), &mut bytes).unwrap();
+    assert_eq!(bytes[0], 0);
+    assert_eq!(bytes[255], 255);
+    assert_eq!(memory.read::<u8>(VirtAddr(status)), Some(VIRTIO_BLK_S_OK));
+    assert_eq!(read_u32(&memory, queue.used_addr + 4), 5);
+    assert_eq!(read_u32(&memory, queue.used_addr + 8), 513);
+    assert_eq!(read_u16(&memory, queue.used_addr + 2), 1);
+  }
+
+  #[test]
+  fn one_notification_drains_multiple_out_requests() {
+    let backend = TestBackend::new(4096);
+    let observer = backend.clone();
+    let (mut virtio, mut memory, queue) = configured(backend);
+    let requests = [
+      (1_u16, 1_u64, 0x55_u8, BUFFER_BASE),
+      (4, 2, 0xaa, BUFFER_BASE + 0x800),
+    ];
+    for (head, sector, fill, base) in requests {
+      write_header(&mut memory, base, VIRTIO_BLK_T_OUT, sector);
+      memory
+        .write_bytes(VirtAddr(base + 0x100), &vec![fill; 512])
+        .unwrap();
+      write_desc(&mut memory, queue, head, base, 16, VIRTQ_DESC_F_NEXT, head + 1);
+      write_desc(
+        &mut memory,
+        queue,
+        head + 1,
+        base + 0x100,
+        512,
+        VIRTQ_DESC_F_NEXT,
+        head + 2,
+      );
+      write_desc(
+        &mut memory,
+        queue,
+        head + 2,
+        base + 0x400,
+        1,
+        VIRTQ_DESC_F_WRITE,
+        0,
+      );
+    }
+    publish(&mut memory, queue, 0, 1);
+    publish(&mut memory, queue, 1, 4);
+    notify(&mut virtio);
+
+    let result = virtio.service_queue(&mut memory);
+    assert_eq!(result.completed, 2);
+    assert!(result.dma_write);
+    assert_eq!(read_u16(&memory, queue.used_addr + 2), 2);
+    assert_eq!(read_u32(&memory, queue.used_addr + 4), 1);
+    assert_eq!(read_u32(&memory, queue.used_addr + 12), 4);
+    let state = observer.0.borrow();
+    assert!(state.bytes[512..1024].iter().all(|byte| *byte == 0x55));
+    assert!(state.bytes[1024..1536].iter().all(|byte| *byte == 0xaa));
+  }
+
+  #[test]
+  fn flush_is_supported_and_interrupt_ack_is_write_one_to_clear() {
+    let backend = TestBackend::new(4096);
+    let observer = backend.clone();
+    let (mut virtio, mut memory, queue) = configured(backend);
+    write_header(&mut memory, BUFFER_BASE, VIRTIO_BLK_T_FLUSH, 0);
+    write_desc(
+      &mut memory,
+      queue,
+      2,
+      BUFFER_BASE,
+      16,
+      VIRTQ_DESC_F_NEXT,
+      3,
+    );
+    write_desc(
+      &mut memory,
+      queue,
+      3,
+      BUFFER_BASE + 0x100,
+      1,
+      VIRTQ_DESC_F_WRITE,
+      0,
+    );
+    publish(&mut memory, queue, 0, 2);
+    notify(&mut virtio);
+    let result = virtio.service_queue(&mut memory);
+    assert_eq!(result.completed, 1);
+    assert!(result.dma_write);
+    assert_eq!(observer.0.borrow().flushes, 1);
+    assert!(virtio.interrupt_asserted());
+
+    observer.0.borrow_mut().fail_flush = true;
+    memory
+      .write::<u8>(VirtAddr(BUFFER_BASE + 0x100), 0xff)
+      .unwrap();
+    publish(&mut memory, queue, 1, 2);
+    notify(&mut virtio);
+    assert_eq!(virtio.service_queue(&mut memory).completed, 1);
+    assert_eq!(observer.0.borrow().flushes, 2);
+    assert_eq!(
+      memory.read::<u8>(VirtAddr(BUFFER_BASE + 0x100)),
+      Some(VIRTIO_BLK_S_IOERR)
+    );
+
+    virtio.interrupt_status |= 2;
+    virtio.write::<u8>(VirtAddr(INTERRUPT_ACK), 1).unwrap();
+    assert_eq!(virtio.interrupt_status, 2);
+    virtio.write::<u8>(VirtAddr(INTERRUPT_ACK), 2).unwrap();
+    assert!(!virtio.interrupt_asserted());
+  }
+
+  #[test]
+  fn available_and_used_indices_wrap() {
+    let backend = TestBackend::new(4096);
+    let (mut virtio, mut memory, queue) = configured(backend);
+    for (head, base) in [(0_u16, BUFFER_BASE), (2_u16, BUFFER_BASE + 0x200)] {
+      write_header(&mut memory, base, VIRTIO_BLK_T_FLUSH, 0);
+      write_desc(&mut memory, queue, head, base, 16, VIRTQ_DESC_F_NEXT, head + 1);
+      write_desc(
+        &mut memory,
+        queue,
+        head + 1,
+        base + 0x100,
+        1,
+        VIRTQ_DESC_F_WRITE,
+        0,
+      );
+    }
+    virtio.last_avail_idx = u16::MAX;
+    virtio.used_idx = u16::MAX;
+    write_u16(&mut memory, queue.avail_addr + 4 + 7 * 2, 0);
+    write_u16(&mut memory, queue.avail_addr + 4, 2);
+    write_u16(&mut memory, queue.avail_addr + 2, 1);
+    notify(&mut virtio);
+
+    assert_eq!(virtio.service_queue(&mut memory).completed, 2);
+    assert_eq!(virtio.last_avail_idx, 1);
+    assert_eq!(virtio.used_idx, 1);
+    assert_eq!(read_u32(&memory, queue.used_addr + 4 + 7 * 8), 0);
+    assert_eq!(read_u32(&memory, queue.used_addr + 4), 2);
+    assert_eq!(read_u16(&memory, queue.used_addr + 2), 1);
+  }
+
+  #[test]
+  fn bad_chains_and_out_of_range_requests_do_not_panic() {
+    let backend = TestBackend::new(1024);
+    let (mut virtio, mut memory, queue) = configured(backend);
+    write_desc(
+      &mut memory,
+      queue,
+      0,
+      BUFFER_BASE,
+      16,
+      VIRTQ_DESC_F_NEXT,
+      0,
+    );
+    publish(&mut memory, queue, 0, 0);
+    notify(&mut virtio);
+    let result = virtio.service_queue(&mut memory);
+    assert_eq!(result.completed, 1);
+    assert!(result.dma_write);
+    assert_eq!(read_u32(&memory, queue.used_addr + 8), 0);
+
+    write_header(&mut memory, BUFFER_BASE, VIRTIO_BLK_T_OUT, 2);
+    write_desc(&mut memory, queue, 1, BUFFER_BASE, 16, VIRTQ_DESC_F_NEXT, 2);
+    write_desc(
+      &mut memory,
+      queue,
+      2,
+      BUFFER_BASE + 0x100,
+      512,
+      VIRTQ_DESC_F_NEXT,
+      3,
+    );
+    write_desc(
+      &mut memory,
+      queue,
+      3,
+      BUFFER_BASE + 0x400,
+      1,
+      VIRTQ_DESC_F_WRITE,
+      0,
+    );
+    publish(&mut memory, queue, 1, 1);
+    notify(&mut virtio);
+    assert_eq!(virtio.service_queue(&mut memory).completed, 1);
+    assert_eq!(
+      memory.read::<u8>(VirtAddr(BUFFER_BASE + 0x400)),
+      Some(VIRTIO_BLK_S_IOERR)
+    );
+
+    write_header(&mut memory, BUFFER_BASE, VIRTIO_BLK_T_IN, 0);
+    write_desc(&mut memory, queue, 4, BUFFER_BASE, 16, VIRTQ_DESC_F_NEXT, 5);
+    write_desc(
+      &mut memory,
+      queue,
+      5,
+      MEMORY_BASE + 0x20_000,
+      512,
+      VIRTQ_DESC_F_NEXT | VIRTQ_DESC_F_WRITE,
+      6,
+    );
+    write_desc(
+      &mut memory,
+      queue,
+      6,
+      BUFFER_BASE + 0x500,
+      1,
+      VIRTQ_DESC_F_WRITE,
+      0,
+    );
+    publish(&mut memory, queue, 2, 4);
+    notify(&mut virtio);
+    assert_eq!(virtio.service_queue(&mut memory).completed, 1);
+    assert_eq!(
+      memory.read::<u8>(VirtAddr(BUFFER_BASE + 0x500)),
+      Some(VIRTIO_BLK_S_IOERR)
+    );
+  }
+
+  #[test]
+  fn unsupported_opcode_gets_unsupp_status() {
+    let backend = TestBackend::new(1024);
+    let (mut virtio, mut memory, queue) = configured(backend);
+    write_header(&mut memory, BUFFER_BASE, 99, 0);
+    write_desc(&mut memory, queue, 0, BUFFER_BASE, 16, VIRTQ_DESC_F_NEXT, 1);
+    write_desc(
+      &mut memory,
+      queue,
+      1,
+      BUFFER_BASE + 0x100,
+      1,
+      VIRTQ_DESC_F_WRITE,
+      0,
+    );
+    publish(&mut memory, queue, 0, 0);
+    notify(&mut virtio);
+    assert_eq!(virtio.service_queue(&mut memory).completed, 1);
+    assert_eq!(
+      memory.read::<u8>(VirtAddr(BUFFER_BASE + 0x100)),
+      Some(VIRTIO_BLK_S_UNSUPP)
+    );
+  }
+
+  #[test]
+  fn service_without_notify_is_idempotent_and_reset_clears_transport() {
+    let backend = TestBackend::new(1024);
+    let (mut virtio, mut memory, _) = configured(backend);
+    assert_eq!(virtio.service_queue(&mut memory), VirtioServiceResult::default());
+    virtio.interrupt_status = 3;
+    virtio.notify_pending = true;
+    virtio.last_avail_idx = 7;
+    virtio.used_idx = 9;
+    let guest_page_size = virtio.guest_page_size;
+    virtio.write::<u32>(VirtAddr(STATUS), 0).unwrap();
+    assert_eq!(virtio.status, 0);
+    assert_eq!(virtio.interrupt_status, 0);
+    assert!(!virtio.notify_pending);
+    assert_eq!(virtio.queue_pfn, 0);
+    assert_eq!(virtio.last_avail_idx, 0);
+    assert_eq!(virtio.used_idx, 0);
+    assert_eq!(virtio.guest_page_size, guest_page_size);
+    assert_eq!(virtio.read::<u32>(VirtAddr(DEVICE_ID)).unwrap(), 2);
+
+    virtio.write::<u32>(VirtAddr(QUEUE_SEL), 1).unwrap();
+    assert_eq!(virtio.read::<u32>(VirtAddr(QUEUE_NUM_MAX)).unwrap(), 0);
+    virtio.write::<u32>(VirtAddr(QUEUE_PFN), 123).unwrap();
+    virtio.write::<u32>(VirtAddr(QUEUE_SEL), 0).unwrap();
+    assert_eq!(virtio.read::<u32>(VirtAddr(QUEUE_PFN)).unwrap(), 0);
+    virtio.write::<u32>(VirtAddr(DEVICE_FEATURES_SEL), 99).unwrap();
+    assert_eq!(virtio.read::<u32>(VirtAddr(DEVICE_FEATURES)).unwrap(), 0);
+    virtio.write::<u32>(VirtAddr(STATUS), 128).unwrap();
+    assert_eq!(virtio.read::<u32>(VirtAddr(STATUS)).unwrap(), 128);
+  }
+
+  #[test]
+  fn overrun_available_ring_is_resynchronized_without_io() {
+    let backend = TestBackend::new(1024);
+    let observer = backend.clone();
+    let (mut virtio, mut memory, queue) = configured(backend);
+    write_u16(&mut memory, queue.avail_addr + 2, QUEUE_SIZE + 1);
+    notify(&mut virtio);
+    assert_eq!(virtio.service_queue(&mut memory).completed, 0);
+    assert_eq!(virtio.last_avail_idx, QUEUE_SIZE + 1);
+    assert!(observer.0.borrow().bytes.iter().all(|byte| *byte == 0));
   }
 }

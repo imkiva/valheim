@@ -6,7 +6,7 @@ use crate::cpu::irq::Exception;
 use crate::device::clint::{Clint, ClockSource, HostClock};
 use crate::device::Device;
 use crate::device::plic::Plic;
-use crate::device::virtio::Virtio;
+use crate::device::virtio::{Virtio, VirtioServiceResult, VIRTIO_IRQ};
 use crate::memory::{CanIO, Memory, VirtAddr};
 use crate::wake::WakeHub;
 
@@ -101,6 +101,16 @@ impl Bus {
       Ok(_) => (),
       Err(_) => eprintln!("Error destroying device: {}", (*dev).name()),
     });
+  }
+
+  /// Services pending VirtIO block requests and keeps the PLIC input synchronized with the
+  /// device's level-triggered interrupt-status register.
+  pub(crate) fn service_virtio(&mut self) -> VirtioServiceResult {
+    let result = self.virtio.service_queue(&mut self.mem);
+    self
+      .plic
+      .set_source_level(VIRTIO_IRQ, result.interrupt_asserted);
+    result
   }
 
   /// Returns the host page backing a DRAM address. Device and unmapped addresses never receive a
@@ -223,9 +233,18 @@ impl Bus {
       return self.plic.write(addr, val);
     }
     if Bus::range_contains(VIRTIO_BASE, VIRTIO_END, addr, width) {
-      return self
+      let result = self
         .virtio
         .write::<T>(addr, Bus::safe_reinterpret_as_u64(val) as u32);
+      if result.is_ok() {
+        // In particular, INTERRUPT_ACK must deassert the PLIC input before a following claim
+        // completion can observe it. Waiting for the next CPU poll would create a spurious
+        // re-pend when both MMIO writes execute in one translated block.
+        self
+          .plic
+          .set_source_level(VIRTIO_IRQ, self.virtio.interrupt_asserted());
+      }
+      return result;
     }
 
     match self.select_device_for_write(addr, width) {
