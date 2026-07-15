@@ -3,6 +3,9 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::Instant;
 
 use rustc_hash::FxHashMap;
+use valheim_asm::isa::rv32::RV32Instr;
+use valheim_asm::isa::rv64::RV64Instr;
+use valheim_asm::isa::typed::{Instr, Reg};
 use valheim_core::cpu::csr::CSRMap::{MSTATUS, SATP};
 use valheim_core::cpu::RV64Cpu;
 use valheim_core::interp::{ExecOutcome, RV64Executor};
@@ -21,6 +24,90 @@ const DEFAULT_MAX_COMPILED_BLOCKS: usize = 4 * 1024;
 const DEFAULT_MAX_LIVE_CODE_BYTES: u64 = 128 * 1024 * 1024;
 const FAST_CACHE_SET_COUNT: usize = 4 * 1024;
 const MSTATUS_TRANSLATION_MASK: u64 = (0b11 << 11) | (1 << 17) | (1 << 18) | (1 << 19);
+
+/// A stats-only classification of instructions that terminate a TB and use the shared CPU
+/// fallback. CSR forms distinguish zero-source reads from operations that can write the CSR so
+/// profiling can select safe lowering candidates without inspecting every raw encoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SystemFallback {
+  Ecall,
+  Ebreak,
+  FenceI,
+  Sret,
+  Mret,
+  Wfi,
+  SfenceVma,
+  SinvalVma,
+  SfenceWInvalidation,
+  SfenceInvalidationIr,
+  Csrrw(u16),
+  CsrrsRead(u16),
+  CsrrsWrite(u16),
+  CsrrcRead(u16),
+  CsrrcWrite(u16),
+  Csrrwi(u16),
+  CsrrsiRead(u16),
+  CsrrsiWrite(u16),
+  CsrrciRead(u16),
+  CsrrciWrite(u16),
+  Other(u32),
+}
+
+impl SystemFallback {
+  fn classify(inst: GuestInst) -> Self {
+    match inst.decoded {
+      Instr::RV32(RV32Instr::ECALL) => Self::Ecall,
+      Instr::RV32(RV32Instr::EBREAK) => Self::Ebreak,
+      Instr::RV64(RV64Instr::FENCE_I(..)) => Self::FenceI,
+      Instr::RV64(RV64Instr::SRET) => Self::Sret,
+      Instr::RV64(RV64Instr::MRET) => Self::Mret,
+      Instr::RV64(RV64Instr::WFI) => Self::Wfi,
+      Instr::RV64(RV64Instr::SFENCE_VMA(..)) => Self::SfenceVma,
+      Instr::RV64(RV64Instr::SINVAL_VMA(..)) => Self::SinvalVma,
+      Instr::RV64(RV64Instr::SFENCE_W_INVAL) => Self::SfenceWInvalidation,
+      Instr::RV64(RV64Instr::SFENCE_INVAL_IR) => Self::SfenceInvalidationIr,
+      Instr::RV64(RV64Instr::CSRRW(_, _, csr)) => Self::Csrrw(csr.value()),
+      Instr::RV64(RV64Instr::CSRRS(_, rs1, csr)) => {
+        if is_zero_register(rs1.0) {
+          Self::CsrrsRead(csr.value())
+        } else {
+          Self::CsrrsWrite(csr.value())
+        }
+      }
+      Instr::RV64(RV64Instr::CSRRC(_, rs1, csr)) => {
+        if is_zero_register(rs1.0) {
+          Self::CsrrcRead(csr.value())
+        } else {
+          Self::CsrrcWrite(csr.value())
+        }
+      }
+      Instr::RV64(RV64Instr::CSRRWI(_, _, csr)) => Self::Csrrwi(csr.value()),
+      Instr::RV64(RV64Instr::CSRRSI(_, imm, csr)) => {
+        if imm.value() == 0 {
+          Self::CsrrsiRead(csr.value())
+        } else {
+          Self::CsrrsiWrite(csr.value())
+        }
+      }
+      Instr::RV64(RV64Instr::CSRRCI(_, imm, csr)) => {
+        if imm.value() == 0 {
+          Self::CsrrciRead(csr.value())
+        } else {
+          Self::CsrrciWrite(csr.value())
+        }
+      }
+      _ => Self::Other(inst.raw),
+    }
+  }
+}
+
+fn is_zero_register(reg: Reg) -> bool {
+  match reg {
+    Reg::ZERO => true,
+    Reg::X(index) => index.value() == 0,
+    _ => false,
+  }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct TbKey {
@@ -316,6 +403,7 @@ pub struct JitExecutor {
   stats_enabled: bool,
   stats_interval: Option<u64>,
   compilation_samples: Vec<u64>,
+  system_fallbacks: FxHashMap<SystemFallback, u64>,
   seen_sfence_epoch: u64,
   seen_icache_epoch: u64,
   stats: JitStats,
@@ -341,6 +429,7 @@ impl JitExecutor {
       stats_enabled: true,
       stats_interval: None,
       compilation_samples: Vec::new(),
+      system_fallbacks: FxHashMap::default(),
       seen_sfence_epoch: 0,
       seen_icache_epoch: 0,
       stats: JitStats::default(),
@@ -399,6 +488,24 @@ impl JitExecutor {
       stats.compilation_p95_nanos = samples[(samples.len() - 1) * 95 / 100];
     }
     stats
+  }
+
+  pub fn system_fallbacks(&self) -> Vec<(SystemFallback, u64)> {
+    let mut counts: Vec<_> = self
+      .system_fallbacks
+      .iter()
+      .map(|(instruction, count)| (*instruction, *count))
+      .collect();
+    counts.sort_unstable_by_key(|(instruction, _)| *instruction);
+    counts
+  }
+
+  fn diagnostics_string(&self) -> String {
+    format!(
+      "{:?} system_fallbacks={:?}",
+      self.stats(),
+      self.system_fallbacks(),
+    )
   }
 
   fn clear_block_cache(&mut self) {
@@ -596,6 +703,7 @@ impl JitExecutor {
 
   fn fallback_one(
     stats: &mut JitStats,
+    system_fallbacks: &mut FxHashMap<SystemFallback, u64>,
     stats_enabled: bool,
     cpu: &mut RV64Cpu,
     kind: FallbackKind,
@@ -604,7 +712,11 @@ impl JitExecutor {
     if stats_enabled {
       stats.fallback_instructions += 1;
       match kind {
-        FallbackKind::System => stats.fallback_system += 1,
+        FallbackKind::System => {
+          stats.fallback_system += 1;
+          let count = system_fallbacks.entry(SystemFallback::classify(inst)).or_default();
+          *count = count.saturating_add(1);
+        }
         FallbackKind::FloatingPoint => stats.fallback_floating_point += 1,
         FallbackKind::Other => stats.fallback_other += 1,
       }
@@ -830,6 +942,7 @@ impl JitExecutor {
               }
               return ExecuteOne::stop(Self::fallback_one(
                 &mut self.stats,
+                &mut self.system_fallbacks,
                 self.stats_enabled,
                 cpu,
                 kind,
@@ -870,6 +983,7 @@ impl JitExecutor {
               }
               return ExecuteOne::stop(Self::fallback_one(
                 &mut self.stats,
+                &mut self.system_fallbacks,
                 self.stats_enabled,
                 cpu,
                 kind,
@@ -979,7 +1093,7 @@ impl RV64Executor for JitExecutor {
       self.stats.dispatches = self.stats.dispatches.saturating_add(1);
       if let Some(interval) = self.stats_interval {
         if self.stats.dispatches % interval == 0 {
-          eprintln!("[valheim-jit] {:?}", self.stats());
+          eprintln!("[valheim-jit] {}", self.diagnostics_string());
         }
       }
     }
@@ -1039,7 +1153,7 @@ impl RV64Executor for JitExecutor {
   }
 
   fn diagnostics(&self) -> Option<String> {
-    Some(format!("{:?}", self.stats()))
+    Some(self.diagnostics_string())
   }
 }
 
@@ -1396,6 +1510,72 @@ mod tests {
     );
     assert_eq!(cpu.instr, 0x0010_0073);
     assert_eq!(jit.stats().negative_blocks, 2);
+  }
+
+  #[test]
+  fn system_fallback_profile_distinguishes_csr_reads_and_writes() {
+    let mut cpu = RV64Cpu::new(None);
+    let pc = VirtAddr(RV64_MEMORY_BASE);
+    let time = CSRAddr(Imm32::from(0xc01));
+    let mscratch = CSRAddr(Imm32::from(0x340));
+    let x1 = Reg::X(Fin::new(1));
+    let x2 = Reg::X(Fin::new(2));
+    cpu
+      .bus
+      .write::<u32>(
+        pc,
+        RV64Instr::CSRRS(Rd(x1), Rs1(Reg::ZERO), time).encode32(),
+      )
+      .unwrap();
+    cpu
+      .bus
+      .write::<u32>(
+        pc + VirtAddr(4),
+        RV64Instr::CSRRS(Rd(x1), Rs1(x2), mscratch).encode32(),
+      )
+      .unwrap();
+    cpu
+      .bus
+      .write::<u32>(pc + VirtAddr(8), RV32Instr::ECALL.encode32())
+      .unwrap();
+    cpu.write_reg(x2, 1);
+    cpu.write_pc(pc);
+    let mut jit = JitExecutor::new().unwrap();
+
+    assert_eq!(jit.execute(&mut cpu, 1), ExecOutcome::new(1, Ok(())));
+    assert_eq!(jit.execute(&mut cpu, 1), ExecOutcome::new(1, Ok(())));
+    assert_eq!(
+      jit.execute(&mut cpu, 1),
+      ExecOutcome::new(1, Err(Exception::MachineEcall)),
+    );
+    assert_eq!(
+      jit.system_fallbacks(),
+      vec![
+        (SystemFallback::Ecall, 1),
+        (SystemFallback::CsrrsRead(time.value()), 1),
+        (SystemFallback::CsrrsWrite(mscratch.value()), 1),
+      ],
+    );
+    assert_eq!(jit.stats().fallback_system, 3);
+  }
+
+  #[test]
+  fn disabled_stats_do_not_collect_system_fallback_details() {
+    let mut cpu = RV64Cpu::new(None);
+    let pc = VirtAddr(RV64_MEMORY_BASE);
+    cpu
+      .bus
+      .write::<u32>(pc, RV32Instr::ECALL.encode32())
+      .unwrap();
+    cpu.write_pc(pc);
+    let mut jit = JitExecutor::new().unwrap().with_stats_enabled(false);
+
+    assert_eq!(
+      jit.execute(&mut cpu, 1),
+      ExecOutcome::new(1, Err(Exception::MachineEcall)),
+    );
+    assert!(jit.system_fallbacks().is_empty());
+    assert_eq!(jit.stats().fallback_system, 0);
   }
 
   #[test]

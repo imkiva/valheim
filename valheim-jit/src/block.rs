@@ -30,7 +30,12 @@ pub enum FallbackKind {
 }
 
 impl FallbackKind {
-  fn from_raw(raw: u32, len: u8) -> Self {
+  fn from_instruction(raw: u32, len: u8, decoded: Instr) -> Self {
+    // C.EBREAK decodes to the same architectural instruction as its 32-bit encoding, but its
+    // compressed parcel has no SYSTEM opcode to classify below.
+    if matches!(decoded, Instr::RV32(RV32Instr::EBREAK)) {
+      return Self::System;
+    }
     if len == 4 {
       return match raw & 0x7f {
         0x73 => Self::System,
@@ -170,7 +175,7 @@ impl GuestBlock {
       if crosses_page_if_uncompressed || !is_baseline_native(decoded) {
         return if instructions.is_empty() {
           BlockBuild::InterpretOne {
-            kind: FallbackKind::from_raw(raw, len),
+            kind: FallbackKind::from_instruction(raw, len, decoded),
             inst,
           }
         } else {
@@ -467,6 +472,23 @@ mod tests {
         },
       }
     );
+  }
+
+  #[test]
+  fn compressed_ebreak_is_a_system_fallback() {
+    let mut cpu = RV64Cpu::new(None);
+    let pc = VirtAddr(RV64_MEMORY_BASE);
+    cpu.write_pc(pc);
+    cpu.bus.write::<u16>(pc, 0x9002).unwrap(); // c.ebreak
+
+    let BlockBuild::InterpretOne { kind, inst } =
+      GuestBlock::translate(&mut cpu, MAX_BLOCK_LEN)
+    else {
+      panic!("expected a single-step fallback");
+    };
+    assert_eq!(kind, FallbackKind::System);
+    assert_eq!(inst.decoded, Instr::RV32(RV32Instr::EBREAK));
+    assert_eq!(inst.len, 2);
   }
 
   #[test]

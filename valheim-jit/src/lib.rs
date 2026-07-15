@@ -8,4 +8,4 @@ mod memory;
 mod runtime;
 
 pub use block::{BlockBuild, FallbackKind, GuestBlock, GuestInst, MAX_BLOCK_LEN};
-pub use runtime::{JitExecutor, JitStats};
+pub use runtime::{JitExecutor, JitStats, SystemFallback};
