@@ -408,6 +408,7 @@ fn wfi_is_woken_by_a_machine_timer_interrupt() {
     .unwrap();
   cpu.csrs.write_unchecked(MTVEC, handler).unwrap();
   cpu.csrs.write_unchecked(MIE, MTIE_MASK).unwrap();
+  cpu.csrs.write_mstatus_MIE(true);
   cpu
     .bus
     .clint
@@ -436,6 +437,40 @@ fn wfi_is_woken_by_a_machine_timer_interrupt() {
   assert_eq!(machine.cpu.csrs.read_unchecked(TIME), 3);
   assert_eq!(machine.cpu.csrs.read_unchecked(MEPC), PROGRAM_PC + 4);
   assert_eq!(machine.cpu.csrs.read_unchecked(MCAUSE), (1_u64 << 63) | 7);
+}
+
+#[test]
+fn wfi_wakes_without_trapping_when_global_interrupts_are_disabled() {
+  let handler = PROGRAM_PC + 0x100;
+  let program = [WFI, JAL_X0_TO_SELF];
+  let mut cpu = cpu_with_program(&program);
+  cpu
+    .bus
+    .write::<u32>(VirtAddr(handler), RV32Instr::EBREAK.encode32())
+    .unwrap();
+  cpu.csrs.write_unchecked(MTVEC, handler).unwrap();
+  cpu.csrs.write_unchecked(MIE, MTIE_MASK).unwrap();
+  cpu
+    .bus
+    .clint
+    .write::<u64>(VirtAddr(CLINT_BASE + 0x4000), 3)
+    .unwrap();
+  let mut machine = Machine {
+    cpu,
+    executor: Box::new(JitExecutor::new().unwrap().with_hot_threshold(1)),
+  };
+
+  assert!(machine.run_next());
+  assert!(machine.cpu.wfi);
+  assert_eq!(machine.cpu.read_pc(), VirtAddr(PROGRAM_PC + 4));
+  assert_eq!(machine.cpu.csrs.read_unchecked(TIME), 1);
+
+  assert!(machine.run_next());
+  assert!(!machine.cpu.wfi);
+  assert_eq!(machine.cpu.read_pc(), VirtAddr(PROGRAM_PC + 4));
+  assert_eq!(machine.cpu.csrs.read_unchecked(MEPC), 0);
+  assert_eq!(machine.cpu.csrs.read_unchecked(MCAUSE), 0);
+  assert_ne!(machine.cpu.csrs.read_unchecked(MIP) & MTIP_MASK, 0);
 }
 
 struct XorShift64(u64);

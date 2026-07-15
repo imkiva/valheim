@@ -242,7 +242,7 @@ mod tests {
 
   use super::*;
   use crate::cpu::bus::CLINT_BASE;
-  use crate::cpu::csr::CSRMap::{MCAUSE, MEPC, MSIE_MASK, MTVEC, TIME};
+  use crate::cpu::csr::CSRMap::{MCAUSE, MEPC, MIP, MSIE_MASK, MTIP_MASK, MTVEC, TIME};
   use crate::interp::ExecOutcome;
 
   struct RecordingExecutor {
@@ -314,6 +314,7 @@ mod tests {
     cpu.write_pc(VirtAddr(0x8000_0000));
     cpu.csrs.write_unchecked(MTVEC, 0x8000_0100).unwrap();
     cpu.csrs.write_unchecked(MIE, MTIE_MASK).unwrap();
+    cpu.csrs.write_mstatus_MIE(true);
     cpu
       .bus
       .clint
@@ -345,6 +346,7 @@ mod tests {
     cpu.csrs
       .write_unchecked(MIE, MSIE_MASK | MTIE_MASK)
       .unwrap();
+    cpu.csrs.write_mstatus_MIE(true);
     cpu.bus.clint.write::<u32>(VirtAddr(CLINT_BASE), 1).unwrap();
     cpu
       .bus
@@ -371,6 +373,7 @@ mod tests {
     let mut cpu = RV64Cpu::new(None);
     cpu.wfi = true;
     cpu.csrs.write_unchecked(MIE, MTIE_MASK).unwrap();
+    cpu.csrs.write_mstatus_MIE(true);
     cpu
       .bus
       .clint
@@ -388,6 +391,36 @@ mod tests {
     assert_eq!(machine.cpu.csrs.read_unchecked(TIME), 1);
     assert!(!machine.cpu.wfi);
     assert_eq!(machine.cpu.csrs.read_unchecked(MCAUSE), (1_u64 << 63) | 7);
+  }
+
+  #[test]
+  fn waiting_hart_wakes_without_trapping_when_global_interrupts_are_disabled() {
+    let budgets = Arc::new(Mutex::new(Vec::new()));
+    let mut cpu = RV64Cpu::new(None);
+    cpu.wfi = true;
+    cpu.write_pc(VirtAddr(0x8000_0000));
+    cpu.csrs.write_unchecked(MTVEC, 0x8000_0100).unwrap();
+    cpu.csrs.write_unchecked(MIE, MTIE_MASK).unwrap();
+    cpu
+      .bus
+      .clint
+      .write::<u64>(VirtAddr(CLINT_BASE + 0x4000), 100)
+      .unwrap();
+    let mut machine = Machine {
+      cpu,
+      executor: Box::new(RecordingExecutor {
+        budgets: budgets.clone(),
+        attempted: 0,
+      }),
+    };
+
+    assert_eq!(machine.dispatch_next(), Ok(()));
+    assert_eq!(machine.cpu.csrs.read_unchecked(TIME), 100);
+    assert!(!machine.cpu.wfi);
+    assert_eq!(machine.cpu.read_pc(), VirtAddr(0x8000_0000));
+    assert_eq!(machine.cpu.csrs.read_unchecked(MCAUSE), 0);
+    assert_ne!(machine.cpu.csrs.read_unchecked(MIP) & MTIP_MASK, 0);
+    assert_eq!(&*budgets.lock().unwrap(), &[MAX_EXECUTOR_BUDGET]);
   }
 
   #[test]

@@ -62,14 +62,17 @@ impl RV64Cpu {
     // WFI is also required to resume execution for locally enabled interrupts pending at any privilege level,
     // regardless of the global interrupt enable at each privilege level.
 
-    let irq_globally_enabled = match (self.wfi, self.mode) {
-      (true, _) => true,
-      (_, PrivilegeMode::Machine) => self.csrs.read_mstatus_MIE(),
-      (_, PrivilegeMode::Supervisor) => self.csrs.read_sstatus_SIE(),
-      (_, PrivilegeMode::User) => true,
+    let irq_globally_enabled = match self.mode {
+      PrivilegeMode::Machine => self.csrs.read_mstatus_MIE(),
+      PrivilegeMode::Supervisor => self.csrs.read_sstatus_SIE(),
+      PrivilegeMode::User => true,
     };
 
-    if !irq_globally_enabled {
+    // Preserve the normal interrupt-polling behavior when global interrupts are disabled: in
+    // particular, do not consume a one-shot device event before the hart can take its interrupt.
+    // A waiting hart is the exception because it must observe locally enabled events even when the
+    // corresponding global enable is clear.
+    if !self.wfi && !irq_globally_enabled {
       return None;
     }
 
@@ -135,6 +138,17 @@ impl RV64Cpu {
       return None;
     }
 
+    // WFI wakeup and interrupt delivery are separate decisions. A locally enabled pending
+    // interrupt resumes a waiting hart regardless of the global interrupt-enable bit, but the
+    // interrupt is taken only if the ordinary global eligibility check above succeeds. Keep the
+    // pending bit set on a wake-only event so it can trap after software enables interrupts.
+    if self.wfi {
+      self.wfi = false;
+    }
+    if !irq_globally_enabled {
+      return None;
+    }
+
     if (mip & MEIP_MASK) != 0 {
       let _ = self.csrs.write_unchecked(MIP, self.csrs.read_unchecked(MIP) & !MEIP_MASK);
       return Some(IRQ::MEI);
@@ -166,6 +180,71 @@ impl RV64Cpu {
     }
 
     None
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::{IRQ, RV64Cpu};
+  use crate::cpu::csr::CSRMap::{MCAUSE, MEPC, MIE, MIP, MTIE_MASK, MTIP_MASK, MTVEC};
+  use crate::memory::VirtAddr;
+
+  fn waiting_cpu_with_timer_interrupt(
+    individually_enabled: bool,
+    globally_enabled: bool,
+  ) -> RV64Cpu {
+    let mut cpu = RV64Cpu::new(None);
+    cpu.wfi = true;
+    cpu.write_pc(VirtAddr(0x8000_0000));
+    cpu.csrs.write_unchecked(MTVEC, 0x8000_0100).unwrap();
+    cpu.csrs
+      .write_unchecked(MIE, if individually_enabled { MTIE_MASK } else { 0 })
+      .unwrap();
+    cpu.csrs.write_unchecked(MIP, MTIP_MASK).unwrap();
+    cpu.csrs.write_mstatus_MIE(globally_enabled);
+    cpu
+  }
+
+  #[test]
+  fn locally_enabled_interrupt_wakes_wfi_without_global_enable_or_trap() {
+    let mut cpu = waiting_cpu_with_timer_interrupt(true, false);
+
+    assert_eq!(cpu.pending_interrupt(), None);
+    assert!(!cpu.wfi);
+    assert_eq!(cpu.csrs.read_unchecked(MIP) & MTIP_MASK, MTIP_MASK);
+    assert_eq!(cpu.read_pc(), VirtAddr(0x8000_0000));
+    assert_eq!(cpu.csrs.read_unchecked(MCAUSE), 0);
+
+    cpu.csrs.write_mstatus_MIE(true);
+    let irq = cpu.pending_interrupt().unwrap();
+    assert_eq!(irq, IRQ::MTI);
+    irq.handle(&mut cpu).unwrap();
+    assert_eq!(cpu.read_pc(), VirtAddr(0x8000_0100));
+    assert_eq!(cpu.csrs.read_unchecked(MEPC), 0x8000_0000);
+    assert_eq!(cpu.csrs.read_unchecked(MCAUSE), (1_u64 << 63) | 7);
+  }
+
+  #[test]
+  fn globally_and_locally_enabled_interrupt_wakes_wfi_and_is_delivered() {
+    let mut cpu = waiting_cpu_with_timer_interrupt(true, true);
+
+    let irq = cpu.pending_interrupt().unwrap();
+    assert_eq!(irq, IRQ::MTI);
+    irq.handle(&mut cpu).unwrap();
+    assert!(!cpu.wfi);
+    assert_eq!(cpu.csrs.read_unchecked(MIP) & MTIP_MASK, 0);
+    assert_eq!(cpu.read_pc(), VirtAddr(0x8000_0100));
+    assert_eq!(cpu.csrs.read_unchecked(MEPC), 0x8000_0000);
+    assert_eq!(cpu.csrs.read_unchecked(MCAUSE), (1_u64 << 63) | 7);
+  }
+
+  #[test]
+  fn individually_disabled_interrupt_does_not_wake_wfi() {
+    let mut cpu = waiting_cpu_with_timer_interrupt(false, true);
+
+    assert_eq!(cpu.pending_interrupt(), None);
+    assert!(cpu.wfi);
+    assert_eq!(cpu.csrs.read_unchecked(MIP) & MTIP_MASK, MTIP_MASK);
   }
 }
 
