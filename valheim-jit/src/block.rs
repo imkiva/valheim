@@ -1,6 +1,6 @@
 use valheim_asm::isa::rv32::RV32Instr;
 use valheim_asm::isa::rv64::RV64Instr;
-use valheim_asm::isa::typed::Instr;
+use valheim_asm::isa::typed::{Instr, Reg};
 use valheim_core::cpu::irq::Exception;
 use valheim_core::cpu::mmu::{AccessType, TranslationTarget, PAGE_SIZE};
 use valheim_core::cpu::RV64Cpu;
@@ -172,6 +172,17 @@ impl GuestBlock {
         decoded,
       };
 
+      // Keep the first CSR lowering conservative: pure reads remain single-instruction,
+      // dispatcher-terminal TBs. A preceding native prefix is returned first so interrupt polls
+      // occur at exactly the same architectural boundaries as the former fallback path.
+      if is_native_csr_read(decoded) {
+        if instructions.is_empty() {
+          instructions.push(inst);
+          break;
+        }
+        return BlockBuild::Block(GuestBlock { start_pc, instructions });
+      }
+
       if crosses_page_if_uncompressed || !is_baseline_native(decoded) {
         return if instructions.is_empty() {
           BlockBuild::InterpretOne {
@@ -296,12 +307,17 @@ pub fn is_baseline_native(instr: Instr) -> bool {
       | RV64Instr::AMOMINU_D(..)
       | RV64Instr::AMOMAXU_D(..),
     ) => true,
+    Instr::RV64(RV64Instr::CSRRS(_, rs1, _) | RV64Instr::CSRRC(_, rs1, _))
+      if is_zero_register(rs1.0) => true,
+    Instr::RV64(RV64Instr::CSRRSI(_, imm, _) | RV64Instr::CSRRCI(_, imm, _))
+      if imm.value() == 0 => true,
     _ => false,
   }
 }
 
 pub fn is_terminator(instr: Instr) -> bool {
   is_atomic(instr)
+    || is_native_csr_read(instr)
     || matches!(
     instr,
     Instr::RV32(
@@ -315,6 +331,26 @@ pub fn is_terminator(instr: Instr) -> bool {
         | RV32Instr::BGEU(..)
     )
     )
+}
+
+pub fn is_native_csr_read(instr: Instr) -> bool {
+  match instr {
+    Instr::RV64(RV64Instr::CSRRS(_, rs1, _) | RV64Instr::CSRRC(_, rs1, _)) => {
+      is_zero_register(rs1.0)
+    }
+    Instr::RV64(RV64Instr::CSRRSI(_, imm, _) | RV64Instr::CSRRCI(_, imm, _)) => {
+      imm.value() == 0
+    }
+    _ => false,
+  }
+}
+
+fn is_zero_register(reg: Reg) -> bool {
+  match reg {
+    Reg::ZERO => true,
+    Reg::X(index) => index.value() == 0,
+    _ => false,
+  }
 }
 
 pub fn is_atomic(instr: Instr) -> bool {
@@ -351,6 +387,9 @@ pub fn is_atomic(instr: Instr) -> bool {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use valheim_asm::asm::encode32::Encode32;
+  use valheim_asm::isa::rv64::{CSRAddr, UImm};
+  use valheim_asm::isa::typed::{Imm32, Rd, Rs1};
   use valheim_core::cpu::bus::{RV64_MEMORY_BASE, RV64_MEMORY_END, VIRT_MROM_BASE};
   use valheim_core::cpu::csr::CSRMap::SATP;
   use valheim_core::cpu::mmu::{
@@ -472,6 +511,36 @@ mod tests {
         },
       }
     );
+  }
+
+  #[test]
+  fn zero_source_csr_reads_are_single_instruction_native_blocks() {
+    let csr = CSRAddr(Imm32::from(0xc01));
+    let reads = [
+      RV64Instr::CSRRS(Rd(Reg::ZERO), Rs1(Reg::ZERO), csr),
+      RV64Instr::CSRRC(Rd(Reg::ZERO), Rs1(Reg::ZERO), csr),
+      RV64Instr::CSRRSI(Rd(Reg::ZERO), UImm(Imm32::from(0)), csr),
+      RV64Instr::CSRRCI(Rd(Reg::ZERO), UImm(Imm32::from(0)), csr),
+    ];
+
+    for read in reads {
+      let mut cpu = RV64Cpu::new(None);
+      let pc = VirtAddr(RV64_MEMORY_BASE);
+      cpu.write_pc(pc);
+      cpu.bus.write::<u32>(pc, read.encode32()).unwrap();
+      cpu
+        .bus
+        .write::<u32>(pc + VirtAddr(4), 0x0010_0093)
+        .unwrap(); // addi x1, x0, 1
+
+      let BlockBuild::Block(block) = GuestBlock::translate(&mut cpu, MAX_BLOCK_LEN) else {
+        panic!("expected a native CSR-read block");
+      };
+      assert_eq!(block.instructions.len(), 1);
+      assert_eq!(block.instructions[0].decoded, Instr::RV64(read));
+      assert!(is_native_csr_read(block.instructions[0].decoded));
+      assert!(is_terminator(block.instructions[0].decoded));
+    }
   }
 
   #[test]

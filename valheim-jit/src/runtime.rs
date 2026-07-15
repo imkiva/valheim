@@ -11,7 +11,9 @@ use valheim_core::cpu::RV64Cpu;
 use valheim_core::interp::{ExecOutcome, RV64Executor};
 use valheim_core::memory::VirtAddr;
 
-use crate::block::{BlockBuild, FallbackKind, GuestBlock, GuestInst, MAX_BLOCK_LEN};
+use crate::block::{
+  is_native_csr_read, BlockBuild, FallbackKind, GuestBlock, GuestInst, MAX_BLOCK_LEN,
+};
 use crate::cranelift::{CompiledBlock, CraneliftBackend, JitError, JitFrame};
 use crate::memory::{
   exception_from_frame, is_deferred_memory_exit, is_slow_memory_exit, SoftwareTlb, FAULT_NONE,
@@ -963,7 +965,10 @@ impl JitExecutor {
               let chainable = block
                 .instructions
                 .iter()
-                .all(|inst| inst.len != 4 || inst.raw & 0x7f != 0x2f);
+                .all(|inst| {
+                  (inst.len != 4 || inst.raw & 0x7f != 0x2f)
+                    && !is_native_csr_read(inst.decoded)
+                });
               let block_index = self.blocks.len();
               self.blocks.push(CachedBlock {
                 block,
@@ -1444,6 +1449,34 @@ mod tests {
   }
 
   #[test]
+  fn native_batch_stops_before_a_terminal_csr_read() {
+    let mut cpu = RV64Cpu::new(None);
+    let source = VirtAddr(RV64_MEMORY_BASE);
+    let target = source + VirtAddr(0x100);
+    let jump = jal_x0((target.0 - source.0) as i32);
+    let destination = Reg::X(Fin::new(5));
+    let time = CSRAddr(Imm32::from(0xc01));
+    let rdtime = RV64Instr::CSRRS(Rd(destination), Rs1(Reg::ZERO), time).encode32();
+    cpu.bus.write::<u32>(source, jump).unwrap();
+    cpu.bus.write::<u32>(target, rdtime).unwrap();
+    let mut jit = JitExecutor::new().unwrap().with_hot_threshold(1);
+
+    cpu.write_pc(target);
+    assert_eq!(jit.execute(&mut cpu, 1), ExecOutcome::new(1, Ok(())));
+    cpu.write_pc(source);
+    assert_eq!(jit.execute(&mut cpu, 1), ExecOutcome::new(1, Ok(())));
+
+    cpu.write_pc(source);
+    assert_eq!(jit.execute(&mut cpu, 32), ExecOutcome::new(1, Ok(())));
+    assert_eq!(cpu.read_pc(), target);
+    assert_eq!(cpu.instr, jump as u64);
+    assert_eq!(jit.execute(&mut cpu, 32), ExecOutcome::new(1, Ok(())));
+    assert_eq!(cpu.read_pc(), target + VirtAddr(4));
+    assert_eq!(cpu.instr, rdtime as u64);
+    assert_eq!(jit.stats().successor_installs, 0);
+  }
+
+  #[test]
   fn native_batch_stops_before_an_atomic_target() {
     let mut cpu = RV64Cpu::new(None);
     let target = VirtAddr(RV64_MEMORY_BASE);
@@ -1594,11 +1627,19 @@ mod tests {
       jit.system_fallbacks(),
       vec![
         (SystemFallback::Ecall, 1),
-        (SystemFallback::CsrrsRead(time.value()), 1),
         (SystemFallback::CsrrsWrite(mscratch.value()), 1),
       ],
     );
-    assert_eq!(jit.stats().fallback_system, 3);
+    assert_eq!(jit.stats().fallback_system, 2);
+    assert_eq!(
+      SystemFallback::classify(GuestInst {
+        pc: pc.0,
+        raw: RV64Instr::CSRRS(Rd(x1), Rs1(Reg::ZERO), time).encode32(),
+        len: 4,
+        decoded: Instr::RV64(RV64Instr::CSRRS(Rd(x1), Rs1(Reg::ZERO), time)),
+      }),
+      SystemFallback::CsrrsRead(time.value()),
+    );
   }
 
   #[test]

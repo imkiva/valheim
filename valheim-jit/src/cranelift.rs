@@ -10,12 +10,13 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{default_libcall_names, FuncId, Linkage, Module};
 use valheim_asm::isa::rv32::RV32Instr;
-use valheim_asm::isa::rv64::RV64Instr;
+use valheim_asm::isa::rv64::{CSRAddr, RV64Instr};
 use valheim_asm::isa::typed::{Instr, Rd, Reg, Rs1, Rs2};
 use valheim_core::cpu::RV64Cpu;
 
 use crate::atomic::{jit_atomic, AtomicOp};
 use crate::block::{GuestBlock, GuestInst};
+use crate::csr::{jit_csr, CsrOp};
 use crate::memory::{
   jit_tlb_fill, TlbEntry, TlbStats, EXIT_DEFER_MEMORY, EXIT_SLOW_MEMORY, FAULT_NONE,
   TLB_ACCESS_READ, TLB_ACCESS_WRITE, TLB_INDEX_MASK, WIDTH_16, WIDTH_32, WIDTH_64, WIDTH_8,
@@ -103,6 +104,7 @@ pub struct CraneliftBackend {
   function_context: FunctionBuilderContext,
   tlb_fill_helper: FuncId,
   atomic_helper: FuncId,
+  csr_helper: FuncId,
 }
 
 impl CraneliftBackend {
@@ -117,6 +119,7 @@ impl CraneliftBackend {
     .map_err(|error| JitError(error.to_string()))?;
     builder.symbol("valheim_jit_tlb_fill", jit_tlb_fill as *const u8);
     builder.symbol("valheim_jit_atomic", jit_atomic as *const u8);
+    builder.symbol("valheim_jit_csr", jit_csr as *const u8);
     let mut module = JITModule::new(builder);
 
     let pointer_type = module.target_config().pointer_type();
@@ -141,6 +144,17 @@ impl CraneliftBackend {
       .declare_function("valheim_jit_atomic", Linkage::Import, &atomic_signature)
       .map_err(|error| JitError(error.to_string()))?;
 
+    let mut csr_signature = module.make_signature();
+    csr_signature.call_conv = CallConv::SystemV;
+    csr_signature.params.push(AbiParam::new(pointer_type));
+    csr_signature.params.push(AbiParam::new(types::I32));
+    csr_signature.params.push(AbiParam::new(types::I64));
+    csr_signature.params.push(AbiParam::new(types::I32));
+    csr_signature.returns.push(AbiParam::new(types::I64));
+    let csr_helper = module
+      .declare_function("valheim_jit_csr", Linkage::Import, &csr_signature)
+      .map_err(|error| JitError(error.to_string()))?;
+
     let context = module.make_context();
     Ok(Self {
       module,
@@ -148,6 +162,7 @@ impl CraneliftBackend {
       function_context: FunctionBuilderContext::new(),
       tlb_fill_helper,
       atomic_helper,
+      csr_helper,
     })
   }
 
@@ -174,6 +189,9 @@ impl CraneliftBackend {
     let atomic_helper = self
       .module
       .declare_func_in_func(self.atomic_helper, &mut self.context.func);
+    let csr_helper = self
+      .module
+      .declare_func_in_func(self.csr_helper, &mut self.context.func);
 
     {
       let mut builder = FunctionBuilder::new(&mut self.context.func, &mut self.function_context);
@@ -240,6 +258,7 @@ impl CraneliftBackend {
         tlb_stats,
         tlb_fill_helper,
         atomic_helper,
+        csr_helper,
       );
       for (index, instruction) in block.instructions.iter().enumerate() {
         lowering.lower(*instruction, index as u32 + 1)?;
@@ -291,6 +310,7 @@ struct Lowering<'a, 'b> {
   tlb_stats: Option<Value>,
   tlb_fill_helper: FuncRef,
   atomic_helper: FuncRef,
+  csr_helper: FuncRef,
   values: [Option<Value>; 32],
   dirty: [bool; 32],
   next_pc: Option<Value>,
@@ -311,6 +331,7 @@ impl<'a, 'b> Lowering<'a, 'b> {
     tlb_stats: Option<Value>,
     tlb_fill_helper: FuncRef,
     atomic_helper: FuncRef,
+    csr_helper: FuncRef,
   ) -> Self {
     Self {
       builder,
@@ -326,6 +347,7 @@ impl<'a, 'b> Lowering<'a, 'b> {
       tlb_stats,
       tlb_fill_helper,
       atomic_helper,
+      csr_helper,
       values: [None; 32],
       dirty: [false; 32],
       next_pc: None,
@@ -699,6 +721,32 @@ impl<'a, 'b> Lowering<'a, 'b> {
     self.write(rd, result)
   }
 
+  fn csr_read(
+    &mut self,
+    inst: GuestInst,
+    attempted: u32,
+    rd: Reg,
+    csr: CSRAddr,
+  ) -> Result<(), JitError> {
+    self.prepare_precise_exit(inst, attempted);
+    let csr = self
+      .builder
+      .ins()
+      .iconst(types::I32, csr.value() as i64);
+    let operand = self.iconst(0);
+    let operation = self
+      .builder
+      .ins()
+      .iconst(types::I32, CsrOp::Read as u32 as i64);
+    let call = self
+      .builder
+      .ins()
+      .call(self.csr_helper, &[self.frame, csr, operand, operation]);
+    let old = self.builder.inst_results(call)[0];
+    self.branch_after_fallible_helper(attempted);
+    self.write(rd, old)
+  }
+
   fn load(
     &mut self,
     inst: GuestInst,
@@ -765,6 +813,20 @@ impl<'a, 'b> Lowering<'a, 'b> {
     self.next_pc = Some(self.iconst(default_next));
     match inst.decoded {
       Instr::NOP | Instr::RV32(I32::FENCE(..) | I32::FENCE_TSO) => (),
+      Instr::RV64(I64::CSRRS(Rd(rd), Rs1(rs1), csr))
+      | Instr::RV64(I64::CSRRC(Rd(rd), Rs1(rs1), csr)) => {
+        if Self::reg_index(rs1)?.is_some() {
+          return Err(JitError("native CSR read has a nonzero source register".into()));
+        }
+        self.csr_read(inst, attempted, rd, csr)?;
+      }
+      Instr::RV64(I64::CSRRSI(Rd(rd), imm, csr))
+      | Instr::RV64(I64::CSRRCI(Rd(rd), imm, csr)) => {
+        if imm.value() != 0 {
+          return Err(JitError("native CSR read has a nonzero immediate".into()));
+        }
+        self.csr_read(inst, attempted, rd, csr)?;
+      }
       Instr::RV32(I32::LUI(Rd(rd), imm)) => {
         let value = self.iconst(imm.decode() as i32 as i64 as u64);
         self.write(rd, value)?;

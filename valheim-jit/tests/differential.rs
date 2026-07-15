@@ -7,11 +7,11 @@ use std::time::Duration;
 use valheim_asm::asm::encode32::Encode32;
 use valheim_asm::isa::data::Fin;
 use valheim_asm::isa::rv32::RV32Instr;
-use valheim_asm::isa::rv64::{CSRAddr, RV64Instr};
+use valheim_asm::isa::rv64::{CSRAddr, RV64Instr, UImm};
 use valheim_asm::isa::typed::{Imm32, Rd, Reg, Rs1, Rs2};
 use valheim_core::cpu::bus::{CLINT_BASE, RV64_MEMORY_BASE, RV64_MEMORY_END};
 use valheim_core::cpu::csr::CSRMap::{
-  MCAUSE, MEPC, MIE, MIP, MSTATUS, MTIE_MASK, MTIP_MASK, MTVEC, SATP, TIME,
+  MCAUSE, MEPC, MIE, MIP, MSCRATCH, MSTATUS, MTIE_MASK, MTIP_MASK, MTVEC, SATP, TIME,
 };
 use valheim_core::cpu::irq::Exception;
 use valheim_core::cpu::RV64Cpu;
@@ -518,7 +518,7 @@ fn wfi_wakes_without_trapping_when_global_interrupts_are_disabled() {
 }
 
 #[test]
-fn jit_system_fallback_reads_live_realtime_on_every_rdtime() {
+fn native_csr_read_samples_live_realtime_on_every_rdtime() {
   let rdtime = RV64Instr::CSRRS(
     Rd(x(5)),
     Rs1(Reg::ZERO),
@@ -527,18 +527,58 @@ fn jit_system_fallback_reads_live_realtime_on_every_rdtime() {
   .encode32();
   let clock = Arc::new(ManualClock::default());
   let mut cpu = cpu_with_program_and_clock(&[rdtime], clock.clone());
-  let mut jit = JitExecutor::new().unwrap();
+  let mut jit = JitExecutor::new().unwrap().with_hot_threshold(1);
 
   clock.set_ticks(42);
   assert_eq!(jit.execute(&mut cpu, 1), ExecOutcome::new(1, Ok(())));
   assert_eq!(cpu.read_reg(x(5)), Some(42));
+  assert_eq!(jit.stats().compiled_blocks, 1);
 
   cpu.write_pc(VirtAddr(PROGRAM_PC));
   clock.set_ticks(99);
   assert_eq!(jit.execute(&mut cpu, 1), ExecOutcome::new(1, Ok(())));
   assert_eq!(cpu.read_reg(x(5)), Some(99));
-  assert_eq!(jit.stats().fallback_system, 2);
-  assert_eq!(jit.stats().negative_cache_hits, 1);
+  assert_eq!(jit.stats().native_executions, 1);
+
+  cpu.write_pc(VirtAddr(PROGRAM_PC));
+  clock.set_ticks(123);
+  assert_eq!(jit.execute(&mut cpu, 1), ExecOutcome::new(1, Ok(())));
+  assert_eq!(cpu.read_reg(x(5)), Some(123));
+  assert_eq!(jit.stats().native_executions, 2);
+  assert_eq!(jit.stats().fallback_system, 0);
+}
+
+#[test]
+fn all_zero_source_csr_read_forms_match_naive() {
+  let csr = CSRAddr(Imm32::from(MSCRATCH as u32));
+  let forms = [
+    (RV64Instr::CSRRS(Rd(x(5)), Rs1(Reg::ZERO), csr).encode32(), 5),
+    (RV64Instr::CSRRC(Rd(x(6)), Rs1(Reg::ZERO), csr).encode32(), 6),
+    (
+      RV64Instr::CSRRSI(Rd(x(7)), UImm(Imm32::from(0)), csr).encode32(),
+      7,
+    ),
+    (
+      RV64Instr::CSRRCI(Rd(x(8)), UImm(Imm32::from(0)), csr).encode32(),
+      8,
+    ),
+  ];
+
+  for (raw, destination) in forms {
+    let setup = |cpu: &mut RV64Cpu| {
+      cpu.csrs.write_unchecked(MSCRATCH, 0x1234_5678).unwrap();
+    };
+    let native = compare_native_with_naive(
+      "zero-source CSR read",
+      &[raw],
+      1,
+      &setup,
+      &setup,
+      &[],
+    );
+    assert_eq!(native.xregs[destination], 0x1234_5678);
+    assert_eq!(native.pc, VirtAddr(PROGRAM_PC + 4));
+  }
 }
 
 struct XorShift64(u64);
