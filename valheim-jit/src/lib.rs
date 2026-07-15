@@ -4,6 +4,7 @@ compile_error!("valheim-jit supports only Linux x86_64 with the System V ABI");
 mod atomic;
 mod block;
 mod cranelift;
+mod csr;
 mod memory;
 mod runtime;
 
