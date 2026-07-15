@@ -107,8 +107,14 @@ pub struct CraneliftBackend {
 
 impl CraneliftBackend {
   pub fn new() -> Result<Self, JitError> {
-    let mut builder = JITBuilder::with_flags(&[("opt_level", "speed")], default_libcall_names())
-      .map_err(|error| JitError(error.to_string()))?;
+    // Keep IR verification in debug/test builds where lowering mistakes should fail early; avoid
+    // repeating that validation for every TB on the release startup path.
+    let enable_verifier = if cfg!(debug_assertions) { "true" } else { "false" };
+    let mut builder = JITBuilder::with_flags(
+      &[("opt_level", "speed"), ("enable_verifier", enable_verifier)],
+      default_libcall_names(),
+    )
+    .map_err(|error| JitError(error.to_string()))?;
     builder.symbol("valheim_jit_tlb_fill", jit_tlb_fill as *const u8);
     builder.symbol("valheim_jit_atomic", jit_atomic as *const u8);
     let mut module = JITModule::new(builder);
