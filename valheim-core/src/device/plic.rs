@@ -68,12 +68,6 @@ impl Plic {
     Some((irq / 32, 1_u32 << (irq % 32)))
   }
 
-  fn source_is_pending(&self, irq: usize) -> bool {
-    let word = irq / 32;
-    let mask = 1_u32 << (irq % 32);
-    self.pending[word].get() & mask != 0
-  }
-
   fn source_level_is_high(&self, irq: usize) -> bool {
     let word = irq / 32;
     let mask = 1_u32 << (irq % 32);
@@ -128,23 +122,23 @@ impl Plic {
     self.claim[1].get() != 0
   }
 
-  fn is_enabled(&self, context: usize, irq: usize) -> bool {
-    let word = irq / 32;
-    let mask = 1_u32 << (irq % 32);
-    self.enable[context * SOURCE_WORDS + word] & mask != 0
-  }
-
   fn recompute_claim(&self, context: usize) {
     let mut best_irq = 0;
     let mut best_priority = self.threshold[context];
-    for irq in 1..SOURCE_NUM {
-      let priority = self.priority[irq];
-      if self.source_is_pending(irq)
-        && self.is_enabled(context, irq)
-        && priority > best_priority
-      {
-        best_irq = irq as u32;
-        best_priority = priority;
+    let enable = &self.enable[context * SOURCE_WORDS..(context + 1) * SOURCE_WORDS];
+    for (word, enabled) in enable.iter().copied().enumerate() {
+      let mut candidates = self.pending[word].get() & enabled;
+      while candidates != 0 {
+        // Words and bits are visited in source-ID order. Keeping an existing winner on equal
+        // priority therefore preserves the PLIC's lowest-ID tie break.
+        let bit = candidates.trailing_zeros() as usize;
+        let irq = word * 32 + bit;
+        let priority = self.priority[irq];
+        if priority > best_priority {
+          best_irq = irq as u32;
+          best_priority = priority;
+        }
+        candidates &= candidates - 1;
       }
     }
     self.claim[context].set(best_irq);
@@ -355,6 +349,30 @@ mod tests {
     plic.update_pending(5);
 
     assert_eq!(plic.read(VirtAddr(S_CLAIM)).unwrap(), 5);
+  }
+
+  #[test]
+  fn sparse_candidates_across_words_preserve_priority_and_irq_order() {
+    let mut plic = Plic::new();
+    configure_source(&mut plic, 33, 3);
+    configure_source(&mut plic, 65, 5);
+    configure_source(&mut plic, 1023, 5);
+
+    // A higher-priority pending source is not claimable unless it is enabled for the context.
+    plic
+      .write(VirtAddr(SOURCE_PRIORITY + 900 * 4), 7)
+      .unwrap();
+    plic.update_pending(1023);
+    plic.update_pending(900);
+    plic.update_pending(65);
+    plic.update_pending(33);
+
+    // Equal priorities still select the lowest source ID, even across different bitset words.
+    assert_eq!(plic.read(VirtAddr(S_CLAIM)).unwrap(), 65);
+    assert_eq!(plic.read(VirtAddr(S_CLAIM)).unwrap(), 1023);
+    assert_eq!(plic.read(VirtAddr(S_CLAIM)).unwrap(), 33);
+    assert_eq!(plic.read(VirtAddr(S_CLAIM)).unwrap(), 0);
+    assert_ne!(plic.pending[900 / 32].get() & (1 << (900 % 32)), 0);
   }
 
   #[test]
