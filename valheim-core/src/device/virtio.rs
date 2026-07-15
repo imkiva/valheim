@@ -754,7 +754,8 @@ impl Virtio {
     result
   }
 
-  fn publish_used(
+  /// Writes one used-ring element and advances the private index without publishing the index.
+  fn write_used_element(
     &mut self,
     memory: &mut Memory,
     queue: VirtqueueAddr,
@@ -779,7 +780,7 @@ impl Virtio {
       return false;
     }
     self.used_idx = self.used_idx.wrapping_add(1);
-    Self::write_u16(memory, queue.used_addr + 2, self.used_idx)
+    true
   }
 
   /// Drains every descriptor chain published before the current available index.
@@ -818,6 +819,7 @@ impl Virtio {
     }
 
     let mut descriptors = std::mem::take(&mut self.descriptor_scratch);
+    let mut pending_completions = 0_u16;
     for _ in 0..available {
       let slot = self.last_avail_idx % queue_num;
       let Some(ring_address) = queue
@@ -835,14 +837,20 @@ impl Virtio {
       } else {
         RequestResult::io_error()
       };
-      let published = self.publish_used(memory, queue, head, request.written);
-      if published {
-        result.completed = result.completed.saturating_add(1);
-        result.dma_write = true;
+      if self.write_used_element(memory, queue, head, request.written) {
+        pending_completions = pending_completions.saturating_add(1);
       }
       result.dma_write |= request.dma_write;
     }
     self.descriptor_scratch = descriptors;
+
+    // Publish the whole batch only after every visible used-ring element has been written.
+    if pending_completions != 0
+      && Self::write_u16(memory, queue.used_addr + 2, self.used_idx)
+    {
+      result.completed = pending_completions;
+      result.dma_write = true;
+    }
 
     if result.completed != 0 && avail_flags & VIRTQ_AVAIL_F_NO_INTERRUPT == 0 {
       self.interrupt_status |= VIRTIO_MMIO_INT_VRING;
@@ -1368,7 +1376,7 @@ mod tests {
   }
 
   #[test]
-  fn one_notification_drains_multiple_out_requests() {
+  fn one_notification_batches_used_index_for_multiple_out_requests() {
     let backend = TestBackend::new(4096);
     let observer = backend.clone();
     let (mut virtio, mut memory, queue) = configured(backend);
@@ -1422,6 +1430,46 @@ mod tests {
     notify(&mut virtio);
     assert_eq!(virtio.service_queue(&mut memory).completed, 1);
     assert_eq!(virtio.descriptor_scratch.as_ptr(), scratch_pointer);
+    assert_eq!(read_u16(&memory, queue.used_addr + 2), 3);
+    assert_eq!(read_u32(&memory, queue.used_addr + 20), 1);
+  }
+
+  #[test]
+  fn batched_used_index_includes_malformed_request_completions() {
+    let backend = TestBackend::new(4096);
+    let observer = backend.clone();
+    let queue_size = 8;
+    let (mut virtio, mut memory, queue) = configured_with_queue_size(backend, queue_size);
+
+    write_desc(
+      &mut memory,
+      queue,
+      0,
+      BUFFER_BASE,
+      16,
+      VIRTQ_DESC_F_NEXT,
+      0,
+    );
+    let header = BUFFER_BASE + 0x200;
+    let status = BUFFER_BASE + 0x300;
+    write_header(&mut memory, header, VIRTIO_BLK_T_FLUSH, 0);
+    write_desc(&mut memory, queue, 1, header, 16, VIRTQ_DESC_F_NEXT, 2);
+    write_desc(&mut memory, queue, 2, status, 1, VIRTQ_DESC_F_WRITE, 0);
+    publish(&mut memory, queue, queue_size, 0, 0);
+    publish(&mut memory, queue, queue_size, 1, 1);
+    notify(&mut virtio);
+
+    let result = virtio.service_queue(&mut memory);
+    assert_eq!(result.completed, 2);
+    assert!(result.dma_write);
+    assert!(result.interrupt_asserted);
+    assert_eq!(read_u16(&memory, queue.used_addr + 2), 2);
+    assert_eq!(read_u32(&memory, queue.used_addr + 4), 0);
+    assert_eq!(read_u32(&memory, queue.used_addr + 8), 0);
+    assert_eq!(read_u32(&memory, queue.used_addr + 12), 1);
+    assert_eq!(read_u32(&memory, queue.used_addr + 16), 1);
+    assert_eq!(memory.read::<u8>(VirtAddr(status)), Some(VIRTIO_BLK_S_OK));
+    assert_eq!(observer.0.borrow().flushes, 1);
   }
 
   #[test]
@@ -1477,7 +1525,7 @@ mod tests {
   }
 
   #[test]
-  fn available_and_used_indices_wrap() {
+  fn batched_available_and_used_indices_wrap() {
     let backend = TestBackend::new(4096);
     let queue_size = 8;
     let (mut virtio, mut memory, queue) = configured_with_queue_size(backend, queue_size);
@@ -1496,6 +1544,7 @@ mod tests {
     }
     virtio.last_avail_idx = u16::MAX;
     virtio.used_idx = u16::MAX;
+    write_u16(&mut memory, queue.used_addr + 2, u16::MAX);
     let wrapped_slot = u64::from(u16::MAX % queue_size);
     write_u16(
       &mut memory,
@@ -1506,14 +1555,22 @@ mod tests {
     write_u16(&mut memory, queue.avail_addr + 2, 1);
     notify(&mut virtio);
 
-    assert_eq!(virtio.service_queue(&mut memory).completed, 2);
+    let result = virtio.service_queue(&mut memory);
+    assert_eq!(result.completed, 2);
+    assert!(result.dma_write);
+    assert!(result.interrupt_asserted);
     assert_eq!(virtio.last_avail_idx, 1);
     assert_eq!(virtio.used_idx, 1);
     assert_eq!(
       read_u32(&memory, queue.used_addr + 4 + wrapped_slot * 8),
       0
     );
+    assert_eq!(
+      read_u32(&memory, queue.used_addr + 8 + wrapped_slot * 8),
+      1
+    );
     assert_eq!(read_u32(&memory, queue.used_addr + 4), 2);
+    assert_eq!(read_u32(&memory, queue.used_addr + 8), 1);
     assert_eq!(read_u16(&memory, queue.used_addr + 2), 1);
   }
 
