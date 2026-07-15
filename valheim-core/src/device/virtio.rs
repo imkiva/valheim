@@ -19,6 +19,7 @@ const VIRTQ_DESC_F_WRITE: u16 = 2;
 const VIRTQ_DESC_F_INDIRECT: u16 = 4;
 const VIRTQ_AVAIL_F_NO_INTERRUPT: u16 = 1;
 
+const VIRTIO_BLK_F_SEG_MAX: u32 = 1 << 2;
 const VIRTIO_BLK_F_FLUSH: u32 = 1 << 9;
 const VIRTIO_BLK_T_IN: u32 = 0;
 const VIRTIO_BLK_T_OUT: u32 = 1;
@@ -67,7 +68,7 @@ const INTERRUPT_ACK_END: u64 = VIRTIO_BASE + 0x67;
 const STATUS: u64 = VIRTIO_BASE + 0x70;
 const STATUS_END: u64 = VIRTIO_BASE + 0x73;
 const CONFIG: u64 = VIRTIO_BASE + 0x100;
-const CONFIG_END: u64 = VIRTIO_BASE + 0x107;
+const CONFIG_END: u64 = VIRTIO_BASE + 0x10f;
 
 /// Storage operations required by the VirtIO block transport.
 pub trait BlockBackend {
@@ -228,7 +229,7 @@ pub struct Virtio {
 impl Virtio {
   pub fn new(capacity: u64) -> Self {
     Self {
-      device_features: [VIRTIO_BLK_F_FLUSH, 0],
+      device_features: [VIRTIO_BLK_F_SEG_MAX | VIRTIO_BLK_F_FLUSH, 0],
       device_features_sel: 0,
       driver_features: [0; 2],
       driver_features_sel: 0,
@@ -375,10 +376,12 @@ impl Virtio {
       }
       STATUS..=STATUS_END => Self::read_register::<T>(address, STATUS, self.status),
       CONFIG..=CONFIG_END => {
-        let Some((offset, width)) = Self::io_width::<T>(address, CONFIG, 8) else {
+        let Some((offset, width)) = Self::io_width::<T>(address, CONFIG, 16) else {
           return Err(Exception::LoadAccessFault(addr));
         };
-        let bytes = self.capacity.to_le_bytes();
+        let mut bytes = [0_u8; 16];
+        bytes[0..8].copy_from_slice(&self.capacity.to_le_bytes());
+        bytes[12..16].copy_from_slice(&u32::from(QUEUE_SIZE - 2).to_le_bytes());
         let mut result = 0_u32;
         for index in 0..width {
           result |= u32::from(bytes[(offset + u64::from(index)) as usize]) << (index * 8);
@@ -1017,7 +1020,7 @@ mod tests {
     );
     assert_eq!(
       virtio.read::<u32>(VirtAddr(DEVICE_FEATURES)).unwrap(),
-      VIRTIO_BLK_F_FLUSH
+      VIRTIO_BLK_F_SEG_MAX | VIRTIO_BLK_F_FLUSH
     );
     assert_eq!(
       virtio.set_backend(TestBackend::new(0)).unwrap_err().kind(),
@@ -1030,6 +1033,25 @@ mod tests {
     virtio.set_backend(TestBackend::new(1024)).unwrap();
     assert_eq!(virtio.read::<u32>(VirtAddr(DEVICE_ID)).unwrap(), 2);
     assert_eq!(virtio.read::<u32>(VirtAddr(CONFIG)).unwrap(), 2);
+    assert_eq!(virtio.read::<u32>(VirtAddr(CONFIG + 8)).unwrap(), 0);
+    assert_eq!(
+      virtio.read::<u32>(VirtAddr(CONFIG + 12)).unwrap(),
+      u32::from(QUEUE_SIZE - 2)
+    );
+    for (offset, byte) in u32::from(QUEUE_SIZE - 2)
+      .to_le_bytes()
+      .into_iter()
+      .enumerate()
+    {
+      assert_eq!(
+        virtio
+          .read::<u8>(VirtAddr(CONFIG + 12 + offset as u64))
+          .unwrap(),
+        u32::from(byte)
+      );
+    }
+    assert!(virtio.read::<u8>(VirtAddr(CONFIG + 16)).is_err());
+    assert!(virtio.read::<u32>(VirtAddr(CONFIG + 13)).is_err());
   }
 
   #[test]
@@ -1103,6 +1125,106 @@ mod tests {
     assert_eq!(read_u32(&memory, queue.used_addr + 4), 5);
     assert_eq!(read_u32(&memory, queue.used_addr + 8), 513);
     assert_eq!(read_u16(&memory, queue.used_addr + 2), 1);
+  }
+
+  #[test]
+  fn advertised_segment_limit_accepts_multiple_data_descriptors() {
+    let backend = TestBackend::new(4096);
+    for (index, byte) in backend.0.borrow_mut().bytes[0..512].iter_mut().enumerate() {
+      *byte = index as u8;
+    }
+    let (mut virtio, mut memory, queue) = configured(backend);
+    let header = BUFFER_BASE;
+    let first_data = BUFFER_BASE + 0x100;
+    let second_data = BUFFER_BASE + 0x300;
+    let status = BUFFER_BASE + 0x500;
+    write_header(&mut memory, header, VIRTIO_BLK_T_IN, 0);
+    write_desc(&mut memory, queue, 0, header, 16, VIRTQ_DESC_F_NEXT, 1);
+    write_desc(
+      &mut memory,
+      queue,
+      1,
+      first_data,
+      256,
+      VIRTQ_DESC_F_NEXT | VIRTQ_DESC_F_WRITE,
+      2,
+    );
+    write_desc(
+      &mut memory,
+      queue,
+      2,
+      second_data,
+      256,
+      VIRTQ_DESC_F_NEXT | VIRTQ_DESC_F_WRITE,
+      3,
+    );
+    write_desc(&mut memory, queue, 3, status, 1, VIRTQ_DESC_F_WRITE, 0);
+    publish(&mut memory, queue, QUEUE_SIZE, 0, 0);
+    notify(&mut virtio);
+
+    assert_eq!(virtio.service_queue(&mut memory).completed, 1);
+    let mut first = [0_u8; 256];
+    let mut second = [0_u8; 256];
+    memory.read_bytes(VirtAddr(first_data), &mut first).unwrap();
+    memory
+      .read_bytes(VirtAddr(second_data), &mut second)
+      .unwrap();
+    assert_eq!(first[0], 0);
+    assert_eq!(first[255], 255);
+    assert_eq!(second[0], 0);
+    assert_eq!(second[255], 255);
+    assert_eq!(memory.read::<u8>(VirtAddr(status)), Some(VIRTIO_BLK_S_OK));
+    assert_eq!(read_u32(&memory, queue.used_addr + 8), 513);
+  }
+
+  #[test]
+  fn advertised_segment_limit_is_fully_serviceable() {
+    let backend = TestBackend::new(128 * 512);
+    for (index, byte) in backend.0.borrow_mut().bytes.iter_mut().enumerate() {
+      *byte = index as u8;
+    }
+    let (mut virtio, mut memory, queue) = configured(backend);
+    let header = BUFFER_BASE;
+    let data = BUFFER_BASE + 0x100;
+    let segment_count = QUEUE_SIZE - 2;
+    let status = data + u64::from(segment_count) * 512;
+    write_header(&mut memory, header, VIRTIO_BLK_T_IN, 0);
+    write_desc(&mut memory, queue, 0, header, 16, VIRTQ_DESC_F_NEXT, 1);
+    for index in 0..segment_count {
+      let descriptor_index = index + 1;
+      write_desc(
+        &mut memory,
+        queue,
+        descriptor_index,
+        data + u64::from(index) * 512,
+        512,
+        VIRTQ_DESC_F_NEXT | VIRTQ_DESC_F_WRITE,
+        descriptor_index + 1,
+      );
+    }
+    write_desc(
+      &mut memory,
+      queue,
+      QUEUE_SIZE - 1,
+      status,
+      1,
+      VIRTQ_DESC_F_WRITE,
+      0,
+    );
+    publish(&mut memory, queue, QUEUE_SIZE, 0, 0);
+    notify(&mut virtio);
+
+    assert_eq!(virtio.service_queue(&mut memory).completed, 1);
+    assert_eq!(memory.read::<u8>(VirtAddr(data)), Some(0));
+    assert_eq!(
+      memory.read::<u8>(VirtAddr(status - 1)),
+      Some(((u64::from(segment_count) * 512 - 1) & 0xff) as u8)
+    );
+    assert_eq!(memory.read::<u8>(VirtAddr(status)), Some(VIRTIO_BLK_S_OK));
+    assert_eq!(
+      read_u32(&memory, queue.used_addr + 8),
+      u32::from(segment_count) * 512 + 1
+    );
   }
 
   #[test]
