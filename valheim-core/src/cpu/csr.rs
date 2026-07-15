@@ -55,6 +55,7 @@ pub mod CSRMap {
   /// Cycle counter for RDCYCLE instruction.
   pub const CYCLE: u16 = 0xc00;
   /// Timer for RDTIME instruction.
+  /// Architectural reads use RV64Cpu's live CLINT-backed accessor, not this raw CSR storage slot.
   pub const TIME: u16 = 0xc01;
 
   // Supervisor-level CSR addresses
@@ -282,6 +283,7 @@ impl CSRRegs {
         self.csrs[MIDELEG as usize] = mideleg;
       }
       MCYCLE => return Err(Exception::IllegalInstruction),
+      TIME => return Err(Exception::IllegalInstruction),
       // 4.1.1 Supervisor Status Register (sstatus)
       // The sstatus register is a subset of the mstatus register.
       // In a straightforward implementation, reading or writing any field in sstatus

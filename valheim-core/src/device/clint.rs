@@ -1,103 +1,167 @@
 // https://github.com/qemu/qemu/blob/master/hw/intc/sifive_clint.c
 // https://github.com/qemu/qemu/blob/master/include/hw/intc/sifive_clint.h
 
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
 use crate::cpu::bus::CLINT_BASE;
-use crate::cpu::csr::{CSRMap, CSRRegs};
-use crate::cpu::csr::CSRMap::{*};
+use crate::cpu::csr::CSRMap::{MSIP_MASK, MTIP_MASK};
 use crate::cpu::irq::Exception;
 use crate::memory::{CanIO, VirtAddr};
 
+pub const TIMEBASE_FREQUENCY: u64 = 10_000_000;
+const NANOS_PER_SECOND: u128 = 1_000_000_000;
+
+/// Monotonic time source used by the platform real-time counter.
+///
+/// Production machines use [`HostClock`]. The explicit interface lets unit and differential tests
+/// advance time without sleeping or reintroducing an instruction-count clock mode.
+pub trait ClockSource: Send + Sync {
+  fn now(&self) -> Duration;
+}
+
+pub struct HostClock {
+  started: Instant,
+}
+
+impl HostClock {
+  pub fn new() -> Self {
+    Self { started: Instant::now() }
+  }
+}
+
+impl Default for HostClock {
+  fn default() -> Self {
+    Self::new()
+  }
+}
+
+impl ClockSource for HostClock {
+  fn now(&self) -> Duration {
+    self.started.elapsed()
+  }
+}
+
 /// machine timer register
 const MTIME: u64 = CLINT_BASE + 0xbff8;
-const MTIME_END: u64 = MTIME + 8;
+const MTIME_WIDTH: usize = 8;
 
 /// machine timer compare register
 /// 3.2.1 Machine Timer Registers (mtime and mtimecmp)
 /// Lower privilege levels do not have their own timecmp registers.
-/// Instead, machine-mode software can implement any number of virtual timers on a hart by multiplexing the next timer interrupt into the mtimecmp register.
+/// Machine-mode software multiplexes lower-privilege timers through the next mtimecmp deadline.
 const MTIMECMP: u64 = CLINT_BASE + 0x4000;
-const MTIMECMP_END: u64 = MTIMECMP + 8;
+const MTIMECMP_WIDTH: usize = 8;
 
 /// machine software interrupt pending register
 const MSIP: u64 = CLINT_BASE;
-const MSIP_END: u64 = MSIP + 4;
+const MSIP_WIDTH: usize = 4;
 
 pub struct Clint {
   msip: u32,
   mtimecmp: u64,
-  mtime: u64,
+  clock: Arc<dyn ClockSource>,
+  host_anchor: Duration,
+  guest_anchor: u64,
 }
 
 impl Clint {
   pub fn new() -> Self {
+    Self::new_with_clock(Arc::new(HostClock::new()))
+  }
+
+  pub fn new_with_clock(clock: Arc<dyn ClockSource>) -> Self {
+    let host_anchor = clock.now();
     Self {
       msip: 0,
       mtimecmp: 0,
-      mtime: 0,
+      clock,
+      host_anchor,
+      guest_anchor: 0,
     }
   }
 
-  pub fn tick(&mut self, csrs: &mut CSRRegs) {
-    self.advance(csrs, 1);
+  fn ticks_for_duration(duration: Duration) -> u64 {
+    let ticks = duration
+      .as_nanos()
+      .saturating_mul(TIMEBASE_FREQUENCY as u128) / NANOS_PER_SECOND;
+    ticks as u64
   }
 
-  /// Advance the platform timer by several guest instruction ticks.
-  pub fn advance(&mut self, csrs: &mut CSRRegs, ticks: u64) {
-    if ticks == 0 {
-      return;
-    }
+  fn duration_for_ticks_ceil(ticks: u64) -> Duration {
+    let nanos = (ticks as u128)
+      .saturating_mul(NANOS_PER_SECOND)
+      .saturating_add(TIMEBASE_FREQUENCY as u128 - 1) /
+      TIMEBASE_FREQUENCY as u128;
+    Duration::new(
+      (nanos / NANOS_PER_SECOND) as u64,
+      (nanos % NANOS_PER_SECOND) as u32,
+    )
+  }
 
-    let old_mtime = self.mtime;
-    let old_csr_time = csrs.csrs[CSRMap::TIME as usize];
-    debug_assert_eq!(old_mtime, old_csr_time);
+  fn mtime_at(&self, now: Duration) -> u64 {
+    let elapsed = now.checked_sub(self.host_anchor).unwrap_or(Duration::ZERO);
+    self
+      .guest_anchor
+      .wrapping_add(Self::ticks_for_duration(elapsed))
+  }
 
-    // 3.2.1 Machine Timer Registers (mtime and mtimecmp)
-    // mtime must increment at constant frequency, and the platform must provide a mechanism for determining the period of an mtime tick.
+  pub fn mtime(&self) -> u64 {
+    self.mtime_at(self.clock.now())
+  }
 
-    self.mtime = old_mtime.wrapping_add(ticks);
-    csrs.csrs[CSRMap::TIME as usize] = old_csr_time.wrapping_add(ticks);
-
-    // 3.2.1 Machine Timer Registers (mtime and mtimecmp)
-    // A machine timer interrupt becomes pending whenever mtime contains a value greater than or
-    // equal to mtimecmp, treating the values as unsigned integers. The interrupt remains posted
-    // until mtimecmp becomes greater than mtime (typically as a result of writing mtimecmp).
-    // The interrupt will only be taken if interrupts are enabled the MTIE bit is set in the mie register.
-
-    // note: just set the pending bit, the CPU will check whether the interrupt should be taken
-    // together with the enable bit.
-
+  /// Level-triggered local interrupt state derived from the current clock and software register.
+  pub fn local_pending_bits(&self) -> u64 {
+    let mtime = self.mtime();
+    let mut pending = 0;
     if (self.msip & 1) != 0 {
-      let _ = csrs.write_unchecked(MIP, csrs.read_unchecked(MIP) | MSIP_MASK);
+      pending |= MSIP_MASK;
     }
-
-    if self.mtime >= self.mtimecmp {
-      // take the interrupt
-      let _ = csrs.write_unchecked(MIP, csrs.read_unchecked(MIP) | MTIP_MASK);
-    } else {
-      // clear the interrupt
-      let _ = csrs.write_unchecked(MIP, csrs.read_unchecked(MIP) & !MTIP_MASK);
+    if mtime >= self.mtimecmp {
+      pending |= MTIP_MASK;
     }
+    pending
   }
 
-  /// Number of ticks until a future timer deadline. A timer that is already
-  /// pending has no future deadline with which to restrict an execution block.
-  pub fn ticks_until_timer(&self) -> Option<u64> {
-    if self.mtimecmp > self.mtime {
-      Some(self.mtimecmp - self.mtime)
+  /// Host duration until a future timer deadline, rounded up so MTIP is never posted early.
+  pub fn duration_until_timer(&self) -> Option<Duration> {
+    let mtime = self.mtime();
+    if self.mtimecmp > mtime {
+      Some(Self::duration_for_ticks_ceil(self.mtimecmp - mtime))
     } else {
       None
     }
   }
 
-  pub fn read<T: CanIO>(&self, addr: VirtAddr) -> Result<u64, Exception> {
-    let (val, offset) = match addr.0 {
-      MSIP..=MSIP_END => (self.msip as u64, addr.0 - MSIP),
-      MTIMECMP..=MTIMECMP_END => (self.mtimecmp, addr.0 - MTIMECMP),
-      MTIME..=MTIME_END => (self.mtime, addr.0 - MTIME),
-      _ => return Err(Exception::LoadAccessFault(addr)),
-    };
+  fn register_offset(addr: u64, base: u64, register_width: usize, width: usize) -> Option<u64> {
+    let offset = addr.checked_sub(base)?;
+    (offset.checked_add(width as u64)? <= register_width as u64).then_some(offset)
+  }
 
-    let val = match std::mem::size_of::<T>() {
+  fn register_value(&self, addr: VirtAddr, width: usize) -> Option<(u64, u64)> {
+    if let Some(offset) = Self::register_offset(addr.0, MSIP, MSIP_WIDTH, width) {
+      return Some((self.msip as u64, offset));
+    }
+    if let Some(offset) = Self::register_offset(addr.0, MTIMECMP, MTIMECMP_WIDTH, width) {
+      return Some((self.mtimecmp, offset));
+    }
+    Self::register_offset(addr.0, MTIME, MTIME_WIDTH, width)
+      .map(|offset| (self.mtime(), offset))
+  }
+
+  pub fn accepts(&self, addr: VirtAddr, width: usize) -> bool {
+    Self::register_offset(addr.0, MSIP, MSIP_WIDTH, width).is_some() ||
+      Self::register_offset(addr.0, MTIMECMP, MTIMECMP_WIDTH, width).is_some() ||
+      Self::register_offset(addr.0, MTIME, MTIME_WIDTH, width).is_some()
+  }
+
+  pub fn read<T: CanIO>(&self, addr: VirtAddr) -> Result<u64, Exception> {
+    let width = std::mem::size_of::<T>();
+    let (val, offset) = self
+      .register_value(addr, width)
+      .ok_or(Exception::LoadAccessFault(addr))?;
+
+    let val = match width {
       1 => (val >> (offset * 8)) & 0xff,
       2 => (val >> (offset * 8)) & 0xffff,
       4 => (val >> (offset * 8)) & 0xffffffff,
@@ -108,15 +172,23 @@ impl Clint {
   }
 
   pub fn write<T: CanIO>(&mut self, addr: VirtAddr, value: u64) -> Result<(), Exception> {
-    let (mut old, offset) = match addr.0 {
-      MSIP..=MSIP_END => (self.msip as u64, addr.0 - MSIP),
-      MTIMECMP..=MTIMECMP_END => (self.mtimecmp, addr.0 - MTIMECMP),
-      MTIME..=MTIME_END => (self.mtime, addr.0 - MTIME),
-      _ => return Err(Exception::StoreAccessFault(addr)),
-    };
+    let now = self.clock.now();
+    let width = std::mem::size_of::<T>();
+    let (mut old, offset) =
+      if let Some(offset) = Self::register_offset(addr.0, MSIP, MSIP_WIDTH, width) {
+        (self.msip as u64, offset)
+      } else if let Some(offset) =
+        Self::register_offset(addr.0, MTIMECMP, MTIMECMP_WIDTH, width)
+      {
+        (self.mtimecmp, offset)
+      } else if let Some(offset) = Self::register_offset(addr.0, MTIME, MTIME_WIDTH, width) {
+        (self.mtime_at(now), offset)
+      } else {
+        return Err(Exception::StoreAccessFault(addr));
+      };
 
     // Calculate the new value of the target register based on `size` and `offset`.
-    match std::mem::size_of::<T>() {
+    match width {
       1 => {
         // Clear the target byte.
         old = old & (!(0xff << (offset * 8)));
@@ -138,11 +210,15 @@ impl Clint {
     }
 
     // Store the new value to the target register.
-    match addr.0 {
-      MSIP..=MSIP_END => self.msip = old as u32,
-      MTIMECMP..=MTIMECMP_END => self.mtimecmp = old,
-      MTIME..=MTIME_END => self.mtime = old,
-      _ => return Err(Exception::StoreAccessFault(addr)),
+    if Self::register_offset(addr.0, MSIP, MSIP_WIDTH, width).is_some() {
+      self.msip = old as u32;
+    } else if Self::register_offset(addr.0, MTIMECMP, MTIMECMP_WIDTH, width).is_some() {
+      self.mtimecmp = old;
+    } else if Self::register_offset(addr.0, MTIME, MTIME_WIDTH, width).is_some() {
+      self.host_anchor = now;
+      self.guest_anchor = old;
+    } else {
+      return Err(Exception::StoreAccessFault(addr));
     }
     Ok(())
   }
@@ -150,27 +226,108 @@ impl Clint {
 
 #[cfg(test)]
 mod tests {
+  use std::sync::atomic::{AtomicU64, Ordering};
+
   use super::*;
-  use crate::cpu::csr::CSRMap::{MIP, MTIP_MASK, TIME};
+
+  #[derive(Default)]
+  struct ManualClock {
+    nanos: AtomicU64,
+  }
+
+  impl ManualClock {
+    fn set_nanos(&self, nanos: u64) {
+      self.nanos.store(nanos, Ordering::Relaxed);
+    }
+  }
+
+  impl ClockSource for ManualClock {
+    fn now(&self) -> Duration {
+      Duration::from_nanos(self.nanos.load(Ordering::Relaxed))
+    }
+  }
 
   #[test]
-  fn advance_updates_time_and_posts_at_the_deadline() {
-    let mut clint = Clint::new();
-    let mut csrs = CSRRegs::new();
-    clint.write::<u64>(VirtAddr(MTIMECMP), 5).unwrap();
+  fn host_elapsed_time_drives_mtime_at_ten_megahertz() {
+    let clock = Arc::new(ManualClock::default());
+    let mut clint = Clint::new_with_clock(clock.clone());
+    clint.write::<u64>(VirtAddr(MTIMECMP), 10_000_000).unwrap();
 
-    assert_eq!(clint.ticks_until_timer(), Some(5));
-    clint.advance(&mut csrs, 4);
-    assert_eq!(csrs.read_unchecked(TIME), 4);
-    assert_eq!(clint.ticks_until_timer(), Some(1));
-    assert_eq!(csrs.read_unchecked(MIP) & MTIP_MASK, 0);
+    clock.set_nanos(99);
+    assert_eq!(clint.mtime(), 0);
 
-    clint.tick(&mut csrs);
-    assert_eq!(csrs.read_unchecked(TIME), 5);
-    assert_eq!(clint.ticks_until_timer(), None);
-    assert_ne!(csrs.read_unchecked(MIP) & MTIP_MASK, 0);
+    clock.set_nanos(100);
+    assert_eq!(clint.mtime(), 1);
 
-    clint.tick(&mut csrs);
-    assert_eq!(clint.ticks_until_timer(), None);
+    clock.set_nanos(1_000_000_000);
+    assert_eq!(clint.mtime(), 10_000_000);
+    assert_eq!(clint.duration_until_timer(), None);
+    assert_ne!(clint.local_pending_bits() & MTIP_MASK, 0);
+  }
+
+  #[test]
+  fn mtime_write_reanchors_the_realtime_counter() {
+    let clock = Arc::new(ManualClock::default());
+    let mut clint = Clint::new_with_clock(clock.clone());
+
+    clock.set_nanos(1_000_000);
+    clint.write::<u64>(VirtAddr(MTIME), 42).unwrap();
+    assert_eq!(clint.mtime(), 42);
+
+    clock.set_nanos(1_001_000);
+    assert_eq!(clint.mtime(), 52);
+    assert_eq!(clint.read::<u64>(VirtAddr(MTIME)), Ok(52));
+  }
+
+  #[test]
+  fn local_pending_tracks_mtip_as_a_level_when_compare_is_reprogrammed() {
+    let clock = Arc::new(ManualClock::default());
+    let mut clint = Clint::new_with_clock(clock.clone());
+    clock.set_nanos(400);
+    let now = clint.mtime();
+    clint
+      .write::<u64>(VirtAddr(MTIMECMP), now + 1)
+      .unwrap();
+
+    assert_eq!(clint.mtime(), 4);
+    assert_eq!(clint.duration_until_timer(), Some(Duration::from_nanos(100)));
+    assert_eq!(clint.local_pending_bits() & MTIP_MASK, 0);
+
+    clock.set_nanos(500);
+    assert_ne!(clint.local_pending_bits() & MTIP_MASK, 0);
+
+    clint.write::<u64>(VirtAddr(MTIMECMP), 10).unwrap();
+    assert_eq!(clint.local_pending_bits() & MTIP_MASK, 0);
+  }
+
+  #[test]
+  fn partial_mtime_writes_merge_little_endian_and_reanchor() {
+    let clock = Arc::new(ManualClock::default());
+    let mut clint = Clint::new_with_clock(clock.clone());
+    clint.write::<u64>(VirtAddr(MTIME), 0x1122_3344_5566_7788).unwrap();
+
+    clint.write::<u16>(VirtAddr(MTIME + 2), 0xaabb).unwrap();
+    assert_eq!(clint.mtime(), 0x1122_3344_aabb_7788);
+
+    clock.set_nanos(100);
+    assert_eq!(clint.mtime(), 0x1122_3344_aabb_7789);
+  }
+
+  #[test]
+  fn register_accesses_must_fit_inside_one_clint_register() {
+    let mut clint = Clint::new_with_clock(Arc::new(ManualClock::default()));
+
+    assert!(matches!(
+      clint.read::<u8>(VirtAddr(MTIME + 8)),
+      Err(Exception::LoadAccessFault(_)),
+    ));
+    assert!(matches!(
+      clint.read::<u64>(VirtAddr(MTIME + 1)),
+      Err(Exception::LoadAccessFault(_)),
+    ));
+    assert!(matches!(
+      clint.write::<u32>(VirtAddr(MSIP + 1), 0),
+      Err(Exception::StoreAccessFault(_)),
+    ));
   }
 }

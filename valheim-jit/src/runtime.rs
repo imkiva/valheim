@@ -1219,7 +1219,7 @@ mod tests {
   }
 
   #[test]
-  fn timer_budget_uses_decoded_prefix_instead_of_oversized_native_block() {
+  fn short_budget_uses_decoded_prefix_instead_of_oversized_native_block() {
     let mut cpu = RV64Cpu::new(None);
     let pc = VirtAddr(RV64_MEMORY_BASE);
     cpu.write_pc(pc);

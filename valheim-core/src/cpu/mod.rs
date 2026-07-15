@@ -1,11 +1,13 @@
 use std::cell::RefCell;
 use std::fmt::Debug;
+use std::sync::Arc;
 
 use valheim_asm::isa::typed::Reg;
 
 use crate::cpu::bus::{RV64_MEMORY_BASE, RV64_MEMORY_SIZE};
 use crate::cpu::mmu::VMMode;
 use crate::debug::trace::{Journal, RegTrace, Trace};
+use crate::device::clint::{ClockSource, HostClock};
 use crate::memory::VirtAddr;
 
 pub mod regs;
@@ -52,13 +54,17 @@ pub enum PrivilegeMode {
 
 impl RV64Cpu {
   pub fn new(trace: Option<String>) -> RV64Cpu {
+    Self::new_with_clock(trace, Arc::new(HostClock::new()))
+  }
+
+  pub fn new_with_clock(trace: Option<String>, clock: Arc<dyn ClockSource>) -> RV64Cpu {
     let regs = regs::Regs::new();
     let csrs = csr::CSRRegs::new();
     RV64Cpu {
       regs,
       csrs,
       mode: PrivilegeMode::Machine,
-      bus: bus::Bus::new().expect("Failed to create Bus"),
+      bus: bus::Bus::new_with_clock(clock).expect("Failed to create Bus"),
       reserved: Vec::new(),
       wfi: false,
       vmppn: 0,

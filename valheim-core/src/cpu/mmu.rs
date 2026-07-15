@@ -1269,7 +1269,7 @@ mod tests {
       .direct_host_addr(1)
       .is_none());
     assert_eq!(cpu.write_mem(mtime, 42_u64), Ok(()));
-    assert_eq!(cpu.read_mem::<u64>(mtime), Ok(42));
+    assert!(matches!(cpu.read_mem::<u64>(mtime), Ok(value) if value >= 42));
 
     cpu.vmmode = VMMode::SV39;
     cpu.vmppn = 0;

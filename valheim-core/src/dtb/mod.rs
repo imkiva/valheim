@@ -1,6 +1,8 @@
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 
+use crate::device::clint::TIMEBASE_FREQUENCY;
+
 const DTS_TEMPLATE: &str = include_str!("../../../dts/valheim.dts.template");
 
 pub fn generate_device_tree_rom(cmdline: String, memory_base: u64, memory_size: u64) -> Result<Vec<u8>, std::io::Error> {
@@ -11,7 +13,11 @@ pub fn generate_device_tree_rom(cmdline: String, memory_base: u64, memory_size: 
   );
   let instantiated: String = DTS_TEMPLATE.to_string()
     .replace("${VALHEIM_BOOTARGS}", cmdline.as_ref())
-    .replace("${VALHEIM_MEMORY_REG}", &memory_reg);
+    .replace("${VALHEIM_MEMORY_REG}", &memory_reg)
+    .replace(
+      "${VALHEIM_TIMEBASE_FREQUENCY}",
+      &format!("{:#x}", TIMEBASE_FREQUENCY),
+    );
 
   let mut dtb_bytes = call_compiler(instantiated)?;
   let mut rom = vec![0; 32];

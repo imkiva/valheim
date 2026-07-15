@@ -5,7 +5,7 @@ use rustc_apfloat::ieee::{Double, Single};
 
 use valheim_asm::isa::rv32::RV32Instr;
 use valheim_asm::isa::rv32::RV32Instr::*;
-use valheim_asm::isa::rv64::RV64Instr;
+use valheim_asm::isa::rv64::{CSRAddr, RV64Instr};
 use valheim_asm::isa::rv64::RV64Instr::*;
 use valheim_asm::isa::typed::{Imm32, Instr, Rd, Reg, Rs1, Rs2, Rs3};
 use valheim_asm::isa::typed::Instr::{RV32, RV64};
@@ -13,7 +13,10 @@ use valheim_asm::isa::untyped::Bytecode;
 use valheim_asm::isa::untyped16::Bytecode16;
 
 use crate::cpu::{PrivilegeMode, RV64Cpu};
-use crate::cpu::csr::CSRMap::{FCSR_DZ_MASK, FCSR_NV_MASK, FCSR_NX_MASK, FCSR_OF_MASK, FCSR_UF_MASK, FFLAGS, MEPC, SATP, SEPC};
+use crate::cpu::csr::CSRMap::{
+  FCSR_DZ_MASK, FCSR_NV_MASK, FCSR_NX_MASK, FCSR_OF_MASK, FCSR_UF_MASK, FFLAGS, MEPC, MIP,
+  MSIP_MASK, MTIP_MASK, SATP, SEPC, SIP, TIME,
+};
 use crate::cpu::data::Either;
 use crate::cpu::irq::Exception;
 use crate::debug::trace::{InstrTrace, Trace};
@@ -182,6 +185,32 @@ macro_rules! update_fflags {
 }
 
 impl RV64Cpu {
+  pub(crate) fn refresh_local_interrupts(&mut self) {
+    let mask = MSIP_MASK | MTIP_MASK;
+    let local = self.bus.clint.local_pending_bits();
+    let mip = (self.csrs.read_unchecked(MIP) & !mask) | local;
+    let _ = self.csrs.write_unchecked(MIP, mip);
+  }
+
+  fn read_guest_csr(&mut self, addr: CSRAddr) -> u64 {
+    if addr.value() == TIME {
+      self.bus.clint.mtime()
+    } else {
+      if matches!(addr.value(), MIP | SIP) {
+        self.refresh_local_interrupts();
+      }
+      self.csrs.read(addr)
+    }
+  }
+
+  fn write_guest_csr(&mut self, addr: CSRAddr, val: u64) -> Result<(), Exception> {
+    if addr.value() == TIME {
+      Err(Exception::IllegalInstruction)
+    } else {
+      self.csrs.write(addr, val)
+    }
+  }
+
   pub fn fetch(&mut self) -> Result<(VirtAddr, Bytecode, Bytecode16), Exception> {
     let pc = self.read_pc();
     let bytecode: Bytecode = Bytecode { repr: self.fetch_mem(pc)? };
@@ -528,39 +557,40 @@ impl RV64Cpu {
 
       // CSR
       RV64(CSRRW(rd, rs1, csr)) => {
-        let old = self.csrs.read(csr);
-        self.csrs.write(csr, rs1.read(self))?;
+        let old = self.read_guest_csr(csr);
+        self.write_guest_csr(csr, rs1.read(self))?;
         rd.write(self, old);
       }
       RV64(CSRRS(rd, rs1, csr)) => {
-        let old = self.csrs.read(csr);
+        let old = self.read_guest_csr(csr);
         if !is_zero_reg(rs1.0) {
-          self.csrs.write(csr, old | rs1.read(self))?;
+          self.write_guest_csr(csr, old | rs1.read(self))?;
         }
         rd.write(self, old);
       }
       RV64(CSRRC(rd, rs1, csr)) => {
-        let old = self.csrs.read(csr);
+        let old = self.read_guest_csr(csr);
         if !is_zero_reg(rs1.0) {
-          self.csrs.write(csr, old & (!rs1.read(self)))?;
+          self.write_guest_csr(csr, old & (!rs1.read(self)))?;
         }
         rd.write(self, old);
       }
       RV64(CSRRWI(rd, imm, csr)) => {
-        rd.write(self, self.csrs.read(csr));
-        self.csrs.write(csr, imm.value() as u64)?;
+        let old = self.read_guest_csr(csr);
+        self.write_guest_csr(csr, imm.value() as u64)?;
+        rd.write(self, old);
       }
       RV64(CSRRSI(rd, imm, csr)) => {
-        let old = self.csrs.read(csr);
+        let old = self.read_guest_csr(csr);
         if imm.value() != 0 {
-          self.csrs.write(csr, old | imm.value() as u64)?;
+          self.write_guest_csr(csr, old | imm.value() as u64)?;
         }
         rd.write(self, old);
       }
       RV64(CSRRCI(rd, imm, csr)) => {
-        let old = self.csrs.read(csr);
+        let old = self.read_guest_csr(csr);
         if imm.value() != 0 {
-          self.csrs.write(csr, old & (!imm.value() as u64))?;
+          self.write_guest_csr(csr, old & (!imm.value() as u64))?;
         }
         rd.write(self, old);
       }
@@ -900,12 +930,37 @@ impl WriteReg for Rd {
 
 #[cfg(test)]
 mod tests {
+  use std::sync::atomic::{AtomicU64, Ordering};
+  use std::sync::Arc;
+  use std::time::Duration;
+
   use super::*;
   use valheim_asm::isa::data::Fin;
   use valheim_asm::isa::rv64::{CSRAddr, UImm};
 
   use crate::cpu::bus::RV64_MEMORY_BASE;
-  use crate::cpu::csr::CSRMap::MCYCLE;
+  use crate::cpu::csr::CSRMap::{MCYCLE, TIME};
+  use crate::device::clint::{ClockSource, TIMEBASE_FREQUENCY};
+
+  #[derive(Default)]
+  struct ManualClock {
+    nanos: AtomicU64,
+  }
+
+  impl ManualClock {
+    fn set_ticks(&self, ticks: u64) {
+      let nanos_per_tick = 1_000_000_000 / TIMEBASE_FREQUENCY;
+      self
+        .nanos
+        .store(ticks.saturating_mul(nanos_per_tick), Ordering::Relaxed);
+    }
+  }
+
+  impl ClockSource for ManualClock {
+    fn now(&self) -> Duration {
+      Duration::from_nanos(self.nanos.load(Ordering::Relaxed))
+    }
+  }
 
   fn execute_rv64(cpu: &mut RV64Cpu, instr: RV64Instr) {
     let pc = cpu.read_pc();
@@ -1068,6 +1123,60 @@ mod tests {
     assert!(matches!(result, Err(Exception::IllegalInstruction)));
     assert_eq!(cpu.read_reg(failed_result), Some(0xdead_beef));
     assert_eq!(cpu.read_pc(), pc);
+  }
+
+  #[test]
+  fn time_is_a_live_read_only_view_of_clint() {
+    let clock = Arc::new(ManualClock::default());
+    let mut cpu = RV64Cpu::new_with_clock(None, clock.clone());
+    cpu.write_pc(VirtAddr(RV64_MEMORY_BASE));
+    let time = CSRAddr(Imm32::from(TIME as u32));
+    let first_result = Reg::X(Fin::new(5));
+    let second_result = Reg::X(Fin::new(6));
+
+    clock.set_ticks(42);
+    execute_rv64(
+      &mut cpu,
+      RV64Instr::CSRRS(Rd(first_result), Rs1(Reg::ZERO), time),
+    );
+    clock.set_ticks(99);
+    execute_rv64(
+      &mut cpu,
+      RV64Instr::CSRRCI(Rd(second_result), UImm(Imm32::from(0)), time),
+    );
+    assert_eq!(cpu.read_reg(first_result), Some(42));
+    assert_eq!(cpu.read_reg(second_result), Some(99));
+
+    let failed_result = Reg::X(Fin::new(7));
+    cpu.write_reg(failed_result, 0xdead_beef);
+    let pc = cpu.read_pc();
+    let result = cpu.execute(
+      pc,
+      Instr::RV64(RV64Instr::CSRRW(
+        Rd(failed_result),
+        Rs1(Reg::ZERO),
+        time,
+      )),
+      false,
+    );
+    assert_eq!(result, Err(Exception::IllegalInstruction));
+    assert_eq!(cpu.read_reg(failed_result), Some(0xdead_beef));
+    assert_eq!(cpu.read_pc(), pc);
+    assert_eq!(cpu.bus.clint.mtime(), 99);
+
+    let result = cpu.execute(
+      pc,
+      Instr::RV64(RV64Instr::CSRRWI(
+        Rd(failed_result),
+        UImm(Imm32::from(1)),
+        time,
+      )),
+      false,
+    );
+    assert_eq!(result, Err(Exception::IllegalInstruction));
+    assert_eq!(cpu.read_reg(failed_result), Some(0xdead_beef));
+    assert_eq!(cpu.read_pc(), pc);
+    assert_eq!(cpu.bus.clint.mtime(), 99);
   }
 
   #[test]

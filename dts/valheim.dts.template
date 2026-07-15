@@ -29,7 +29,7 @@
   cpus {
     #address-cells = <0x01>;
     #size-cells = <0x00>;
-    timebase-frequency = <0x989680>;
+    timebase-frequency = <${VALHEIM_TIMEBASE_FREQUENCY}>;
 
     cpu-map {
       cluster0 {

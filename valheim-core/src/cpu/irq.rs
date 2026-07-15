@@ -52,6 +52,8 @@ impl RV64Cpu {
   }
 
   pub fn pending_interrupt(&mut self) -> Option<IRQ> {
+    self.refresh_local_interrupts();
+
     // 3.1.6.1 Privilege and Global Interrupt-Enable Stack in mstatus register
     // Global interrupt-enable bits, MIE and SIE, are provided for M-mode and S-mode respectively.
     // When a hart is executing in privilege mode x, interrupts are globally enabled

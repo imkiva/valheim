@@ -3,7 +3,7 @@ use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
 use crate::cpu::irq::Exception;
-use crate::device::clint::Clint;
+use crate::device::clint::{Clint, ClockSource, HostClock};
 use crate::device::Device;
 use crate::device::plic::Plic;
 use crate::device::virtio::Virtio;
@@ -70,12 +70,16 @@ impl Debug for Bus {
 
 impl Bus {
   pub fn new() -> Result<Bus, std::io::Error> {
+    Self::new_with_clock(Arc::new(HostClock::new()))
+  }
+
+  pub fn new_with_clock(clock: Arc<dyn ClockSource>) -> Result<Bus, std::io::Error> {
     Ok(Bus {
       mem: Memory::new(RV64_MEMORY_BASE, RV64_MEMORY_SIZE as usize)?,
       devices: Vec::with_capacity(8),
       io_map: BTreeMap::new(),
       device_tree: Memory::new(VIRT_MROM_BASE, VIRT_MROM_SIZE as usize)?,
-      clint: Clint::new(),
+      clint: Clint::new_with_clock(clock),
       plic: Plic::new(),
       virtio: Virtio::new(0),
       wake_hub: Arc::new(WakeHub::new()),
@@ -123,7 +127,11 @@ impl Bus {
       return Ok(());
     }
     if Bus::range_contains(CLINT_BASE, CLINT_END, addr, width) {
-      return Ok(());
+      return if self.clint.accepts(addr, width) {
+        Ok(())
+      } else {
+        Err(Exception::StoreAccessFault(addr))
+      };
     }
     if Bus::range_contains(PLIC_BASE, PLIC_END, addr, width) {
       return if width == 4 {
@@ -298,7 +306,7 @@ impl Bus {
 
 #[cfg(test)]
 mod tests {
-  use super::{Bus, RV64_MEMORY_BASE, RV64_MEMORY_END};
+  use super::{Bus, CLINT_BASE, RV64_MEMORY_BASE, RV64_MEMORY_END};
   use crate::cpu::irq::Exception;
   use crate::memory::VirtAddr;
 
@@ -350,6 +358,12 @@ mod tests {
     assert_eq!(
       bus.probe_write(VirtAddr(RV64_MEMORY_END), 1),
       Err(Exception::StoreAccessFault(VirtAddr(RV64_MEMORY_END))),
+    );
+    let mtime = VirtAddr(CLINT_BASE + 0xbff8);
+    assert_eq!(bus.probe_write(mtime, 8), Ok(()));
+    assert_eq!(
+      bus.probe_write(mtime + VirtAddr(1), 8),
+      Err(Exception::StoreAccessFault(mtime + VirtAddr(1))),
     );
   }
 }

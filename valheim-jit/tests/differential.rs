@@ -1,10 +1,13 @@
 use std::cell::Cell;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 use valheim_asm::asm::encode32::Encode32;
 use valheim_asm::isa::data::Fin;
 use valheim_asm::isa::rv32::RV32Instr;
-use valheim_asm::isa::rv64::RV64Instr;
+use valheim_asm::isa::rv64::{CSRAddr, RV64Instr};
 use valheim_asm::isa::typed::{Imm32, Rd, Reg, Rs1, Rs2};
 use valheim_core::cpu::bus::{CLINT_BASE, RV64_MEMORY_BASE, RV64_MEMORY_END};
 use valheim_core::cpu::csr::CSRMap::{
@@ -12,6 +15,7 @@ use valheim_core::cpu::csr::CSRMap::{
 };
 use valheim_core::cpu::irq::Exception;
 use valheim_core::cpu::RV64Cpu;
+use valheim_core::device::clint::{ClockSource, TIMEBASE_FREQUENCY};
 use valheim_core::interp::naive::NaiveInterpreter;
 use valheim_core::interp::{ExecOutcome, RV64Executor};
 use valheim_core::machine::Machine;
@@ -23,6 +27,26 @@ const DATA_ADDR: u64 = RV64_MEMORY_BASE + 0x40_000;
 const JAL_X0_TO_SELF: u32 = 0x0000_006f;
 // Use the architectural encoding directly so this test cannot accidentally execute SRET.
 const WFI: u32 = 0x1050_0073;
+
+#[derive(Default)]
+struct ManualClock {
+  nanos: AtomicU64,
+}
+
+impl ManualClock {
+  fn set_ticks(&self, ticks: u64) {
+    let nanos_per_tick = 1_000_000_000 / TIMEBASE_FREQUENCY;
+    self
+      .nanos
+      .store(ticks.saturating_mul(nanos_per_tick), Ordering::Relaxed);
+  }
+}
+
+impl ClockSource for ManualClock {
+  fn now(&self) -> Duration {
+    Duration::from_nanos(self.nanos.load(Ordering::Relaxed))
+  }
+}
 
 #[derive(Debug)]
 struct Snapshot {
@@ -56,6 +80,17 @@ fn x(index: u32) -> Reg {
 
 fn cpu_with_program(program: &[u32]) -> RV64Cpu {
   let mut cpu = RV64Cpu::new(None);
+  install_program(&mut cpu, program);
+  cpu
+}
+
+fn cpu_with_program_and_clock(program: &[u32], clock: Arc<ManualClock>) -> RV64Cpu {
+  let mut cpu = RV64Cpu::new_with_clock(None, clock);
+  install_program(&mut cpu, program);
+  cpu
+}
+
+fn install_program(cpu: &mut RV64Cpu, program: &[u32]) {
   for (index, instruction) in program.iter().copied().enumerate() {
     cpu
       .bus
@@ -63,7 +98,6 @@ fn cpu_with_program(program: &[u32]) -> RV64Cpu {
       .unwrap();
   }
   cpu.write_pc(VirtAddr(PROGRAM_PC));
-  cpu
 }
 
 fn run_naive(cpu: &mut RV64Cpu, budget: u32) -> ExecOutcome {
@@ -353,14 +387,14 @@ fn div_and_rem_boundaries_match_naive() {
 }
 
 #[test]
-fn native_tb_stops_at_the_machine_timer_deadline() {
+fn native_tb_uses_a_fixed_budget_independent_of_realtime_timer_ticks() {
   let program = [
     RV32Instr::ADDI(Rd(x(1)), Rs1(x(1)), Imm32::<11, 0>::from(1)).encode32(),
     RV32Instr::ADDI(Rd(x(1)), Rs1(x(1)), Imm32::<11, 0>::from(1)).encode32(),
     RV32Instr::ADDI(Rd(x(1)), Rs1(x(1)), Imm32::<11, 0>::from(1)).encode32(),
-    JAL_X0_TO_SELF,
+    0x0000_0073, // ecall: terminate the native prefix
   ];
-  let budget = program.len() as u32;
+  let budget = 3;
   let mut jit = JitExecutor::new().unwrap().with_hot_threshold(1);
   let mut warm_cpu = cpu_with_program(&program);
   assert_eq!(
@@ -375,8 +409,9 @@ fn native_tb_stops_at_the_machine_timer_deadline() {
     inner: jit,
     native_executions: native_executions.clone(),
   };
+  let clock = Arc::new(ManualClock::default());
   let mut machine = Machine {
-    cpu: cpu_with_program(&program),
+    cpu: cpu_with_program_and_clock(&program, clock.clone()),
     executor: Box::new(executor),
   };
   machine
@@ -389,11 +424,12 @@ fn native_tb_stops_at_the_machine_timer_deadline() {
   assert!(machine.run_next());
   assert_eq!(native_executions.get(), 1);
   assert_eq!(machine.cpu.read_reg(x(1)), Some(3));
-  assert_eq!(machine.cpu.csrs.read_unchecked(TIME), 4);
+  assert_eq!(machine.cpu.bus.clint.mtime(), 0);
   assert_eq!(machine.cpu.csrs.read_unchecked(MIP) & MTIP_MASK, 0);
 
-  machine.cpu.bus.clint.tick(&mut machine.cpu.csrs);
-  assert_eq!(machine.cpu.csrs.read_unchecked(TIME), 5);
+  clock.set_ticks(5);
+  assert_eq!(machine.cpu.pending_interrupt(), None);
+  assert_eq!(machine.cpu.bus.clint.mtime(), 5);
   assert_ne!(machine.cpu.csrs.read_unchecked(MIP) & MTIP_MASK, 0);
 }
 
@@ -401,7 +437,8 @@ fn native_tb_stops_at_the_machine_timer_deadline() {
 fn wfi_is_woken_by_a_machine_timer_interrupt() {
   let handler = PROGRAM_PC + 0x100;
   let program = [WFI, JAL_X0_TO_SELF];
-  let mut cpu = cpu_with_program(&program);
+  let clock = Arc::new(ManualClock::default());
+  let mut cpu = cpu_with_program_and_clock(&program, clock.clone());
   cpu
     .bus
     .write::<u32>(VirtAddr(handler), RV32Instr::EBREAK.encode32())
@@ -425,16 +462,19 @@ fn wfi_is_woken_by_a_machine_timer_interrupt() {
     "WFI did not wait: pc={:?}, instr={:#010x}, time={}, mip={:#x}",
     machine.cpu.read_pc(),
     machine.cpu.instr,
-    machine.cpu.csrs.read_unchecked(TIME),
+    machine.cpu.bus.clint.mtime(),
     machine.cpu.csrs.read_unchecked(MIP),
   );
   assert_eq!(machine.cpu.read_pc(), VirtAddr(PROGRAM_PC + 4));
-  assert_eq!(machine.cpu.csrs.read_unchecked(TIME), 1);
+  assert_eq!(machine.cpu.bus.clint.mtime(), 0);
 
+  assert!(machine.run_next());
+  assert!(machine.cpu.wfi);
+  clock.set_ticks(3);
   assert!(!machine.run_next());
   assert!(!machine.cpu.wfi);
   assert_eq!(machine.cpu.read_pc(), VirtAddr(handler));
-  assert_eq!(machine.cpu.csrs.read_unchecked(TIME), 3);
+  assert_eq!(machine.cpu.bus.clint.mtime(), 3);
   assert_eq!(machine.cpu.csrs.read_unchecked(MEPC), PROGRAM_PC + 4);
   assert_eq!(machine.cpu.csrs.read_unchecked(MCAUSE), (1_u64 << 63) | 7);
 }
@@ -443,7 +483,8 @@ fn wfi_is_woken_by_a_machine_timer_interrupt() {
 fn wfi_wakes_without_trapping_when_global_interrupts_are_disabled() {
   let handler = PROGRAM_PC + 0x100;
   let program = [WFI, JAL_X0_TO_SELF];
-  let mut cpu = cpu_with_program(&program);
+  let clock = Arc::new(ManualClock::default());
+  let mut cpu = cpu_with_program_and_clock(&program, clock.clone());
   cpu
     .bus
     .write::<u32>(VirtAddr(handler), RV32Instr::EBREAK.encode32())
@@ -463,14 +504,41 @@ fn wfi_wakes_without_trapping_when_global_interrupts_are_disabled() {
   assert!(machine.run_next());
   assert!(machine.cpu.wfi);
   assert_eq!(machine.cpu.read_pc(), VirtAddr(PROGRAM_PC + 4));
-  assert_eq!(machine.cpu.csrs.read_unchecked(TIME), 1);
+  assert_eq!(machine.cpu.bus.clint.mtime(), 0);
 
+  assert!(machine.run_next());
+  assert!(machine.cpu.wfi);
+  clock.set_ticks(3);
   assert!(machine.run_next());
   assert!(!machine.cpu.wfi);
   assert_eq!(machine.cpu.read_pc(), VirtAddr(PROGRAM_PC + 4));
   assert_eq!(machine.cpu.csrs.read_unchecked(MEPC), 0);
   assert_eq!(machine.cpu.csrs.read_unchecked(MCAUSE), 0);
   assert_ne!(machine.cpu.csrs.read_unchecked(MIP) & MTIP_MASK, 0);
+}
+
+#[test]
+fn jit_system_fallback_reads_live_realtime_on_every_rdtime() {
+  let rdtime = RV64Instr::CSRRS(
+    Rd(x(5)),
+    Rs1(Reg::ZERO),
+    CSRAddr(Imm32::from(TIME as u32)),
+  )
+  .encode32();
+  let clock = Arc::new(ManualClock::default());
+  let mut cpu = cpu_with_program_and_clock(&[rdtime], clock.clone());
+  let mut jit = JitExecutor::new().unwrap();
+
+  clock.set_ticks(42);
+  assert_eq!(jit.execute(&mut cpu, 1), ExecOutcome::new(1, Ok(())));
+  assert_eq!(cpu.read_reg(x(5)), Some(42));
+
+  cpu.write_pc(VirtAddr(PROGRAM_PC));
+  clock.set_ticks(99);
+  assert_eq!(jit.execute(&mut cpu, 1), ExecOutcome::new(1, Ok(())));
+  assert_eq!(cpu.read_reg(x(5)), Some(99));
+  assert_eq!(jit.stats().fallback_system, 2);
+  assert_eq!(jit.stats().negative_cache_hits, 1);
 }
 
 struct XorShift64(u64);
