@@ -27,7 +27,7 @@ dispatcher 和编译期开销优化。superblock、direct machine-code chaining 
   machine-code tail chaining 和逐指令 JIT trace 仍是非目标。Rust 侧 successor cache 不会
   patch native jump target。
 
-最终验证（固定 `nightly-2024-09-05`）：
+第一阶段当时的最终验证（固定 `nightly-2024-09-05`）：
 
 | 项目 | naive | JIT |
 | --- | --- | --- |
@@ -36,6 +36,11 @@ dispatcher 和编译期开销优化。superblock、direct machine-code chaining 
 | xv6 | 进入 `$` 并执行 `echo` | 进入 `$` 并执行 `echo` |
 | RustSBI | success marker | success marker |
 | Debian 13 | 进入 `debian13#`，读取版本 `13.6` | 进入 `debian13#`，读取版本 `13.6` |
+
+上表和下方计时保留第一阶段的内建-initramfs 历史快照。后续 level-triggered PLIC、
+legacy VirtIO block 与 ext4 direct-root 增加回归后，当前 workspace/trace 已分别为
+158/158、96/96，Debian 两种 engine 都从 read-write ext4 启动；这些新结果及剩余方向见
+`JIT-PERF.md`，不能与下方旧 workload 的绝对启动时间直接比较。
 
 第一阶段性能环境为 Linux 6.6.87.2 WSL2、AMD Ryzen 9 9950X3D、32 logical CPUs，基于
 `e24b4d9` 的验收树。使用同一 release binary 和已构建的固定 Debian artifacts；外部计时

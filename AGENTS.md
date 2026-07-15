@@ -9,9 +9,12 @@ Valheim 是一个用 Rust 编写、以学习和参考实现为目的的 RISC-V 6
 当前实现的重要边界：
 
 - 单 hart；设备树只声明 hart 0。
-- 256 MiB guest RAM；这是为内嵌完整 Debian 13 slim rootfs 的 Linux demo 扩容后的值。
+- 256 MiB guest RAM；Debian 13 demo 现从外部 ext4 block rootfs 启动，不再把完整
+  rootfs 内嵌进 kernel，但保留该内存规模供 Linux、page cache 和真实用户空间使用。
 - guest kernel/BIOS 必须是 raw binary，CLI 不解析 ELF。
-- VirtIO block 是 legacy VirtIO-MMIO version 1，队列长度为 8；现代要求 version 2 的 guest 驱动不兼容。
+- VirtIO block 是 legacy VirtIO-MMIO version 1，队列长度为 8，支持 direct split-queue
+  descriptor chain、读写和 FLUSH；Linux 5.17 的 legacy 驱动已通过 writable ext4 root
+  验证，要求 version 2 或 indirect descriptor 的 guest 驱动仍不兼容。
 - CLI 默认执行器是 `NaiveInterpreter`；`--engine jit` 启用 decoded-TB + Cranelift 分层
   JIT，不支持的 system/F/D 指令精确回退到解释器。native 路径可在一个 Machine budget
   内批量执行多个 TB，并用 generation-guarded successor cache 连接常见边。
@@ -34,7 +37,7 @@ Valheim 是一个用 Rust 编写、以学习和参考实现为目的的 RISC-V 6
 | `valheim-core/` | 模拟器核心：CPU/寄存器、CSR、异常和中断、MMU、指令执行、解释器、内存总线、设备、DTB、运行循环和 trace。 |
 | `valheim-core/src/cpu/` | CPU 状态、执行语义、CSR、异常/中断、系统总线，以及解释器/JIT 共用的唯一 `translate_to_host()` 页表与权限逻辑。 |
 | `valheim-core/src/interp/` | 共享 `RV64Executor`/`ExecOutcome` 执行器契约与朴素解释器实现。 |
-| `valheim-core/src/device/` | CLINT、PLIC、NS16550A UART 和 legacy VirtIO block。 |
+| `valheim-core/src/device/` | CLINT、level-aware PLIC、NS16550A UART 和支持 split queue/FLUSH 的 legacy VirtIO block。 |
 | `valheim-core/src/machine/` | 将 CPU、可注入执行器、DTB、UART、kernel、BIOS 和磁盘组合成可运行的虚拟机。 |
 | `valheim-jit/` | decoded TB/cache/runtime、Cranelift RV64I/M lowering、A 扩展 helper、software TLB 和 DRAM fast path。 |
 | `valheim-cli/` | `valheim-cli` 命令行入口，负责参数解析和加载镜像。 |
@@ -55,10 +58,10 @@ Valheim 是一个用 Rust 编写、以学习和参考实现为目的的 RISC-V 6
 | DTB | 带 32 字节前缀的副本仍位于 MROM `0x1000`；裸 FDT 另复制到 DRAM `0x87f0_0000`，guest 的 `a1/x11` 指向后者 |
 | RAM | `256 MiB @ 0x8000_0000` |
 | CLINT | `0x0200_0000`；10 MHz host-monotonic realtime `mtime` |
-| PLIC | `0x0c00_0000` |
+| PLIC | `0x0c00_0000`；M/S 两个 context，claim/complete 和 level re-pend |
 | UART | `0x1000_0000`，IRQ 10 |
 | VirtIO block | `0x1000_1000`，IRQ 1，legacy version 1 |
-| 默认 kernel cmdline | `root=/dev/vda ro console=ttyS0` |
+| CLI 默认 kernel cmdline | `root=/dev/vda ro console=ttyS0`；Linux demo 显式覆盖为 ext4 `rw` |
 
 `Machine::new` 每次都会根据 `dts/valheim.dts.template` 调用外部 `dtc` 生成 DTB。因此 `dtc` 不只是构建依赖，也是每次运行 CLI 和 ISA 测试时的依赖。DTB 必须复制到普通 DRAM：Linux 建立最终页表后不会继续映射 Valheim 的低地址 MROM，若只传旧地址 `0x1020`，内核会在切换页表后访问异常。
 
@@ -216,8 +219,8 @@ Rust workspace 单元测试：
 cargo +nightly-2024-09-05 test --workspace --locked
 ```
 
-该命令已验证为 137 个测试通过、0 个失败：`valheim-asm` 11 个，
-`valheim-core` 74 个，`valheim-jit` 34 个 unit + 10 个 native/naive differential +
+该命令已验证为 158 个测试通过、0 个失败：`valheim-asm` 11 个，
+`valheim-core` 95 个，`valheim-jit` 34 个 unit + 10 个 native/naive differential +
 4 个 memory fast-path integration tests，`xtask` 4 个。额外的 trace 语义回归为：
 
 ```bash
@@ -225,7 +228,7 @@ cargo +nightly-2024-09-05 test \
   --locked --package valheim-core --features trace
 ```
 
-该命令已验证 75 个测试通过。
+该命令已验证 96 个测试通过。
 
 完整 RISC-V ISA 测试需要交叉工具链和 `riscv-tests` 子模块：
 
@@ -284,7 +287,7 @@ target/demo/                         # Git 忽略；由 run.sh 创建
 ├── cargo/                         # Valheim Cargo target 输出
 ├── xv6/                           # 源码、构建产物和可写磁盘
 ├── rustsbi/                       # 源码、RustSBI Cargo target、artifact 和日志
-└── linux/                         # 下载、源码、initramfs 和 kernel
+└── linux/                         # 下载、源码、ext4 base/runtime 和 kernel
 ```
 
 今后新增 demo 时，使用 `demo/<demo-name>/run.sh` 作为可从任意工作目录调用的
@@ -311,7 +314,9 @@ RESET_DISK=1 ./demo/xv6/run.sh --engine jit
 ```
 
 2026-07-15 已实际验证三个 demo 的 naive 和 JIT 两种 engine：xv6 进入 `$` 并执行
-`echo`，RustSBI 输出 success marker，Debian 进入 `debian13#` 并读取版本 `13.6`。
+`echo`，RustSBI 输出 success marker，Debian 从 `/dev/vda` 的 read-write ext4 进入
+`debian13#`、读取版本 `13.6` 并写入文件。Debian JIT 还验证了 `sync` 后跨进程持久化、
+日志恢复和 `RESET_DISK=1` 重置。
 
 ## 已验证的 xv6 Demo
 
@@ -411,8 +416,9 @@ id
 realtime 切换前的性能树：naive 中位数 60.926 s，JIT 中位数 4.806 s，
 加速 12.677×。`10cabc6`/`258fdf6` 后 realtime JIT 三次中位数为
 8.379352 s；realtime naive 单次验收为 133.996711 s（非正式三次中位数）。
-旧语义会快进 guest 等待，新旧绝对时间不可直接对比；逐项
-交错 A/B、profile 和剩余方向见 `JIT-PERF.md`。
+这些历史数据都来自内建 initramfs，不能作为当前 ext4 block-root 的性能基线；旧时钟还会
+快进 guest 等待，新旧绝对时间也不可直接对比。逐项交错 A/B、profile 和剩余方向见
+`JIT-PERF.md`。
 
 固定版本和来源：
 
@@ -426,18 +432,31 @@ realtime 切换前的性能树：naive 中位数 60.926 s，JIT 中位数 4.806 
 
 Linux `v5.17` 是根据项目 2022-03 的 demo 时间选择的同年代内核，不应误写成 README 历史 openEuler 录屏的原始内核；历史录屏使用的是 Linux `5.5.19` 和 OpenSBI `0.6`。
 
-这不是手工伪造的 Debian rootfs。脚本原样下载并逐级校验官方 OCI index、riscv64 manifest 和 rootfs layer，在同一个 `fakeroot` 会话中解包和生成 cpio，从而保留层内 UID/GID、权限、符号链接和硬链接。由于 `slim` 容器层本来没有 init 系统且 `/dev` 为空，单独拼接的 initramfs overlay 只增加启动必需的 `/init` 和 `console/null/tty` 设备节点；`/init` 挂载 `devtmpfs`、`proc`、`sysfs`、`tmpfs` 和 `devpts` 后执行 rootfs 自带的 `/bin/bash`。Debian 的 Bash、glibc、coreutils、dpkg 数据库和 `/etc/os-release` 全部来自官方层。
+这不是手工伪造的 Debian rootfs。脚本原样下载并逐级校验官方 OCI index、riscv64 manifest
+和 rootfs layer，在同一个 `fakeroot` 会话中解包、加入最小 overlay 并调用
+`mke2fs -d`，从而保留层内 UID/GID、权限、符号链接、硬链接和设备节点。由于 `slim`
+容器层本来没有 init 系统且 `/dev` 为空，overlay 只增加启动必需的 `/init` 和
+`console/null/tty`；`/init` 确认 `/` 是 read-write ext4，挂载 `devtmpfs`、`proc`、
+`sysfs`、`tmpfs` 和 `devpts` 后执行 rootfs 自带的 `/bin/bash`。Debian 的 Bash、glibc、
+coreutils、dpkg 数据库和 `/etc/os-release` 全部来自官方层。
 
-根文件系统内建在 kernel Image 中，不经过当前有兼容限制的 VirtIO block。为了容纳完整官方层，Valheim RAM 已扩大为 256 MiB；为了让 Linux 的最终页表仍能访问设备树，FDT 位于 guest DRAM `0x87f0_0000`；UART 也补齐了 Linux 8250 serial 驱动依赖的寄存器和中断语义。
+脚本生成 256 MiB sparse raw ext4 只读 base，并复制为默认可写 runtime；kernel 不再内嵌
+rootfs，而是用 built-in VirtIO block/ext4 驱动直接挂载 `/dev/vda`。runtime 默认跨运行
+保留，`RESET_DISK=1` 才会从已校验 base 重置；base、runtime 与实际 disk inode 都有防误用
+校验或 nonblocking `flock`。guest `sync` 后写入已验证可跨进程和 journal recovery 保留。
+FDT 仍位于 guest DRAM `0x87f0_0000`，UART 继续作为 Linux 8250 console。
 
 常用覆盖变量：
 
 - `JOBS`：并行构建任务数。
+- `RESET_DISK=1`：从只读 base 重建默认可写 ext4 runtime；默认复用现有 guest 写入。
 - `VALHEIM_RUST_TOOLCHAIN`：默认 `nightly-2024-09-05`。
 - `VALHEIM_LINUX_TOOLCHAIN`：默认 `target/demo/gcc-riscv64-glibc-2022.03.09`。
 - `VALHEIM_RISCV_TOOLCHAIN`：RustSBI 使用的 bare-metal GNU 工具链，默认 `target/demo/gcc-riscv64-elf-2022.03.09`。
 
-生成物放在 `target/demo/linux/`：OCI metadata、rootfs layer 和 Linux tarball 在 `downloads/`，Linux 源码在 `source/`，合成的 cpio 和 kernel 输出在 `build/`。不要用 `cargo clean` 删除它们。
+生成物放在 `target/demo/linux/`：OCI metadata、rootfs layer 和 Linux tarball 在
+`downloads/`，Linux 源码在 `source/`，只读 ext4 base 与 kernel 输出在 `build/`，
+可写 `rootfs.ext4` 在 `runtime/`。不要用 `cargo clean` 删除它们。
 
 ## 已验证的 RustSBI Demo
 
@@ -521,12 +540,23 @@ openEuler 演示没有固定的 BIOS、kernel、rootfs、下载脚本或版本 h
   Fetch/Read/Write 类型报告 guest VA；跨页数据访问应报告实际故障 fragment 的 VA，不能
   把页表或 endpoint 的物理地址泄漏进 `mtval/stval`。解释器与 JIT slow path 共用该不变量。
 - 测试和普通运行循环都没有 watchdog/超时，坏 guest 可能永久循环。
-- 当前 VirtIO 是 legacy version 1；必须选择明确支持 legacy VirtIO-MMIO v1 的 guest 驱动，不能只根据 guest 的发布年份判断。
+- 当前 VirtIO 是 legacy version 1、queue size 8，只公布 FLUSH feature，并只接受 direct
+  descriptor chain；必须选择明确支持 legacy VirtIO-MMIO v1 且不要求 indirect descriptor
+  的 guest 驱动，不能只根据 guest 的发布年份判断。
 - RustSBI 历史 test kernel 的 success marker 来自明确记录的单 hart patch；不要声称未修改的上游多 hart HSM 测试在 Valheim 上完整通过。
 - Debian 13 demo 的 rootfs 必须继续来自已固定并校验的官方 OCI artifact；不要用 BusyBox、手写 `/etc/os-release` 或自制目录树冒充 Debian。
-- Linux 内核必须在同一个 `fakeroot` 元数据状态下打包 initramfs，否则 OCI 层中的 `root:shadow` 等属主信息会被宿主用户 UID 污染。
-- Linux demo 使用内建 initramfs，成功不代表现代 Linux 的 VirtIO block 路径已兼容；切换到磁盘 rootfs 前必须单独修复和验证 VirtIO。
-- UART RX/TX 目前以单次事件脉冲适配 Valheim 的简化 PLIC。xv6/Linux 的正常初始化顺序已验证；若字节恰在 PLIC source 10 被 mask 时到达，简化 PLIC 不会在之后 enable 时从 pending 重算 claim，事件可能暂时卡住。完整 level-triggered 语义需要连同 PLIC/SEIP 路径一起修复。
+- Linux ext4 base 必须在同一个 `fakeroot` 会话中解包 OCI layer、创建 overlay/device node
+  并执行 `mke2fs -d`，否则 `root:shadow` 等属主信息会被宿主 UID 污染。修改 schema、feature
+  或 `/init` 时必须保留只读 fsck/debugfs 元数据验收。
+- Linux demo 默认 runtime 是持久化可写磁盘；guest `sync` 前用宿主 `Ctrl-C` 退出等价于
+  突然断电。不要在 Valheim 仍持有 mmap 时对 runtime 运行 e2fsprogs。`run.sh` 的 `flock`
+  是 advisory；直接调用 `valheim-cli --disk` 会绕过它，调用者必须避免并发打开同一镜像。
+- PLIC 会在 priority/enable/threshold/claim/complete 和 source level 变化后重算各 context
+  的 claim；CPU 每轮 interrupt poll 再按 S-context claimability 重建 SEIP。VirtIO IRQ 1
+  使用真正的 level input，ACK 后才 deassert。UART 仍通过 one-shot pulse 接口注入；CPU 只在
+  WFI 或 SEIP 对当前特权全局可投递时轮询 pulse device，避免在常见的 S-mode 临界区提前
+  消费下一脉冲。若改成完整 NS16550 line-level IRQ，必须继续保持 PLIC gateway 的
+  in-service/coalescing 语义。
 - production CLINT 只支持 host-monotonic realtime：`mtime` 以 10 MHz 在 guest 执行、
   WFI 和宿主被抢占期间持续流逝，不得恢复 instruction-tick 或 WFI fast-forward。
   `ClockSource` 注入只用于无 sleep 的可重复测试，不是面向 CLI 的 deterministic/turbo
@@ -593,6 +623,11 @@ RESET_DISK=1 ./demo/xv6/run.sh --engine jit
 echo RUN_SH_OK
 cat /etc/debian_version
 ```
+
+修改 VirtIO、PLIC、DMA、磁盘 mmap 或 Linux ext4 demo 时，Linux 还必须确认启动日志识别
+`vda`、`/proc/mounts` 中 `/dev/root` 为 `ext4` 且含 `rw`，guest 写文件后执行 `sync`，
+重启仍能读取该文件；随后用 `RESET_DISK=1` 启动并确认文件消失。还应检查
+`/proc/interrupts` 的 `virtio0` 计数增长，并验证第二个并发 `run.sh` 不能打开同一 runtime。
 
 修改 CLINT、TIME CSR、WFI 或 RustSBI timer relay 时，Debian 还必须确认启动日志包含
 `SBI TIME extension detected` 和 10 MHz `sched_clock`，`time sleep 1` 约为一秒、

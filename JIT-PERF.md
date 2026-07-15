@@ -6,7 +6,10 @@
 
 启动性能优化实现到 `0265308`；之后的 WFI 空闲修复实现到 `9348812`、
 按目标特权投递中断实现于 `a0038d8`、realtime CLINT/TIME 实现于 `10cabc6`，
-历史 RustSBI 的 timer relay 适配实现于 `258fdf6`。下面
+历史 RustSBI 的 timer relay 适配实现于 `258fdf6`。level-triggered PLIC、可供 Linux
+使用的 legacy VirtIO block 和 writable ext4 Debian root 分别实现于 `e14e41e`、
+`bcd378d`、`ded32a0`。后三项首先是设备正确性和 workload 变更，不应把它们当作 JIT
+提速提交。下面
 “尚可评估的优化”均未实现，也不代表已经验证会更快。每个已落地优化都先独立验证、再单独
 提交；没有收益的实验已经完整回滚。
 
@@ -14,8 +17,11 @@
 
 - host 明确只支持 Linux x86_64 System V ABI。
 - 截止 `0265308` 的性能 A/B 保持 guest、Linux kernel、RustSBI、Debian rootfs
-  和未压缩内建 initramfs 不变。realtime 验收为兼容旧 RustSBI 新增 timer relay
+  和 gzip 压缩的内建 initramfs 不变。realtime 验收为兼容旧 RustSBI 新增 timer relay
   patch；它是时钟正确性适配，不混入旧性能改动的归因。
+- `ded32a0` 起 Debian 改为从 `/dev/vda` 的 read-write ext4 启动，kernel 不再内嵌
+  initramfs。当前还没有这项新 workload 的正式三次启动基线；旧时间和 profile 不包含
+  VirtIO/ext4 I/O，不能据此判断新路径的耗时或热点。
 - 性能主指标仍是宿主进程启动到真实行末 `debian13# ` prompt，包含 JIT 编译时间。
 - 初始 JIT 的历史中位数为 13.447 s；上一轮 `b7bc41a` 工作树为 7.014 s。
 - realtime 切换前的 `0265308` 在固定 CPU 16 上三次为
@@ -34,15 +40,16 @@
 - Debian JIT prompt 后的 WFI 忙轮询已经修复：修复前稳定占用一个 host core；实测两个
   约 5 秒窗口均为 0 个 user/system tick，同时 UART 唤醒和超过 80 字节的连续输入输出通过。
 
-当前运行时/固件代码终点是 `258fdf6`；其后单独提交本文档，不混入代码改动。
+当前运行时、设备和 demo 代码终点是 `ded32a0`；其后单独提交本文档，不混入代码改动。
 
 ## 测量口径
 
 测量环境与 `JIT-PLAN.md` 相同：Linux 6.6.87.2 WSL2、AMD Ryzen 9 9950X3D、
-32 logical CPUs，kernel/rootfs artifacts 固定。realtime 前后使用表中各自标明的
+32 logical CPUs，历史 kernel/rootfs/initramfs artifacts 固定。realtime 前后使用表中各自标明的
 release binary，realtime firmware 另含 timer relay patch；只有每项独立 A/B 才保证
 除被测改动外的条件相同。外部计时从进程启动开始，到检测到真实行末 prompt 为止；
-因此镜像加载和全部运行期 JIT 编译成本都被计入。
+因此镜像加载和全部运行期 JIT 编译成本都被计入。下表截止于旧 initramfs workload；
+`ded32a0` ext4 direct-root 必须建立新基线后才能追加。
 
 计时运行默认关闭 `--jit-stats`，避免统计本身改变热路径。早期累计 checkpoint 如下：
 
@@ -112,7 +119,8 @@ compile failure 为 0。TLB 为 384,604,333 hit / 552,731 miss（约 99.86% hit�
 
 `b432c42..0265308` 的启动性能代码包含以下十六个独立提交；中间的 `d980f5e` 仅是上一版
 性能文档，不属于代码优化。随后五个代码提交修复 WFI/中断正确性、prompt
-空闲 CPU、realtime 时钟和历史固件中继。
+空闲 CPU、realtime 时钟和历史固件中继；再后的三个独立提交完善 PLIC、VirtIO block 与
+ext4 workload，主要属于设备正确性和覆盖，不作 JIT 启动提速归因。
 
 ### Core、设备与失效语义
 
@@ -265,28 +273,51 @@ compile failure 为 0。TLB 为 384,604,333 hit / 552,731 miss（约 99.86% hit�
     首次建立并在后续重装中继，避免旧 deadline 竞态；未打 patch 时，当前初始化路径
     不会打开 MTIE，Linux 无法可靠获得 MTIP→STIP timer relay。
 
+22. `e14e41e fix(plic): model level-triggered interrupt sources`
+
+    PLIC 现在区分 pending、electrical level 和 in-service context；priority、enable、
+    threshold、claim 与 complete 都会重算 M/S context 的 claim，level 在 complete 后仍高会
+    重新 pending。CPU 每轮从 S-context claimability 重建 SEIP，避免把外部中断当成一次性脉冲。
+
+23. `bcd378d fix(virtio): implement legacy block split queues`
+
+    legacy VirtIO-MMIO v1 block 现在按 queue size 8 解析 direct split descriptor chain，批量
+    drain avail ring，执行 IN/OUT/FLUSH，写 used ring/status，并以 interrupt-status ACK 控制
+    PLIC level。DMA range 和 access direction 会完整校验；guest DMA write 清除 LR/SC reservation。
+    mmap backend 测试覆盖 flush 成功、重新打开文件可见和越界；注入式 backend 单独覆盖 flush 失败，
+    Linux reset/GuestPageSize 顺序也有回归测试。
+
+24. `ded32a0 feat(demo): boot Debian from writable ext4`
+
+    固定 Debian OCI layer 现在在单个 fakeroot 会话中转换为经过 fsck/debugfs 校验的 256 MiB
+    sparse ext4 base，再复制成受锁保护的持久化 runtime。Linux 5.17 以内建 VirtIO block/ext4
+    直接挂载 `/dev/vda` 为 `rw`；`RESET_DISK=1` 显式重置。实跑验证写入、`sync`、journal
+    recovery、跨进程持久化、重置和 prompt 空闲，但该 workload 尚未建立正式启动性能基线。
+
 ## 当前验证状态
 
 最终代码树已经通过：
 
 - `cargo +nightly-2024-09-05 test --workspace --locked`
   - `valheim-asm` 11 个测试；
-  - `valheim-core` 74 个测试；
+  - `valheim-core` 95 个测试；
   - `valheim-jit` 34 个单元测试；
   - 10 个 native/naive differential tests；
   - 4 个 native memory fast-path integration tests；
   - `xtask` 4 个测试。
-- 上述 workspace 合计 137/137；
-  `cargo +nightly-2024-09-05 test --locked --package valheim-core --features trace`：75/75。
+- 上述 workspace 合计 158/158；
+  `cargo +nightly-2024-09-05 test --locked --package valheim-core --features trace`：96/96。
 - `cargo +nightly-2024-09-05 test --release --locked --package valheim-jit`，让
   34 + 10 + 4 项 JIT tests 真正在 release verifier-off 配置执行。
 - `cargo +nightly-2024-09-05 build --release --locked --package valheim-cli`。
 - 当前树的 debug xtask 在 naive 与 JIT 下均通过 96/96 `riscv-tests`。
-- `258fdf6` 代码树实跑三个 demo 的 naive/JIT 六种组合：xv6 两种引擎
+- 当前 `ded32a0` 代码树实跑三个 demo 的 naive/JIT 六种组合：xv6 两种引擎
   均进入 `$` 并成功执行 `echo`；RustSBI 两种引擎均输出完整 success marker；
-  Debian 两种引擎均进入真实 `debian13#`，版本为 `13.6`。Debian 还验证
-  `SBI TIME`、10 MHz `sched_clock`、`sleep 1`、持续增长的 timer IRQ 及 prompt
-  宿主空闲。
+  Debian 两种引擎均从 read-write ext4 进入真实 `debian13#`，版本为 `13.6`。
+  Debian JIT 还验证写入、`sync`、journal recovery、跨运行持久化、显式 reset、
+  非零 VirtIO IRQ 和持续增长的 timer IRQ；prompt 空闲三次 `pidstat` 平均 0.33% host CPU。
+  backend FLUSH 的成功/失败和 mmap 落盘语义由独立单元测试覆盖，不能从 guest `sync`
+  单独归因某一次具体 request。
 
 `cargo fmt --all -- --check` 会要求把仓库既有的 2 空格 Rust 风格整体改成 rustfmt 默认布局，
 因此当前不能作为局部改动的有效格式门禁。本轮只运行过只读 `--check`，失败后没有产生文件
@@ -320,6 +351,11 @@ realtime 切换前的快照，不能假定热点占比在当前树上完全不�
 `JitExecutor::execute` 为 35.50%、解释器 `RV64Cpu::execute` 5.81%、`translate_to_host()`
 4.75%、`Bus::read` 1.92%、`GuestBlock::translate` 1.25%、`Machine::dispatch_next` 1.00%。
 release 关闭 verifier 后，verifier 热点已经消失。
+
+以上样本全部来自旧 initramfs 启动。下一轮第一步必须在 `ded32a0` 上分别建立 ext4
+direct-root 的 JIT/naive 三次 prompt 基线，再采一份 stats-off `perf record` 和独立的
+stats-on counters；至少要把 JIT dispatch/compile、VirtIO queue service、PLIC recompute、
+guest-memory copy 和 mmap FLUSH 分开。不能把旧 profile 百分比直接用于安排 block-root 优先级。
 
 WSL 中 `cycles`、`instructions`、`branches` 和 `branch-misses` 仍报告 `<not supported>`；需要
 可靠硬件计数时必须在 native Linux x86_64 复测，不能把空计数当作结果。下一步可观测性工作：
@@ -396,14 +432,16 @@ WSL 中 `cycles`、`instructions`、`branches` 和 `branch-misses` 仍报告 `<n
    VA 到物理页的关系。该优化很容易制造 stale-code 或 stale-permission bug，只有统计显示
    SFENCE 导致大量重译时才值得做。
 
-4. 完善 level-triggered PLIC/SEIP 与通用异步设备通知。
+4. 按新 ext4 profile 缩减 VirtIO/PLIC host 开销。
 
-   无 timer WFI 的 WakeHub 等待和 UART 通知已经在 `9348812` 完成，`10cabc6`
-   又将 future timer 接入 absolute-deadline timed wait，并且实际解决了 Debian
-   prompt 的单核满载。剩余工作是让 PLIC 在 source enable/threshold/complete 变化时从 latched
-   level 重新计算 claim/SEIP，并把未来真正异步的 VirtIO 等设备接入同一通知协议。当前 UART
-   单脉冲若恰在 source 10 被 mask 时到达，可能要等后续同源 UART 脉冲再次更新 pending，不能
-   把 WakeHub 验收解释为完整 level-triggered PLIC 已实现。
+   `bcd378d` 已一次 drain notify 时可见的全部 request，但每个 IN/OUT 仍分配 64 KiB copy
+   buffer，每条 chain 也会分配 descriptor/visited vectors；可先把这些 scratch storage 复用到
+   device 内，再做独立 A/B。PLIC 的 `set_source_level(true)` 即使 source 已 pending，也可能重复
+   扫描 1023 个 source × 两个 context；可在状态未变时跳过 recompute，但 claim、complete、
+   priority、enable 和 threshold 的可见性不能改变。若 queue depth 8 确认限制吞吐，再单独扩大
+   `QUEUE_SIZE` 及 QueueNumMax 返回值，随后才考虑 `VIRTIO_RING_F_INDIRECT_DESC` 和 block
+   `SEG_MAX`；这些会扩大 guest 可提交的 DMA 图，必须补 malformed/cycle/overflow 和 Linux
+   持久化测试，不能一次混做。
 
 ### 本轮已从候选移除
 
@@ -411,6 +449,9 @@ realtime CLINT 已在 `10cabc6` 完成：production 仅使用 host monotonic 10 
 clock，WFI 不快进，`ClockSource`/`ManualClock` 仅用于无 sleep 的可重复测试。
 若未来需要 CLI 可选 deterministic benchmark mode，那是新功能，不是当前时钟的
 第二个 production 模式。
+
+level-triggered PLIC/SEIP 与 VirtIO IRQ 1 已分别在 `e14e41e`/`bcd378d` 完成；后续只把
+经 profile 证明的冗余扫描当作性能实验，不再把基础中断正确性列为未实现项。
 
 ### 当前低优先级
 
@@ -427,17 +468,19 @@ clock，WFI 不快进，`ClockSource`/`ManualClock` 仅用于无 sleep 的可重
 
 ## 建议的下一轮顺序
 
-1. 以当前 `258fdf6` realtime 树为基线，补 guest-PC JIT 符号和
-   stop-reason/system-opcode counters；计时
-   始终关闭 stats。
-2. 在 system/CSR lowering 与 page-local fetch cache 中只选一个，独立实现、交错 A/B、独立
+1. 以当前 `ded32a0` ext4 direct-root 树建立 JIT/naive 三次 prompt 基线，并重采
+   stats-off `perf`；同时补 guest-PC JIT 符号和 stop-reason/system-opcode counters，计时始终
+   关闭 stats。
+2. 根据新 profile 先判断热点属于 JIT 还是 block/PLIC；设备侧只在命中热点时从 scratch
+   reuse、冗余 PLIC scan、queue depth 三者中选一个做独立 A/B。
+3. 若 JIT 仍占主导，在 system/CSR lowering 与 page-local fetch cache 中只选一个，独立实现、交错 A/B、独立
    commit；收益不稳定就完整回滚。
-3. 把 compile/finalize 分段计时后，再决定批量 finalize 或后台编译是否值得；不要重复已经
+4. 把 compile/finalize 分段计时后，再决定批量 finalize 或后台编译是否值得；不要重复已经
    否决的 `speed_and_size` 实验。
-4. 只有 guest-PC profile 证实热点后，才选 inline atomic 或 context-tagged TLB。
-5. 小步优化不能继续降低 `JitExecutor::execute` 热点时，再进入 superblock/direct native
+5. 只有 guest-PC profile 证实热点后，才选 inline atomic 或 context-tagged TLB。
+6. 小步优化不能继续降低 `JitExecutor::execute` 热点时，再进入 superblock/direct native
    chaining，并先设计 budget/side-exit/module-rotation 协议。
-6. 每个落地优化继续跑 workspace、release JIT tests、96 个 `riscv-tests` 及三个 JIT demo；
+7. 每个落地优化继续跑 workspace、release JIT tests、96 个 `riscv-tests` 及三个 JIT demo；
    涉及 core/设备时再补 naive、trace 和双引擎完整回归。
 
 所有后续实现继续遵守两个不变量：JIT 不复制 Sv39 翻译/权限逻辑；任何 batching/chaining
