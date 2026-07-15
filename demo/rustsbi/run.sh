@@ -29,6 +29,7 @@ readonly DEMO_CARGO_HOME="${DEMO_TARGET_ROOT}/cargo-home"
 readonly -a PATCH_FILES=(
   "${SCRIPT_DIR}/single-hart-valheim.patch"
   "${SCRIPT_DIR}/valheim-dtb-pointer.patch"
+  "${SCRIPT_DIR}/valheim-time-relay.patch"
 )
 readonly RUSTSBI_REPOSITORY="https://github.com/rustsbi/rustsbi-qemu.git"
 readonly RUSTSBI_COMMIT="999e3556fcfa1b0900dd797ae2186667af8d2dc6"

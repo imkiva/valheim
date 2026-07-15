@@ -1,0 +1,22 @@
+diff --git a/rustsbi-qemu/src/clint.rs b/rustsbi-qemu/src/clint.rs
+--- a/rustsbi-qemu/src/clint.rs
++++ b/rustsbi-qemu/src/clint.rs
+@@ -3,3 +3,4 @@
++use riscv::register::{mie, mip};
+ use rustsbi::{HartMask, Ipi, Timer};
+ // 这部分其实是运行时提供的，不应该做到实现库里面
+ use rustsbi::SbiRet;
+@@ -67,6 +68,13 @@ impl Timer for Clint {
+     #[inline]
+     fn set_timer(&self, time_value: u64) {
+         let this_mhartid = riscv::register::mhartid::read();
++        unsafe { mie::clear_mtimer() };
+         self.set_timer(this_mhartid, time_value);
++        unsafe {
++            // A previous machine-timer trap left STIP set and MTIE clear. Rearm the relay only
++            // after replacing the compare value so the old deadline cannot race this SBI call.
++            mip::clear_stimer();
++            mie::set_mtimer();
++        }
+     }
+ }
