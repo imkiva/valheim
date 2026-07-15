@@ -358,6 +358,17 @@ configure_kernel() {
 
 main() {
   local command
+  local argument
+  local -a engine_args=(--engine jit)
+  for argument in "$@"; do
+    case "${argument}" in
+      --engine | --engine=*)
+        engine_args=()
+        break
+        ;;
+    esac
+  done
+
   for command in \
     awk bash bc bison cc chmod chown cpio curl dtc fakeroot find flex grep gzip install \
     make mkdir mknod mv perl python3 rm rustup sha256sum sort tar xz; do
@@ -406,6 +417,7 @@ main() {
   printf '\nStarting Debian 13 on Linux %s. Wait for the debian13# prompt; press Ctrl-C to exit.\n\n' \
     "${LINUX_VERSION}"
   exec "${VALHEIM_BIN}" \
+    "${engine_args[@]}" \
     --bios "${RUSTSBI_BIOS}" \
     --kernel "${KERNEL_IMAGE}" \
     --cmdline "${KERNEL_CMDLINE}" \

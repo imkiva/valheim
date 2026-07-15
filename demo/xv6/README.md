@@ -8,6 +8,9 @@ shell:
 ./demo/xv6/run.sh
 ```
 
+The launcher defaults to the JIT engine. Pass `--engine naive` to run the
+reference interpreter explicitly.
+
 The first run downloads and SHA-256 verifies the pinned RISC-V GNU toolchain,
 installs `nightly-2024-09-05` with rustup's minimal profile, clones xv6, and
 builds both projects. Persistent downloads, sources, build output, and the

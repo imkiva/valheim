@@ -179,8 +179,19 @@ rustup run "${RUST_TOOLCHAIN}" env \
   --locked \
   --package valheim-cli
 
+engine_args=(--engine jit)
+for argument in "$@"; do
+  case "${argument}" in
+    --engine | --engine=*)
+      engine_args=()
+      break
+      ;;
+  esac
+done
+
 printf '\nStarting xv6; press Ctrl-C to stop Valheim.\n\n'
 exec "${CARGO_TARGET_DIR}/release/valheim-cli" \
+  "${engine_args[@]}" \
   --kernel "${XV6_SOURCE}/kernel/kernel.bin" \
   --disk "${RUNTIME_DISK}" \
   "$@"

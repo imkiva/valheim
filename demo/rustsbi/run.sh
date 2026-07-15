@@ -55,6 +55,16 @@ if (( BUILD_ONLY )) && (( $# != 0 )); then
   die "--build-only does not accept additional arguments"
 fi
 
+engine_args=(--engine jit)
+for argument in "$@"; do
+  case "${argument}" in
+    --engine | --engine=*)
+      engine_args=()
+      break
+      ;;
+  esac
+done
+
 require_command() {
   command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
 }
@@ -259,6 +269,7 @@ fi
 printf '\nRunning the RustSBI test kernel...\n\n'
 set +e
 "${VALHEIM_BIN}" \
+  "${engine_args[@]}" \
   --bios "${ARTIFACT_DIR}/rustsbi-qemu.bin" \
   --kernel "${ARTIFACT_DIR}/test-kernel.bin" \
   "$@" 2>&1 | tee "${RUN_LOG}"

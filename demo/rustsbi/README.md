@@ -11,6 +11,8 @@ kernel。它是会自行结束的 SBI 测试，不是交互式 shell。
 ./demo/rustsbi/run.sh
 ```
 
+普通运行默认使用 JIT；需要参考解释器时传入 `--engine naive`。
+
 只准备 RustSBI firmware 和 test kernel、不启动 guest：
 
 ```bash
@@ -18,7 +20,7 @@ kernel。它是会自行结束的 SBI 测试，不是交互式 shell。
 ```
 
 `--build-only` 只能作为第一个参数且不能带其他参数。普通运行允许把额外参数继续传给
-`valheim-cli`。脚本以出现以下行为作为成功：
+`valheim-cli`，显式 `--engine` 会覆盖脚本的 JIT 默认值。脚本以出现以下行为作为成功：
 
 ```text
 << Test-kernel: All hart SBI test SUCCESS, shutdown

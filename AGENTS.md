@@ -295,8 +295,9 @@ target/demo/                         # Git 忽略；由 run.sh 创建
 注意：`target/` 在 `.gitignore` 中，因此只有 `demo/` 中的静态文件会随 Git commit
 保存；脚本的下载与构建产物不应出现在 `git status` 中。
 
-三个 demo 的 `run.sh` 都会把额外参数透传给 `valheim-cli`。无参数时默认 naive；
-Linux x86_64 SysV 宿主上可用以下形式验证 JIT：
+三个 demo 的 `run.sh` 都会把额外参数透传给 `valheim-cli`，无参数时默认注入
+`--engine jit`。显式 `--engine naive` 或 `--engine=naive` 可覆盖该默认值；以下形式仍可用于
+明确记录 JIT 验证：
 
 ```bash
 RESET_DISK=1 ./demo/xv6/run.sh --engine jit

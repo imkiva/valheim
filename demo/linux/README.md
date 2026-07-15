@@ -23,6 +23,8 @@ rootfs tarball。
 ./demo/linux/run.sh
 ```
 
+脚本默认使用 JIT；需要显式运行参考解释器时传入 `--engine naive`。
+
 脚本使用自身路径定位仓库，所以也可以从其他工作目录调用。首次运行会依次：
 
 1. 下载并校验固定的 Debian OCI index、riscv64 manifest 和 rootfs layer。
@@ -81,9 +83,9 @@ glibc 声明的最低 Linux ABI 为 4.15，因此可以在这个 5.17 kernel 上
 
 ## 启动与验收
 
-Valheim 是解释执行模拟器。2026-07-14 的本机 release 验证中，进入 shell 通常约需
-1–3 分钟，硬件不同会变化；kernel 日志中的 guest 时间到 `/init` 约为 142 秒，
-不能把它当成精确的宿主 wall-clock。看到下面提示即启动成功：
+当前固定 CPU 16 的 release 验证中，默认 JIT 到 shell 的中位数约为 4.806 秒；显式
+`--engine naive` 的中位数约为 60.926 秒，硬件不同会变化。kernel 日志中的时间来自 guest
+虚拟时钟，不能把它当成宿主 wall-clock。看到下面提示即启动成功：
 
 ```text
 Debian 13 (trixie) official slim rootfs on Valheim

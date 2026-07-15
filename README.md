@@ -12,6 +12,9 @@ The repository contains three reproducible launchers. Run them from the reposito
 ./demo/linux/run.sh
 ```
 
+All three launchers default to the JIT engine; pass `--engine naive` to select the reference
+interpreter explicitly.
+
 The first run downloads the pinned guest sources and toolchains. All downloaded and generated
 files are kept under `target/demo/`; only the minimal static inputs under `demo/` are
 tracked by Git. See each demo's README and [AGENTS.md](AGENTS.md) for prerequisites, pinned
