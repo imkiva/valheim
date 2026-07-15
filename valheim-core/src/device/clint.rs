@@ -10,7 +10,10 @@ use crate::cpu::irq::Exception;
 use crate::memory::{CanIO, VirtAddr};
 
 pub const TIMEBASE_FREQUENCY: u64 = 10_000_000;
-const NANOS_PER_SECOND: u128 = 1_000_000_000;
+const NANOS_PER_SECOND: u64 = 1_000_000_000;
+const _: () = assert!(NANOS_PER_SECOND % TIMEBASE_FREQUENCY == 0);
+// The platform timebase is fixed at exactly 100 ns per tick.
+const NANOS_PER_TICK: u64 = NANOS_PER_SECOND / TIMEBASE_FREQUENCY;
 
 /// Monotonic time source used by the platform real-time counter.
 ///
@@ -82,20 +85,16 @@ impl Clint {
   }
 
   fn ticks_for_duration(duration: Duration) -> u64 {
-    let ticks = duration
-      .as_nanos()
-      .saturating_mul(TIMEBASE_FREQUENCY as u128) / NANOS_PER_SECOND;
-    ticks as u64
+    duration
+      .as_secs()
+      .wrapping_mul(TIMEBASE_FREQUENCY)
+      .wrapping_add(u64::from(duration.subsec_nanos()) / NANOS_PER_TICK)
   }
 
   fn duration_for_ticks_ceil(ticks: u64) -> Duration {
-    let nanos = (ticks as u128)
-      .saturating_mul(NANOS_PER_SECOND)
-      .saturating_add(TIMEBASE_FREQUENCY as u128 - 1) /
-      TIMEBASE_FREQUENCY as u128;
     Duration::new(
-      (nanos / NANOS_PER_SECOND) as u64,
-      (nanos % NANOS_PER_SECOND) as u32,
+      ticks / TIMEBASE_FREQUENCY,
+      ((ticks % TIMEBASE_FREQUENCY) * NANOS_PER_TICK) as u32,
     )
   }
 
@@ -263,6 +262,19 @@ mod tests {
     assert_eq!(clint.mtime(), 10_000_000);
     assert_eq!(clint.duration_until_timer(), None);
     assert_ne!(clint.local_pending_bits() & MTIP_MASK, 0);
+  }
+
+  #[test]
+  fn fixed_timebase_conversions_are_exact_and_preserve_wrapping_ticks() {
+    let duration = Duration::new(123, 456_789_123);
+    assert_eq!(Clint::ticks_for_duration(duration), 1_234_567_891);
+    assert_eq!(
+      Clint::duration_for_ticks_ceil(12_345_678),
+      Duration::new(1, 234_567_800),
+    );
+
+    let max_duration = Clint::duration_for_ticks_ceil(u64::MAX);
+    assert_eq!(Clint::ticks_for_duration(max_duration), u64::MAX);
   }
 
   #[test]
