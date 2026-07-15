@@ -3,12 +3,15 @@
 / {
   #address-cells = <0x02>;
   #size-cells = <0x02>;
-  compatible = "riscv-virtio";
-  model = "riscv-virtio,qemu";
+  compatible = "valheim,virt", "riscv-virtio";
+  model = "Valheim RISC-V virtual machine";
 
   chosen {
     bootargs = "${VALHEIM_BOOTARGS}";
     stdout-path = "/uart@10000000";
+    valheim,version = "${VALHEIM_VERSION}";
+    valheim,repository = "${VALHEIM_REPOSITORY}";
+    valheim,release = "Valheim ${VALHEIM_VERSION}\nGitHub: ${VALHEIM_REPOSITORY}\n";
   };
 
   uart@10000000 {
