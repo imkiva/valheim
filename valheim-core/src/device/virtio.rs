@@ -73,7 +73,9 @@ const CONFIG_END: u64 = VIRTIO_BASE + 0x10f;
 /// Storage operations required by the VirtIO block transport.
 pub trait BlockBackend {
   fn len(&self) -> u64;
+  /// Fills the complete buffer on success. Partial reads must return an error.
   fn read_at(&self, offset: u64, buffer: &mut [u8]) -> io::Result<()>;
+  /// Writes the complete buffer on success. Partial writes must return an error.
   fn write_at(&mut self, offset: u64, buffer: &[u8]) -> io::Result<()>;
   fn flush(&mut self) -> io::Result<()>;
 }
@@ -225,6 +227,7 @@ pub struct Virtio {
   used_idx: u16,
   backend: Option<Box<dyn BlockBackend>>,
   descriptor_scratch: Vec<VirtqDesc>,
+  transfer_scratch: Vec<u8>,
 }
 
 impl Virtio {
@@ -247,6 +250,7 @@ impl Virtio {
       used_idx: 0,
       backend: None,
       descriptor_scratch: Vec::new(),
+      transfer_scratch: Vec::new(),
     }
   }
 
@@ -264,6 +268,7 @@ impl Virtio {
       ));
     }
     self.capacity = length / SECTOR_SIZE;
+    self.transfer_scratch.resize(COPY_CHUNK_SIZE, 0);
     self.backend = Some(Box::new(backend));
     self.reset_transport();
     Ok(())
@@ -586,11 +591,10 @@ impl Virtio {
     };
 
     let mut result = RequestResult::success();
-    let Some(backend) = self.backend.as_ref() else {
+    let (Some(backend), buffer) = (self.backend.as_ref(), &mut self.transfer_scratch) else {
       return RequestResult::io_error();
     };
     let mut disk_offset = start;
-    let mut buffer = vec![0_u8; COPY_CHUNK_SIZE];
     for descriptor in descriptors {
       let mut descriptor_offset = 0_usize;
       let descriptor_len = descriptor.len as usize;
@@ -636,11 +640,10 @@ impl Virtio {
       return RequestResult::io_error();
     };
 
-    let Some(backend) = self.backend.as_mut() else {
+    let (Some(backend), buffer) = (self.backend.as_mut(), &mut self.transfer_scratch) else {
       return RequestResult::io_error();
     };
     let mut disk_offset = start;
-    let mut buffer = vec![0_u8; COPY_CHUNK_SIZE];
     for descriptor in descriptors {
       let mut descriptor_offset = 0_usize;
       let descriptor_len = descriptor.len as usize;
@@ -880,6 +883,7 @@ mod tests {
   struct BackendState {
     bytes: Vec<u8>,
     flushes: usize,
+    fail_read_after_partial_fill: bool,
     fail_flush: bool,
   }
 
@@ -903,6 +907,15 @@ mod tests {
     fn read_at(&self, offset: u64, buffer: &mut [u8]) -> io::Result<()> {
       let state = self.0.borrow();
       let range = checked_backend_range(state.bytes.len(), offset, buffer.len())?;
+      if state.fail_read_after_partial_fill {
+        if let Some(first) = buffer.first_mut() {
+          *first = 0xff;
+        }
+        return Err(io::Error::new(
+          ErrorKind::Other,
+          "injected partial read failure",
+        ));
+      }
       buffer.copy_from_slice(&state.bytes[range]);
       Ok(())
     }
@@ -1186,6 +1199,42 @@ mod tests {
     assert_eq!(second[255], 255);
     assert_eq!(memory.read::<u8>(VirtAddr(status)), Some(VIRTIO_BLK_S_OK));
     assert_eq!(read_u32(&memory, queue.used_addr + 8), 513);
+  }
+
+  #[test]
+  fn failed_backend_read_does_not_copy_partial_scratch_into_guest() {
+    let backend = TestBackend::new(4096);
+    backend.0.borrow_mut().fail_read_after_partial_fill = true;
+    let (mut virtio, mut memory, queue) = configured(backend);
+    let header = BUFFER_BASE;
+    let data = BUFFER_BASE + 0x100;
+    let status = BUFFER_BASE + 0x400;
+    memory
+      .write_bytes(VirtAddr(data), &[0x5a; 512])
+      .unwrap();
+    write_header(&mut memory, header, VIRTIO_BLK_T_IN, 0);
+    write_desc(&mut memory, queue, 0, header, 16, VIRTQ_DESC_F_NEXT, 1);
+    write_desc(
+      &mut memory,
+      queue,
+      1,
+      data,
+      512,
+      VIRTQ_DESC_F_NEXT | VIRTQ_DESC_F_WRITE,
+      2,
+    );
+    write_desc(&mut memory, queue, 2, status, 1, VIRTQ_DESC_F_WRITE, 0);
+    publish(&mut memory, queue, QUEUE_SIZE, 0, 0);
+    notify(&mut virtio);
+
+    assert_eq!(virtio.service_queue(&mut memory).completed, 1);
+    let mut guest_data = [0_u8; 512];
+    memory
+      .read_bytes(VirtAddr(data), &mut guest_data)
+      .unwrap();
+    assert!(guest_data.iter().all(|byte| *byte == 0x5a));
+    assert_eq!(memory.read::<u8>(VirtAddr(status)), Some(VIRTIO_BLK_S_IOERR));
+    assert_eq!(read_u32(&memory, queue.used_addr + 8), 1);
   }
 
   #[test]
