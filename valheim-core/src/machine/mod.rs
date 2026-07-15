@@ -23,7 +23,9 @@ const RV64_PC_RESET: u64 = 0x80000000;
 const RV64_DTB_ADDR: u64 = 0x87f00000;
 const DEVICE_TREE_ROM_HEADER_SIZE: usize = 32;
 const DEFAULT_CMDLINE: &str = "root=/dev/vda ro console=ttyS0";
-const MAX_EXECUTOR_BUDGET: u32 = 32;
+// Keep asynchronous device interrupts bounded while amortizing Machine/JIT dispatcher work.
+// Timer deadlines below this ceiling still shorten the budget exactly.
+const MAX_EXECUTOR_BUDGET: u32 = 1024;
 
 pub struct Machine {
   pub cpu: RV64Cpu,
@@ -278,7 +280,7 @@ mod tests {
     assert_eq!(machine.cpu.csrs.read_unchecked(TIME), 4);
 
     assert_eq!(machine.dispatch_next(), Ok(()));
-    assert_eq!(&*budgets.lock().unwrap(), &[4, 32]);
+    assert_eq!(&*budgets.lock().unwrap(), &[4, MAX_EXECUTOR_BUDGET]);
     assert_eq!(machine.cpu.csrs.read_unchecked(TIME), 36);
   }
 
@@ -328,7 +330,7 @@ mod tests {
     assert_eq!(machine.cpu.read_pc(), VirtAddr(0x8000_0100));
     assert_eq!(machine.cpu.csrs.read_unchecked(MEPC), 0x8000_0000);
     assert_eq!(machine.cpu.csrs.read_unchecked(MCAUSE), (1_u64 << 63) | 7);
-    assert_eq!(&*budgets.lock().unwrap(), &[32]);
+    assert_eq!(&*budgets.lock().unwrap(), &[MAX_EXECUTOR_BUDGET]);
   }
 
   #[test]
@@ -358,7 +360,9 @@ mod tests {
     assert_eq!(machine.cpu.csrs.read_unchecked(TIME), 1);
     assert!(!machine.cpu.wfi);
     assert_eq!(machine.cpu.csrs.read_unchecked(MCAUSE), (1_u64 << 63) | 3);
-    assert_eq!(&*budgets.lock().unwrap(), &[32]);
+    // The software interrupt is handled after the initial tick, so the future timer deadline,
+    // rather than the larger dispatcher ceiling, limits this execution batch.
+    assert_eq!(&*budgets.lock().unwrap(), &[99]);
   }
 
   #[test]
