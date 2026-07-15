@@ -53,7 +53,10 @@ impl FallbackKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlockBuild {
   Block(GuestBlock),
-  InterpretOne(FallbackKind),
+  InterpretOne {
+    kind: FallbackKind,
+    inst: GuestInst,
+  },
   Fault {
     raw: Option<u32>,
     exception: Exception,
@@ -68,15 +71,13 @@ impl GuestBlock {
     let mut instructions = Vec::with_capacity(max_len.min(MAX_BLOCK_LEN));
 
     while instructions.len() < max_len.min(MAX_BLOCK_LEN) {
-      if (pc & !(PAGE_SIZE - 1)) != code_page || (pc & (PAGE_SIZE - 1)) > PAGE_SIZE - 4 {
-        return if instructions.is_empty() {
-          BlockBuild::InterpretOne(FallbackKind::Other)
-        } else {
-          BlockBuild::Block(GuestBlock {
-            start_pc,
-            instructions,
-          })
-        };
+      let crossed_page = (pc & !(PAGE_SIZE - 1)) != code_page;
+      let crosses_page_if_uncompressed = (pc & (PAGE_SIZE - 1)) > PAGE_SIZE - 4;
+      if crossed_page || (crosses_page_if_uncompressed && !instructions.is_empty()) {
+        return BlockBuild::Block(GuestBlock {
+          start_pc,
+          instructions,
+        });
       }
 
       let raw = match cpu.fetch_mem(VirtAddr(pc)) {
@@ -102,10 +103,19 @@ impl GuestBlock {
           None => break,
         },
       };
+      let inst = GuestInst {
+        pc,
+        raw,
+        len,
+        decoded,
+      };
 
-      if !is_baseline_native(decoded) {
+      if crosses_page_if_uncompressed || !is_baseline_native(decoded) {
         return if instructions.is_empty() {
-          BlockBuild::InterpretOne(FallbackKind::from_raw(raw, len))
+          BlockBuild::InterpretOne {
+            kind: FallbackKind::from_raw(raw, len),
+            inst,
+          }
         } else {
           BlockBuild::Block(GuestBlock {
             start_pc,
@@ -114,12 +124,7 @@ impl GuestBlock {
         };
       }
 
-      instructions.push(GuestInst {
-        pc,
-        raw,
-        len,
-        decoded,
-      });
+      instructions.push(inst);
       if is_terminator(decoded) {
         break;
       }
@@ -284,7 +289,7 @@ pub fn is_atomic(instr: Instr) -> bool {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use valheim_core::cpu::bus::RV64_MEMORY_BASE;
+  use valheim_core::cpu::bus::{RV64_MEMORY_BASE, RV64_MEMORY_END};
 
   #[test]
   fn translates_a_straight_line_ending_in_a_branch() {
@@ -326,7 +331,43 @@ mod tests {
 
     assert_eq!(
       GuestBlock::translate(&mut cpu, MAX_BLOCK_LEN),
-      BlockBuild::InterpretOne(FallbackKind::System)
+      BlockBuild::InterpretOne {
+        kind: FallbackKind::System,
+        inst: GuestInst {
+          pc: pc.0,
+          raw: 0x0000_0073,
+          len: 4,
+          decoded: Instr::RV32(RV32Instr::ECALL),
+        },
+      }
+    );
+  }
+
+  #[test]
+  fn page_tail_fallback_caches_only_a_successfully_fetched_instruction() {
+    let mut cpu = RV64Cpu::new(None);
+    let pc = VirtAddr(RV64_MEMORY_END - 2);
+    cpu.write_pc(pc);
+    cpu.bus.write::<u16>(pc, 0x0001).unwrap(); // c.nop
+
+    let BlockBuild::InterpretOne { kind, inst } =
+      GuestBlock::translate(&mut cpu, MAX_BLOCK_LEN)
+    else {
+      panic!("expected a page-tail fallback");
+    };
+    assert_eq!(kind, FallbackKind::Other);
+    assert_eq!(inst.pc, pc.0);
+    assert_eq!(inst.raw, 0x0001);
+    assert_eq!(inst.len, 2);
+    assert_eq!(inst.decoded, Instr::NOP);
+
+    cpu.bus.write::<u16>(pc, 0x0073).unwrap(); // low parcel of ecall
+    assert_eq!(
+      GuestBlock::translate(&mut cpu, MAX_BLOCK_LEN),
+      BlockBuild::Fault {
+        raw: None,
+        exception: Exception::InstructionAccessFault(VirtAddr(RV64_MEMORY_END)),
+      }
     );
   }
 }

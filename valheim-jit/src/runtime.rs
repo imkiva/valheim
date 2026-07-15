@@ -5,7 +5,6 @@ use std::time::Instant;
 use rustc_hash::FxHashMap;
 use valheim_core::cpu::csr::CSRMap::{MSTATUS, SATP};
 use valheim_core::cpu::RV64Cpu;
-use valheim_core::interp::naive::NaiveInterpreter;
 use valheim_core::interp::{ExecOutcome, RV64Executor};
 use valheim_core::memory::VirtAddr;
 
@@ -73,7 +72,10 @@ struct CachedBlock {
 #[derive(Clone, Copy)]
 enum CacheEntry {
   Block(usize),
-  Fallback(FallbackKind),
+  Fallback {
+    kind: FallbackKind,
+    inst: GuestInst,
+  },
 }
 
 #[derive(Clone, Copy)]
@@ -295,7 +297,6 @@ pub struct JitStats {
 }
 
 pub struct JitExecutor {
-  naive: NaiveInterpreter,
   backend: CraneliftBackend,
   retired_backends: Vec<CraneliftBackend>,
   tlb: SoftwareTlb,
@@ -323,7 +324,6 @@ pub struct JitExecutor {
 impl JitExecutor {
   pub fn new() -> Result<Self, JitError> {
     Ok(Self {
-      naive: NaiveInterpreter::new(),
       backend: CraneliftBackend::new()?,
       retired_backends: Vec::new(),
       tlb: SoftwareTlb::new(),
@@ -595,12 +595,11 @@ impl JitExecutor {
   }
 
   fn fallback_one(
-    naive: &mut NaiveInterpreter,
     stats: &mut JitStats,
     stats_enabled: bool,
     cpu: &mut RV64Cpu,
-    budget: u32,
     kind: FallbackKind,
+    inst: GuestInst,
   ) -> ExecOutcome {
     if stats_enabled {
       stats.fallback_instructions += 1;
@@ -610,7 +609,12 @@ impl JitExecutor {
         FallbackKind::Other => stats.fallback_other += 1,
       }
     }
-    naive.execute(cpu, budget.min(1))
+    debug_assert_eq!(cpu.read_pc(), VirtAddr(inst.pc));
+    cpu.instr = inst.raw as u64;
+    ExecOutcome::new(
+      1,
+      cpu.execute(VirtAddr(inst.pc), inst.decoded, inst.len == 2),
+    )
   }
 
   fn remember_slow_memory(
@@ -817,7 +821,7 @@ impl JitExecutor {
           }
           match *entry.get() {
             CacheEntry::Block(block_index) => block_index,
-            CacheEntry::Fallback(kind) => {
+            CacheEntry::Fallback { kind, inst } => {
               if native_only {
                 return ExecuteOne::stop(ExecOutcome::new(0, Ok(())));
               }
@@ -825,12 +829,11 @@ impl JitExecutor {
                 self.stats.negative_cache_hits += 1;
               }
               return ExecuteOne::stop(Self::fallback_one(
-                &mut self.naive,
                 &mut self.stats,
                 self.stats_enabled,
                 cpu,
-                budget,
                 kind,
+                inst,
               ));
             }
           }
@@ -860,18 +863,17 @@ impl JitExecutor {
               entry.insert(CacheEntry::Block(block_index));
               block_index
             }
-            BlockBuild::InterpretOne(kind) => {
-              entry.insert(CacheEntry::Fallback(kind));
+            BlockBuild::InterpretOne { kind, inst } => {
+              entry.insert(CacheEntry::Fallback { kind, inst });
               if self.stats_enabled {
                 self.stats.negative_blocks += 1;
               }
               return ExecuteOne::stop(Self::fallback_one(
-                &mut self.naive,
                 &mut self.stats,
                 self.stats_enabled,
                 cpu,
-                budget,
                 kind,
+                inst,
               ));
             }
             BlockBuild::Fault { raw, exception } => {
@@ -1372,14 +1374,28 @@ mod tests {
       jit.execute(&mut cpu, 32),
       ExecOutcome::new(1, Err(Exception::MachineEcall))
     );
+    assert_eq!(cpu.instr, 0x0000_0073);
+
+    // The cached fallback owns the decoded instruction just like a translated TB. Guest code
+    // modifications become visible only after the instruction-cache epoch changes.
+    cpu.bus.write::<u32>(pc, 0x0010_0073).unwrap(); // ebreak
     assert_eq!(
       jit.execute(&mut cpu, 32),
       ExecOutcome::new(1, Err(Exception::MachineEcall))
     );
+    assert_eq!(cpu.instr, 0x0000_0073);
     assert_eq!(jit.stats().negative_blocks, 1);
     assert_eq!(jit.stats().negative_cache_hits, 1);
     assert_eq!(jit.stats().fallback_system, 2);
     assert_eq!(jit.stats().fallback_instructions, 2);
+
+    cpu.icache_epoch = cpu.icache_epoch.wrapping_add(1);
+    assert_eq!(
+      jit.execute(&mut cpu, 32),
+      ExecOutcome::new(1, Err(Exception::Breakpoint))
+    );
+    assert_eq!(cpu.instr, 0x0010_0073);
+    assert_eq!(jit.stats().negative_blocks, 2);
   }
 
   #[test]
