@@ -12,7 +12,7 @@ use valheim_core::memory::VirtAddr;
 use crate::block::{BlockBuild, FallbackKind, GuestBlock, GuestInst, MAX_BLOCK_LEN};
 use crate::cranelift::{CompiledBlock, CraneliftBackend, JitError, JitFrame};
 use crate::memory::{
-  exception_from_frame, is_deferred_memory_exit, is_slow_memory_exit, SoftwareTlb,
+  exception_from_frame, is_deferred_memory_exit, is_slow_memory_exit, SoftwareTlb, FAULT_NONE,
 };
 
 const DEFAULT_HOT_THRESHOLD: u32 = 500;
@@ -248,7 +248,7 @@ impl ExecuteOne {
 
 struct NativeExecution {
   outcome: ExecOutcome,
-  pending: Option<GuestInst>,
+  pending_index: Option<u8>,
   completed_block: bool,
 }
 
@@ -515,29 +515,53 @@ impl JitExecutor {
     let mut frame = JitFrame::new(cpu, xregs, load_tlb, store_tlb, tlb_generation, tlb_stats);
     frame.defer_first_memory = defer_first_slow as u32;
     let attempted = unsafe { (compiled.entry)(&mut frame) };
-    if let Some(exception) = exception_from_frame(&frame) {
+    if frame.exit_kind == FAULT_NONE {
+      cpu.write_pc(VirtAddr(frame.next_pc));
+      if attempted != 0 {
+        cpu.instr = block.instructions[attempted as usize - 1].raw as u64;
+      }
+      return NativeExecution {
+        outcome: ExecOutcome::new(attempted, Ok(())),
+        pending_index: None,
+        completed_block: true,
+      };
+    }
+    Self::finish_native_exit(cpu, block, &frame, attempted, defer_first_slow)
+  }
+
+  #[cold]
+  #[inline(never)]
+  fn finish_native_exit(
+    cpu: &mut RV64Cpu,
+    block: &GuestBlock,
+    frame: &JitFrame,
+    attempted: u32,
+    defer_first_slow: bool,
+  ) -> NativeExecution {
+    if let Some(exception) = exception_from_frame(frame) {
       cpu.write_pc(VirtAddr(frame.fault_pc));
       cpu.instr = frame.raw_instr as u64;
       return NativeExecution {
         outcome: ExecOutcome::new(attempted, Err(exception)),
-        pending: None,
+        pending_index: None,
         completed_block: false,
       };
     }
-    if is_deferred_memory_exit(&frame) {
+    if is_deferred_memory_exit(frame) {
       debug_assert_eq!(attempted, 1);
       debug_assert_eq!(block.instructions[0].pc, frame.fault_pc);
       cpu.write_pc(VirtAddr(frame.fault_pc));
       return NativeExecution {
         outcome: ExecOutcome::new(0, Ok(())),
-        pending: None,
+        pending_index: None,
         completed_block: false,
       };
     }
-    if is_slow_memory_exit(&frame) {
+    if is_slow_memory_exit(frame) {
       let index = attempted
         .checked_sub(1)
         .expect("memory side exit attempted no instruction");
+      debug_assert!(index < MAX_BLOCK_LEN as u32);
       let inst = block.instructions[index as usize];
       debug_assert_eq!(inst.pc, frame.fault_pc);
       cpu.write_pc(VirtAddr(frame.fault_pc));
@@ -545,14 +569,14 @@ impl JitExecutor {
         cpu.instr = block.instructions[index as usize - 1].raw as u64;
         return NativeExecution {
           outcome: ExecOutcome::new(index, Ok(())),
-          pending: Some(inst),
+          pending_index: Some(index as u8),
           completed_block: false,
         };
       }
       if defer_first_slow {
         return NativeExecution {
           outcome: ExecOutcome::new(0, Ok(())),
-          pending: Some(inst),
+          pending_index: Some(0),
           completed_block: false,
         };
       }
@@ -560,19 +584,11 @@ impl JitExecutor {
       let result = cpu.execute(VirtAddr(inst.pc), inst.decoded, inst.len == 2);
       return NativeExecution {
         outcome: ExecOutcome::new(attempted, result),
-        pending: None,
+        pending_index: None,
         completed_block: false,
       };
     }
-    cpu.write_pc(VirtAddr(frame.next_pc));
-    if attempted != 0 {
-      cpu.instr = block.instructions[attempted as usize - 1].raw as u64;
-    }
-    NativeExecution {
-      outcome: ExecOutcome::new(attempted, Ok(())),
-      pending: None,
-      completed_block: true,
-    }
+    unreachable!("native frame reported an unknown exit kind")
   }
 
   fn fallback_one(
@@ -656,9 +672,10 @@ impl JitExecutor {
     );
     let NativeExecution {
       outcome,
-      pending,
+      pending_index,
       completed_block,
     } = native;
+    let pending = pending_index.map(|index| cached.block.instructions[index as usize]);
     if let Some(inst) = pending {
       self.remember_slow_memory(cpu, privilege, satp, inst);
     }
