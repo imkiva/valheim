@@ -21,6 +21,7 @@ const VIRTQ_AVAIL_F_NO_INTERRUPT: u16 = 1;
 
 const VIRTIO_BLK_F_SEG_MAX: u32 = 1 << 2;
 const VIRTIO_BLK_F_FLUSH: u32 = 1 << 9;
+const VIRTIO_F_RING_INDIRECT_DESC: u32 = 1 << 28;
 const VIRTIO_BLK_T_IN: u32 = 0;
 const VIRTIO_BLK_T_OUT: u32 = 1;
 const VIRTIO_BLK_T_FLUSH: u32 = 4;
@@ -190,8 +191,12 @@ struct VirtqDesc {
 
 impl VirtqDesc {
   fn read(memory: &Memory, queue: VirtqueueAddr, index: u16) -> Option<Self> {
+    Self::read_from(memory, queue.desc_addr, index)
+  }
+
+  fn read_from(memory: &Memory, table_addr: u64, index: u16) -> Option<Self> {
     let offset = VRING_DESC_SIZE.checked_mul(u64::from(index))?;
-    let address = queue.desc_addr.checked_add(offset)?;
+    let address = table_addr.checked_add(offset)?;
     let mut bytes = [0_u8; VRING_DESC_SIZE as usize];
     memory.read_bytes(VirtAddr(address), &mut bytes)?;
     Some(Self {
@@ -245,7 +250,10 @@ pub struct Virtio {
 impl Virtio {
   pub fn new(capacity: u64) -> Self {
     Self {
-      device_features: [VIRTIO_BLK_F_SEG_MAX | VIRTIO_BLK_F_FLUSH, 0],
+      device_features: [
+        VIRTIO_BLK_F_SEG_MAX | VIRTIO_BLK_F_FLUSH | VIRTIO_F_RING_INDIRECT_DESC,
+        0,
+      ],
       device_features_sel: 0,
       driver_features: [0; 2],
       driver_features_sel: 0,
@@ -535,22 +543,61 @@ impl Virtio {
     queue: VirtqueueAddr,
     queue_num: u16,
     head: u16,
+    indirect_enabled: bool,
     descriptors: &mut Vec<VirtqDesc>,
   ) -> bool {
     descriptors.clear();
     if head >= queue_num {
       return false;
     }
-    let queue_num = usize::from(queue_num);
-    if descriptors.capacity() < queue_num {
-      descriptors.reserve(queue_num);
+    let queue_len = usize::from(queue_num);
+    if descriptors.capacity() < queue_len {
+      descriptors.reserve(queue_len);
     }
     let mut index = head;
-    for _ in 0..queue_num {
-      if usize::from(index) >= queue_num {
+    for _ in 0..queue_len {
+      if usize::from(index) >= queue_len {
         return false;
       }
       let Some(descriptor) = VirtqDesc::read(memory, queue, index) else {
+        return false;
+      };
+      if descriptor.flags & VIRTQ_DESC_F_INDIRECT != 0 {
+        return indirect_enabled
+          && descriptor.flags & VIRTQ_DESC_F_NEXT == 0
+          && Self::indirect_descriptor_chain(memory, descriptor, queue_num, descriptors);
+      }
+      descriptors.push(descriptor);
+      if descriptor.flags & VIRTQ_DESC_F_NEXT == 0 {
+        return true;
+      }
+      index = descriptor.next;
+    }
+    false
+  }
+
+  fn indirect_descriptor_chain(
+    memory: &Memory,
+    indirect: VirtqDesc,
+    queue_num: u16,
+    descriptors: &mut Vec<VirtqDesc>,
+  ) -> bool {
+    if indirect.len == 0 || u64::from(indirect.len) % VRING_DESC_SIZE != 0 {
+      return false;
+    }
+    let table_len = indirect.len as usize;
+    let table_count = table_len / VRING_DESC_SIZE as usize;
+    if !memory.contains(VirtAddr(indirect.addr), table_len) {
+      return false;
+    }
+
+    let mut index = 0_u16;
+    let remaining = usize::from(queue_num).saturating_sub(descriptors.len());
+    for _ in 0..remaining {
+      if usize::from(index) >= table_count {
+        return false;
+      }
+      let Some(descriptor) = VirtqDesc::read_from(memory, indirect.addr, index) else {
         return false;
       };
       if descriptor.flags & VIRTQ_DESC_F_INDIRECT != 0 {
@@ -819,6 +866,10 @@ impl Virtio {
     }
 
     let mut descriptors = std::mem::take(&mut self.descriptor_scratch);
+    let indirect_enabled = self.driver_features[0]
+      & self.device_features[0]
+      & VIRTIO_F_RING_INDIRECT_DESC
+      != 0;
     let mut pending_completions = 0_u16;
     for _ in 0..available {
       let slot = self.last_avail_idx % queue_num;
@@ -832,7 +883,14 @@ impl Virtio {
       };
       let head = Self::read_u16(memory, ring_address).unwrap_or(queue_num);
       self.last_avail_idx = self.last_avail_idx.wrapping_add(1);
-      let request = if Self::descriptor_chain(memory, queue, queue_num, head, &mut descriptors) {
+      let request = if Self::descriptor_chain(
+        memory,
+        queue,
+        queue_num,
+        head,
+        indirect_enabled,
+        &mut descriptors,
+      ) {
         self.process_request(memory, &descriptors)
       } else {
         RequestResult::io_error()
@@ -981,6 +1039,14 @@ mod tests {
     backend: B,
     queue_size: u16,
   ) -> (Virtio, Memory, VirtqueueAddr) {
+    configured_with_queue_size_and_features(backend, queue_size, 0)
+  }
+
+  fn configured_with_queue_size_and_features<B: BlockBackend + 'static>(
+    backend: B,
+    queue_size: u16,
+    features: u32,
+  ) -> (Virtio, Memory, VirtqueueAddr) {
     let mut virtio = Virtio::new(0);
     virtio.set_backend(backend).unwrap();
     let memory = Memory::new(MEMORY_BASE, 0x20_000).unwrap();
@@ -997,6 +1063,9 @@ mod tests {
       .write::<u32>(VirtAddr(QUEUE_PFN), (QUEUE_BASE / 0x1000) as u32)
       .unwrap();
     virtio
+      .write::<u32>(VirtAddr(DRIVER_FEATURES), features)
+      .unwrap();
+    virtio
       .write::<u32>(VirtAddr(STATUS), VIRTIO_STATUS_DRIVER_OK)
       .unwrap();
     let queue = VirtqueueAddr::from_device(&virtio).unwrap();
@@ -1007,9 +1076,28 @@ mod tests {
     configured_with_queue_size(backend, QUEUE_SIZE)
   }
 
+  fn configured_with_features(
+    backend: TestBackend,
+    features: u32,
+  ) -> (Virtio, Memory, VirtqueueAddr) {
+    configured_with_queue_size_and_features(backend, QUEUE_SIZE, features)
+  }
+
   fn write_desc(
     memory: &mut Memory,
     queue: VirtqueueAddr,
+    index: u16,
+    addr: u64,
+    len: u32,
+    flags: u16,
+    next: u16,
+  ) {
+    write_desc_at(memory, queue.desc_addr, index, addr, len, flags, next);
+  }
+
+  fn write_desc_at(
+    memory: &mut Memory,
+    table_addr: u64,
     index: u16,
     addr: u64,
     len: u32,
@@ -1023,7 +1111,7 @@ mod tests {
     bytes[14..16].copy_from_slice(&next.to_le_bytes());
     memory
       .write_bytes(
-        VirtAddr(queue.desc_addr + u64::from(index) * VRING_DESC_SIZE),
+        VirtAddr(table_addr + u64::from(index) * VRING_DESC_SIZE),
         &bytes,
       )
       .unwrap();
@@ -1065,7 +1153,7 @@ mod tests {
     );
     assert_eq!(
       virtio.read::<u32>(VirtAddr(DEVICE_FEATURES)).unwrap(),
-      VIRTIO_BLK_F_SEG_MAX | VIRTIO_BLK_F_FLUSH
+      VIRTIO_BLK_F_SEG_MAX | VIRTIO_BLK_F_FLUSH | VIRTIO_F_RING_INDIRECT_DESC
     );
     assert_eq!(
       virtio.set_backend(TestBackend::new(0)).unwrap_err().kind(),
@@ -1287,6 +1375,367 @@ mod tests {
     assert_eq!(second[255], 255);
     assert_eq!(memory.read::<u8>(VirtAddr(status)), Some(VIRTIO_BLK_S_OK));
     assert_eq!(read_u32(&memory, queue.used_addr + 8), 513);
+  }
+
+  #[test]
+  fn negotiated_indirect_descriptor_services_a_block_request() {
+    let backend = TestBackend::new(4096);
+    for (index, byte) in backend.0.borrow_mut().bytes[512..1024].iter_mut().enumerate() {
+      *byte = index as u8;
+    }
+    let (mut virtio, mut memory, queue) =
+      configured_with_features(backend, VIRTIO_F_RING_INDIRECT_DESC);
+    let table = BUFFER_BASE;
+    let header = BUFFER_BASE + 0x100;
+    let data = BUFFER_BASE + 0x200;
+    let status = BUFFER_BASE + 0x500;
+    write_header(&mut memory, header, VIRTIO_BLK_T_IN, 1);
+    write_desc_at(&mut memory, table, 0, header, 16, VIRTQ_DESC_F_NEXT, 1);
+    write_desc_at(
+      &mut memory,
+      table,
+      1,
+      data,
+      512,
+      VIRTQ_DESC_F_NEXT | VIRTQ_DESC_F_WRITE,
+      2,
+    );
+    write_desc_at(
+      &mut memory,
+      table,
+      2,
+      status,
+      1,
+      VIRTQ_DESC_F_WRITE,
+      0,
+    );
+    // WRITE belongs to the indirect table descriptor itself and must not affect the directions of
+    // the buffers inside the table.
+    write_desc(
+      &mut memory,
+      queue,
+      5,
+      table,
+      3 * VRING_DESC_SIZE as u32,
+      VIRTQ_DESC_F_INDIRECT | VIRTQ_DESC_F_WRITE,
+      u16::MAX,
+    );
+    publish(&mut memory, queue, QUEUE_SIZE, 0, 5);
+    notify(&mut virtio);
+
+    let result = virtio.service_queue(&mut memory);
+    assert_eq!(result.completed, 1);
+    assert!(result.dma_write);
+    let mut bytes = [0_u8; 512];
+    memory.read_bytes(VirtAddr(data), &mut bytes).unwrap();
+    assert_eq!(bytes[0], 0);
+    assert_eq!(bytes[255], 255);
+    assert_eq!(memory.read::<u8>(VirtAddr(status)), Some(VIRTIO_BLK_S_OK));
+    assert_eq!(read_u32(&memory, queue.used_addr + 4), 5);
+    assert_eq!(read_u32(&memory, queue.used_addr + 8), 513);
+  }
+
+  #[test]
+  fn indirect_descriptors_require_negotiation_and_reject_bad_tables() {
+    let (mut virtio, mut memory, queue) = configured(TestBackend::new(4096));
+    let table = BUFFER_BASE;
+    let header = BUFFER_BASE + 0x100;
+    let status = BUFFER_BASE + 0x200;
+    write_header(&mut memory, header, VIRTIO_BLK_T_FLUSH, 0);
+    write_desc_at(&mut memory, table, 0, header, 16, VIRTQ_DESC_F_NEXT, 1);
+    write_desc_at(
+      &mut memory,
+      table,
+      1,
+      status,
+      1,
+      VIRTQ_DESC_F_WRITE,
+      0,
+    );
+    write_desc(
+      &mut memory,
+      queue,
+      0,
+      table,
+      2 * VRING_DESC_SIZE as u32,
+      VIRTQ_DESC_F_INDIRECT,
+      0,
+    );
+    let mut descriptors = Vec::new();
+    assert!(!Virtio::descriptor_chain(
+      &memory,
+      queue,
+      QUEUE_SIZE,
+      0,
+      false,
+      &mut descriptors,
+    ));
+    publish(&mut memory, queue, QUEUE_SIZE, 0, 0);
+    notify(&mut virtio);
+    assert_eq!(virtio.service_queue(&mut memory).completed, 1);
+    assert_eq!(read_u32(&memory, queue.used_addr + 4), 0);
+    assert_eq!(read_u32(&memory, queue.used_addr + 8), 0);
+
+    assert!(Virtio::descriptor_chain(
+      &memory,
+      queue,
+      QUEUE_SIZE,
+      0,
+      true,
+      &mut descriptors,
+    ));
+    assert_eq!(descriptors.len(), 2);
+
+    write_desc(
+      &mut memory,
+      queue,
+      0,
+      table,
+      2 * VRING_DESC_SIZE as u32,
+      VIRTQ_DESC_F_INDIRECT | VIRTQ_DESC_F_NEXT,
+      1,
+    );
+    assert!(!Virtio::descriptor_chain(
+      &memory,
+      queue,
+      QUEUE_SIZE,
+      0,
+      true,
+      &mut descriptors,
+    ));
+
+    write_desc(
+      &mut memory,
+      queue,
+      0,
+      MEMORY_BASE + 0x20_000 - 8,
+      VRING_DESC_SIZE as u32,
+      VIRTQ_DESC_F_INDIRECT,
+      0,
+    );
+    assert!(!Virtio::descriptor_chain(
+      &memory,
+      queue,
+      QUEUE_SIZE,
+      0,
+      true,
+      &mut descriptors,
+    ));
+
+    write_desc(
+      &mut memory,
+      queue,
+      0,
+      table,
+      0,
+      VIRTQ_DESC_F_INDIRECT,
+      0,
+    );
+    assert!(!Virtio::descriptor_chain(
+      &memory,
+      queue,
+      QUEUE_SIZE,
+      0,
+      true,
+      &mut descriptors,
+    ));
+
+    write_desc(
+      &mut memory,
+      queue,
+      0,
+      table,
+      (2 * VRING_DESC_SIZE - 1) as u32,
+      VIRTQ_DESC_F_INDIRECT,
+      0,
+    );
+    assert!(!Virtio::descriptor_chain(
+      &memory,
+      queue,
+      QUEUE_SIZE,
+      0,
+      true,
+      &mut descriptors,
+    ));
+
+    write_desc(
+      &mut memory,
+      queue,
+      0,
+      table,
+      2 * VRING_DESC_SIZE as u32,
+      VIRTQ_DESC_F_INDIRECT,
+      0,
+    );
+    write_desc_at(&mut memory, table, 0, header, 16, VIRTQ_DESC_F_NEXT, 2);
+    assert!(!Virtio::descriptor_chain(
+      &memory,
+      queue,
+      QUEUE_SIZE,
+      0,
+      true,
+      &mut descriptors,
+    ));
+
+    write_desc_at(
+      &mut memory,
+      table,
+      0,
+      table + 0x100,
+      VRING_DESC_SIZE as u32,
+      VIRTQ_DESC_F_INDIRECT,
+      0,
+    );
+    write_desc(
+      &mut memory,
+      queue,
+      0,
+      table,
+      2 * VRING_DESC_SIZE as u32,
+      VIRTQ_DESC_F_INDIRECT,
+      0,
+    );
+    assert!(!Virtio::descriptor_chain(
+      &memory,
+      queue,
+      QUEUE_SIZE,
+      0,
+      true,
+      &mut descriptors,
+    ));
+
+    write_desc_at(&mut memory, table, 0, header, 16, VIRTQ_DESC_F_NEXT, 0);
+    assert!(!Virtio::descriptor_chain(
+      &memory,
+      queue,
+      QUEUE_SIZE,
+      0,
+      true,
+      &mut descriptors,
+    ));
+  }
+
+  #[test]
+  fn indirect_table_may_be_unaligned_and_larger_than_the_queue() {
+    let backend = TestBackend::new(4096);
+    let observer = backend.clone();
+    let (mut virtio, mut memory, queue) =
+      configured_with_features(backend, VIRTIO_F_RING_INDIRECT_DESC);
+    let header = BUFFER_BASE;
+    let data = BUFFER_BASE + 0x200;
+    let status = BUFFER_BASE + 0x500;
+    let table = BUFFER_BASE + 0x1001;
+    write_header(&mut memory, header, VIRTIO_BLK_T_OUT, 1);
+    memory
+      .write_bytes(VirtAddr(data), &[0x5a; 512])
+      .unwrap();
+
+    write_desc(
+      &mut memory,
+      queue,
+      0,
+      header,
+      16,
+      VIRTQ_DESC_F_NEXT,
+      1,
+    );
+    write_desc_at(
+      &mut memory,
+      table,
+      0,
+      data,
+      512,
+      VIRTQ_DESC_F_NEXT,
+      1,
+    );
+    write_desc_at(
+      &mut memory,
+      table,
+      1,
+      status,
+      1,
+      VIRTQ_DESC_F_WRITE,
+      0,
+    );
+    write_desc(
+      &mut memory,
+      queue,
+      1,
+      table,
+      (u32::from(QUEUE_SIZE) + 1) * VRING_DESC_SIZE as u32,
+      VIRTQ_DESC_F_INDIRECT,
+      0,
+    );
+    publish(&mut memory, queue, QUEUE_SIZE, 0, 0);
+    notify(&mut virtio);
+
+    let result = virtio.service_queue(&mut memory);
+    assert_eq!(result.completed, 1);
+    assert!(result.dma_write);
+    assert_eq!(memory.read::<u8>(VirtAddr(status)), Some(VIRTIO_BLK_S_OK));
+    assert!(observer.0.borrow().bytes[512..1024]
+      .iter()
+      .all(|byte| *byte == 0x5a));
+    assert_eq!(read_u32(&memory, queue.used_addr + 4), 0);
+    assert_eq!(read_u32(&memory, queue.used_addr + 8), 1);
+  }
+
+  #[test]
+  fn indirect_chain_accepts_exactly_queue_size_entries_but_not_more() {
+    let (_virtio, mut memory, queue) = configured(TestBackend::new(4096));
+    let table = BUFFER_BASE;
+    for index in 0..QUEUE_SIZE {
+      write_desc_at(
+        &mut memory,
+        table,
+        index,
+        BUFFER_BASE + 0x2000,
+        0,
+        if index + 1 == QUEUE_SIZE {
+          0
+        } else {
+          VIRTQ_DESC_F_NEXT
+        },
+        index + 1,
+      );
+    }
+    write_desc(
+      &mut memory,
+      queue,
+      0,
+      table,
+      (u32::from(QUEUE_SIZE) + 1) * VRING_DESC_SIZE as u32,
+      VIRTQ_DESC_F_INDIRECT,
+      0,
+    );
+    let mut descriptors = Vec::new();
+    assert!(Virtio::descriptor_chain(
+      &memory,
+      queue,
+      QUEUE_SIZE,
+      0,
+      true,
+      &mut descriptors,
+    ));
+    assert_eq!(descriptors.len(), usize::from(QUEUE_SIZE));
+
+    write_desc_at(
+      &mut memory,
+      table,
+      QUEUE_SIZE - 1,
+      BUFFER_BASE + 0x2000,
+      0,
+      VIRTQ_DESC_F_NEXT,
+      QUEUE_SIZE,
+    );
+    assert!(!Virtio::descriptor_chain(
+      &memory,
+      queue,
+      QUEUE_SIZE,
+      0,
+      true,
+      &mut descriptors,
+    ));
   }
 
   #[test]
@@ -1678,8 +2127,13 @@ mod tests {
   #[test]
   fn service_without_notify_is_idempotent_and_reset_clears_transport() {
     let backend = TestBackend::new(1024);
-    let (mut virtio, mut memory, _) = configured(backend);
+    let (mut virtio, mut memory, _) =
+      configured_with_features(backend, VIRTIO_F_RING_INDIRECT_DESC);
     assert_eq!(virtio.service_queue(&mut memory), VirtioServiceResult::default());
+    assert_eq!(
+      virtio.driver_features[0] & VIRTIO_F_RING_INDIRECT_DESC,
+      VIRTIO_F_RING_INDIRECT_DESC
+    );
     virtio.interrupt_status = 3;
     virtio.notify_pending = true;
     virtio.last_avail_idx = 7;
@@ -1693,6 +2147,7 @@ mod tests {
     assert_eq!(virtio.last_avail_idx, 0);
     assert_eq!(virtio.used_idx, 0);
     assert_eq!(virtio.guest_page_size, guest_page_size);
+    assert_eq!(virtio.driver_features, [0; 2]);
     assert_eq!(virtio.read::<u32>(VirtAddr(DEVICE_ID)).unwrap(), 2);
 
     virtio.write::<u32>(VirtAddr(QUEUE_SEL), 1).unwrap();

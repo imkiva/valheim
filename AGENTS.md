@@ -12,9 +12,9 @@ Valheim 是一个用 Rust 编写、以学习和参考实现为目的的 RISC-V 6
 - 256 MiB guest RAM；Debian 13 demo 现从外部 ext4 block rootfs 启动，不再把完整
   rootfs 内嵌进 kernel，但保留该内存规模供 Linux、page cache 和真实用户空间使用。
 - guest kernel/BIOS 必须是 raw binary，CLI 不解析 ELF。
-- VirtIO block 是 legacy VirtIO-MMIO version 1，队列上限为 128，支持 direct split-queue
-  descriptor chain、读写、FLUSH 和 `SEG_MAX=126`；Linux 5.17 的 legacy 驱动已通过
-  writable ext4 root 验证，要求 version 2 或 indirect descriptor 的 guest 驱动仍不兼容。
+- VirtIO block 是 legacy VirtIO-MMIO version 1，队列上限为 128，支持 direct 和协商后的
+  indirect split-queue descriptor chain、读写、FLUSH 和 `SEG_MAX=126`；Linux 5.17 的
+  legacy 驱动已通过 writable ext4 root 验证，要求 VirtIO-MMIO version 2 的 guest 驱动仍不兼容。
 - CLI 默认执行器是 `NaiveInterpreter`；`--engine jit` 启用 decoded-TB + Cranelift 分层
   JIT。system/F/D 等无法 native lower 的指令作为 fallback TB 起点且完整 fetch/decode 后，
   negative cache 会保存完整 `GuestInst`；命中后直接调用共享 CPU 语义执行。native 路径可在
@@ -38,7 +38,7 @@ Valheim 是一个用 Rust 编写、以学习和参考实现为目的的 RISC-V 6
 | `valheim-core/` | 模拟器核心：CPU/寄存器、CSR、异常和中断、MMU、指令执行、解释器、内存总线、设备、DTB、运行循环和 trace。 |
 | `valheim-core/src/cpu/` | CPU 状态、执行语义、CSR、异常/中断、系统总线，以及解释器/JIT 共用的唯一 `translate_to_host()` 页表与权限逻辑。 |
 | `valheim-core/src/interp/` | 共享 `RV64Executor`/`ExecOutcome` 执行器契约与朴素解释器实现。 |
-| `valheim-core/src/device/` | CLINT、level-aware PLIC、NS16550A UART 和支持 split queue/FLUSH 的 legacy VirtIO block。 |
+| `valheim-core/src/device/` | CLINT、level-aware PLIC、NS16550A UART 和支持 direct/indirect split queue、FLUSH 的 legacy VirtIO block。 |
 | `valheim-core/src/machine/` | 将 CPU、可注入执行器、DTB、UART、kernel、BIOS 和磁盘组合成可运行的虚拟机。 |
 | `valheim-jit/` | decoded TB/cache/runtime、页内 fetch translation cache、Cranelift RV64I/M lowering、A 扩展 helper、software TLB 和 DRAM fast path。 |
 | `valheim-cli/` | `valheim-cli` 命令行入口，负责参数解析和加载镜像。 |
@@ -546,9 +546,9 @@ openEuler 演示没有固定的 BIOS、kernel、rootfs、下载脚本或版本 h
   Fetch/Read/Write 类型报告 guest VA；跨页数据访问应报告实际故障 fragment 的 VA，不能
   把页表或 endpoint 的物理地址泄漏进 `mtval/stval`。解释器与 JIT slow path 共用该不变量。
 - 测试和普通运行循环都没有 watchdog/超时，坏 guest 可能永久循环。
-- 当前 VirtIO 是 legacy version 1，QueueNumMax 为 128，公布 FLUSH 和 SEG_MAX（126）并只
-  接受 direct descriptor chain；必须选择明确支持 legacy VirtIO-MMIO v1 且不要求 indirect
-  descriptor 的 guest 驱动，不能只根据 guest 的发布年份判断。
+- 当前 VirtIO 是 legacy version 1，QueueNumMax 为 128，公布 FLUSH、SEG_MAX（126）和
+  `VIRTIO_F_RING_INDIRECT_DESC`，接受 direct 以及协商后的 indirect descriptor chain；仍必须
+  选择明确支持 legacy VirtIO-MMIO v1 的 guest 驱动，不能只根据 guest 的发布年份判断。
 - RustSBI 历史 test kernel 的 success marker 来自明确记录的单 hart patch；不要声称未修改的上游多 hart HSM 测试在 Valheim 上完整通过。
 - Debian 13 demo 的 rootfs 必须继续来自已固定并校验的官方 OCI artifact；不要用 BusyBox、手写 `/etc/os-release` 或自制目录树冒充 Debian。
 - Linux ext4 base 必须在同一个 `fakeroot` 会话中解包 OCI layer、创建 overlay/device node
