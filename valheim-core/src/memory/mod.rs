@@ -150,6 +150,12 @@ impl Memory {
     Some(())
   }
 
+  /// Borrows a byte slice only when the complete guest-physical range belongs to DRAM.
+  pub fn slice(&self, addr: VirtAddr, width: usize) -> Option<&[u8]> {
+    let offset = self.offset_for_range(addr, width)?;
+    self.memory.get(offset..offset + width)
+  }
+
   /// Copies `src` into DRAM after validating the complete guest-physical range.
   pub fn write_bytes(&mut self, addr: VirtAddr, src: &[u8]) -> Option<()> {
     if src.is_empty() {
@@ -255,5 +261,17 @@ mod test {
     assert_eq!(destination, source);
     assert_eq!(mem.write_bytes(VirtAddr(0x1005), &source), None);
     assert_eq!(mem.read_bytes(VirtAddr(0x0fff), &mut destination), None);
+  }
+
+  #[test]
+  fn memory_slices_check_the_complete_range() {
+    let mut mem = Memory::new(0x1000, 8).unwrap();
+    mem.write_bytes(VirtAddr(0x1002), &[1, 2, 3, 4]).unwrap();
+
+    assert_eq!(mem.slice(VirtAddr(0x1002), 4), Some(&[1, 2, 3, 4][..]));
+    assert_eq!(mem.slice(VirtAddr(0x1008), 0), Some(&[][..]));
+    assert!(mem.slice(VirtAddr(0x1007), 2).is_none());
+    assert!(mem.slice(VirtAddr(0x0fff), 1).is_none());
+    assert!(mem.slice(VirtAddr(u64::MAX), 2).is_none());
   }
 }

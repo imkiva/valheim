@@ -73,6 +73,11 @@ const CONFIG_END: u64 = VIRTIO_BASE + 0x10f;
 /// Storage operations required by the VirtIO block transport.
 pub trait BlockBackend {
   fn len(&self) -> u64;
+  /// Borrows a fully checked backend range when direct reads are supported. A successful slice
+  /// must have exactly `width` bytes.
+  fn read_slice(&self, _offset: u64, _width: usize) -> Option<io::Result<&[u8]>> {
+    None
+  }
   /// Fills the complete buffer on success. Partial reads must return an error.
   fn read_at(&self, offset: u64, buffer: &mut [u8]) -> io::Result<()>;
   /// Writes the complete buffer on success. Partial writes must return an error.
@@ -103,6 +108,13 @@ impl BlockBackend for MmapMut {
     let range = checked_backend_range(AsRef::<[u8]>::as_ref(self).len(), offset, buffer.len())?;
     buffer.copy_from_slice(&self[range]);
     Ok(())
+  }
+
+  fn read_slice(&self, offset: u64, width: usize) -> Option<io::Result<&[u8]>> {
+    Some(
+      checked_backend_range(AsRef::<[u8]>::as_ref(self).len(), offset, width)
+        .map(|range| &self[range]),
+    )
   }
 
   fn write_at(&mut self, offset: u64, buffer: &[u8]) -> io::Result<()> {
@@ -600,15 +612,20 @@ impl Virtio {
       let descriptor_len = descriptor.len as usize;
       while descriptor_offset < descriptor_len {
         let chunk_len = COPY_CHUNK_SIZE.min(descriptor_len - descriptor_offset);
-        let chunk = &mut buffer[..chunk_len];
-        if backend.read_at(disk_offset, chunk).is_err()
-          || memory
-            .write_bytes(
-              VirtAddr(descriptor.addr + descriptor_offset as u64),
-              chunk,
-            )
-            .is_none()
-        {
+        let guest_addr = VirtAddr(descriptor.addr + descriptor_offset as u64);
+        let copied = match backend.read_slice(disk_offset, chunk_len) {
+          Some(Ok(chunk)) if chunk.len() == chunk_len => {
+            memory.write_bytes(guest_addr, chunk).is_some()
+          }
+          Some(Ok(_)) => false,
+          Some(Err(_)) => false,
+          None => {
+            let chunk = &mut buffer[..chunk_len];
+            backend.read_at(disk_offset, chunk).is_ok()
+              && memory.write_bytes(guest_addr, chunk).is_some()
+          }
+        };
+        if !copied {
           result.status = VIRTIO_BLK_S_IOERR;
           return result;
         }
@@ -640,7 +657,7 @@ impl Virtio {
       return RequestResult::io_error();
     };
 
-    let (Some(backend), buffer) = (self.backend.as_mut(), &mut self.transfer_scratch) else {
+    let Some(backend) = self.backend.as_mut() else {
       return RequestResult::io_error();
     };
     let mut disk_offset = start;
@@ -649,15 +666,11 @@ impl Virtio {
       let descriptor_len = descriptor.len as usize;
       while descriptor_offset < descriptor_len {
         let chunk_len = COPY_CHUNK_SIZE.min(descriptor_len - descriptor_offset);
-        let chunk = &mut buffer[..chunk_len];
-        if memory
-          .read_bytes(
-            VirtAddr(descriptor.addr + descriptor_offset as u64),
-            chunk,
-          )
-          .is_none()
-          || backend.write_at(disk_offset, chunk).is_err()
-        {
+        let guest_addr = VirtAddr(descriptor.addr + descriptor_offset as u64);
+        let Some(chunk) = memory.slice(guest_addr, chunk_len) else {
+          return RequestResult::io_error();
+        };
+        if backend.write_at(disk_offset, chunk).is_err() {
           return RequestResult::io_error();
         }
         descriptor_offset += chunk_len;
@@ -956,8 +969,8 @@ mod tests {
     u32::from_le_bytes(bytes)
   }
 
-  fn configured_with_queue_size(
-    backend: TestBackend,
+  fn configured_with_queue_size<B: BlockBackend + 'static>(
+    backend: B,
     queue_size: u16,
   ) -> (Virtio, Memory, VirtqueueAddr) {
     let mut virtio = Virtio::new(0);
@@ -1100,6 +1113,13 @@ mod tests {
     let mut bytes = [0_u8; 3];
     BlockBackend::read_at(&mmap, 7, &mut bytes).unwrap();
     assert_eq!(bytes, [1, 2, 3]);
+    assert_eq!(
+      BlockBackend::read_slice(&mmap, 7, 3).unwrap().unwrap(),
+      &[1, 2, 3]
+    );
+    assert!(BlockBackend::read_slice(&mmap, 511, 3)
+      .unwrap()
+      .is_err());
     BlockBackend::flush(&mut mmap).unwrap();
     assert!(BlockBackend::read_at(&mmap, 511, &mut bytes).is_err());
     drop(mmap);
@@ -1110,6 +1130,66 @@ mod tests {
     file.read_exact(&mut bytes).unwrap();
     assert_eq!(bytes, [1, 2, 3]);
     remove_file(path).unwrap();
+  }
+
+  #[test]
+  fn mmap_backend_copies_directly_to_and_from_guest_dram() {
+    let mut mmap = MmapMut::map_anon(4096).unwrap();
+    for (index, byte) in mmap[0..512].iter_mut().enumerate() {
+      *byte = index as u8;
+    }
+    let (mut virtio, mut memory, queue) = configured_with_queue_size(mmap, QUEUE_SIZE);
+    let header = BUFFER_BASE;
+    let first_data = BUFFER_BASE + 0x100;
+    let second_data = BUFFER_BASE + 0x400;
+    let status = BUFFER_BASE + 0x700;
+
+    write_header(&mut memory, header, VIRTIO_BLK_T_IN, 0);
+    write_desc(&mut memory, queue, 0, header, 16, VIRTQ_DESC_F_NEXT, 1);
+    write_desc(
+      &mut memory,
+      queue,
+      1,
+      first_data,
+      512,
+      VIRTQ_DESC_F_NEXT | VIRTQ_DESC_F_WRITE,
+      2,
+    );
+    write_desc(&mut memory, queue, 2, status, 1, VIRTQ_DESC_F_WRITE, 0);
+    publish(&mut memory, queue, QUEUE_SIZE, 0, 0);
+    notify(&mut virtio);
+    assert_eq!(virtio.service_queue(&mut memory).completed, 1);
+    let first = memory.slice(VirtAddr(first_data), 512).unwrap();
+    assert_eq!(first[0], 0);
+    assert_eq!(first[255], 255);
+
+    memory
+      .write_bytes(VirtAddr(first_data), &[0xa5; 512])
+      .unwrap();
+    write_header(&mut memory, header, VIRTIO_BLK_T_OUT, 1);
+    write_desc(&mut memory, queue, 1, first_data, 512, VIRTQ_DESC_F_NEXT, 2);
+    publish(&mut memory, queue, QUEUE_SIZE, 1, 0);
+    notify(&mut virtio);
+    assert_eq!(virtio.service_queue(&mut memory).completed, 1);
+
+    write_header(&mut memory, header, VIRTIO_BLK_T_IN, 1);
+    write_desc(
+      &mut memory,
+      queue,
+      1,
+      second_data,
+      512,
+      VIRTQ_DESC_F_NEXT | VIRTQ_DESC_F_WRITE,
+      2,
+    );
+    publish(&mut memory, queue, QUEUE_SIZE, 2, 0);
+    notify(&mut virtio);
+    assert_eq!(virtio.service_queue(&mut memory).completed, 1);
+    assert!(memory
+      .slice(VirtAddr(second_data), 512)
+      .unwrap()
+      .iter()
+      .all(|byte| *byte == 0xa5));
   }
 
   #[test]
