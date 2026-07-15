@@ -10,7 +10,7 @@ use crate::memory::{CanIO, Memory, VirtAddr};
 pub const VIRTIO_IRQ: u64 = 1;
 
 const VRING_DESC_SIZE: u64 = 16;
-const QUEUE_SIZE: u16 = 8;
+const QUEUE_SIZE: u16 = 128;
 const SECTOR_SIZE: u64 = 512;
 const COPY_CHUNK_SIZE: usize = 64 * 1024;
 
@@ -929,14 +929,19 @@ mod tests {
     u32::from_le_bytes(bytes)
   }
 
-  fn configured(backend: TestBackend) -> (Virtio, Memory, VirtqueueAddr) {
+  fn configured_with_queue_size(
+    backend: TestBackend,
+    queue_size: u16,
+  ) -> (Virtio, Memory, VirtqueueAddr) {
     let mut virtio = Virtio::new(0);
     virtio.set_backend(backend).unwrap();
     let memory = Memory::new(MEMORY_BASE, 0x20_000).unwrap();
     virtio
       .write::<u32>(VirtAddr(GUEST_PAGE_SIZE), 0x1000)
       .unwrap();
-    virtio.write::<u32>(VirtAddr(QUEUE_NUM), 8).unwrap();
+    virtio
+      .write::<u32>(VirtAddr(QUEUE_NUM), u32::from(queue_size))
+      .unwrap();
     virtio
       .write::<u32>(VirtAddr(QUEUE_ALIGN), 0x1000)
       .unwrap();
@@ -948,6 +953,10 @@ mod tests {
       .unwrap();
     let queue = VirtqueueAddr::from_device(&virtio).unwrap();
     (virtio, memory, queue)
+  }
+
+  fn configured(backend: TestBackend) -> (Virtio, Memory, VirtqueueAddr) {
+    configured_with_queue_size(backend, QUEUE_SIZE)
   }
 
   fn write_desc(
@@ -979,10 +988,16 @@ mod tests {
     memory.write_bytes(VirtAddr(address), &bytes).unwrap();
   }
 
-  fn publish(memory: &mut Memory, queue: VirtqueueAddr, index: u16, head: u16) {
+  fn publish(
+    memory: &mut Memory,
+    queue: VirtqueueAddr,
+    queue_size: u16,
+    index: u16,
+    head: u16,
+  ) {
     write_u16(
       memory,
-      queue.avail_addr + 4 + u64::from(index % QUEUE_SIZE) * 2,
+      queue.avail_addr + 4 + u64::from(index % queue_size) * 2,
       head,
     );
     write_u16(memory, queue.avail_addr + 2, index.wrapping_add(1));
@@ -996,6 +1011,10 @@ mod tests {
   fn backend_validation_and_device_discovery() {
     let mut virtio = Virtio::new(99);
     assert_eq!(virtio.read::<u32>(VirtAddr(DEVICE_ID)).unwrap(), 0);
+    assert_eq!(
+      virtio.read::<u32>(VirtAddr(QUEUE_NUM_MAX)).unwrap(),
+      u32::from(QUEUE_SIZE)
+    );
     assert_eq!(
       virtio.read::<u32>(VirtAddr(DEVICE_FEATURES)).unwrap(),
       VIRTIO_BLK_F_FLUSH
@@ -1069,7 +1088,7 @@ mod tests {
       7,
     );
     write_desc(&mut memory, queue, 7, status, 1, VIRTQ_DESC_F_WRITE, 0);
-    publish(&mut memory, queue, 0, 5);
+    publish(&mut memory, queue, QUEUE_SIZE, 0, 5);
     notify(&mut virtio);
 
     let result = virtio.service_queue(&mut memory);
@@ -1120,8 +1139,8 @@ mod tests {
         0,
       );
     }
-    publish(&mut memory, queue, 0, 1);
-    publish(&mut memory, queue, 1, 4);
+    publish(&mut memory, queue, QUEUE_SIZE, 0, 1);
+    publish(&mut memory, queue, QUEUE_SIZE, 1, 4);
     notify(&mut virtio);
 
     let result = virtio.service_queue(&mut memory);
@@ -1159,7 +1178,7 @@ mod tests {
       VIRTQ_DESC_F_WRITE,
       0,
     );
-    publish(&mut memory, queue, 0, 2);
+    publish(&mut memory, queue, QUEUE_SIZE, 0, 2);
     notify(&mut virtio);
     let result = virtio.service_queue(&mut memory);
     assert_eq!(result.completed, 1);
@@ -1171,7 +1190,7 @@ mod tests {
     memory
       .write::<u8>(VirtAddr(BUFFER_BASE + 0x100), 0xff)
       .unwrap();
-    publish(&mut memory, queue, 1, 2);
+    publish(&mut memory, queue, QUEUE_SIZE, 1, 2);
     notify(&mut virtio);
     assert_eq!(virtio.service_queue(&mut memory).completed, 1);
     assert_eq!(observer.0.borrow().flushes, 2);
@@ -1190,7 +1209,8 @@ mod tests {
   #[test]
   fn available_and_used_indices_wrap() {
     let backend = TestBackend::new(4096);
-    let (mut virtio, mut memory, queue) = configured(backend);
+    let queue_size = 8;
+    let (mut virtio, mut memory, queue) = configured_with_queue_size(backend, queue_size);
     for (head, base) in [(0_u16, BUFFER_BASE), (2_u16, BUFFER_BASE + 0x200)] {
       write_header(&mut memory, base, VIRTIO_BLK_T_FLUSH, 0);
       write_desc(&mut memory, queue, head, base, 16, VIRTQ_DESC_F_NEXT, head + 1);
@@ -1206,7 +1226,12 @@ mod tests {
     }
     virtio.last_avail_idx = u16::MAX;
     virtio.used_idx = u16::MAX;
-    write_u16(&mut memory, queue.avail_addr + 4 + 7 * 2, 0);
+    let wrapped_slot = u64::from(u16::MAX % queue_size);
+    write_u16(
+      &mut memory,
+      queue.avail_addr + 4 + wrapped_slot * 2,
+      0,
+    );
     write_u16(&mut memory, queue.avail_addr + 4, 2);
     write_u16(&mut memory, queue.avail_addr + 2, 1);
     notify(&mut virtio);
@@ -1214,7 +1239,10 @@ mod tests {
     assert_eq!(virtio.service_queue(&mut memory).completed, 2);
     assert_eq!(virtio.last_avail_idx, 1);
     assert_eq!(virtio.used_idx, 1);
-    assert_eq!(read_u32(&memory, queue.used_addr + 4 + 7 * 8), 0);
+    assert_eq!(
+      read_u32(&memory, queue.used_addr + 4 + wrapped_slot * 8),
+      0
+    );
     assert_eq!(read_u32(&memory, queue.used_addr + 4), 2);
     assert_eq!(read_u16(&memory, queue.used_addr + 2), 1);
   }
@@ -1232,7 +1260,7 @@ mod tests {
       VIRTQ_DESC_F_NEXT,
       0,
     );
-    publish(&mut memory, queue, 0, 0);
+    publish(&mut memory, queue, QUEUE_SIZE, 0, 0);
     notify(&mut virtio);
     let result = virtio.service_queue(&mut memory);
     assert_eq!(result.completed, 1);
@@ -1259,7 +1287,7 @@ mod tests {
       VIRTQ_DESC_F_WRITE,
       0,
     );
-    publish(&mut memory, queue, 1, 1);
+    publish(&mut memory, queue, QUEUE_SIZE, 1, 1);
     notify(&mut virtio);
     assert_eq!(virtio.service_queue(&mut memory).completed, 1);
     assert_eq!(
@@ -1287,7 +1315,7 @@ mod tests {
       VIRTQ_DESC_F_WRITE,
       0,
     );
-    publish(&mut memory, queue, 2, 4);
+    publish(&mut memory, queue, QUEUE_SIZE, 2, 4);
     notify(&mut virtio);
     assert_eq!(virtio.service_queue(&mut memory).completed, 1);
     assert_eq!(
@@ -1311,7 +1339,7 @@ mod tests {
       VIRTQ_DESC_F_WRITE,
       0,
     );
-    publish(&mut memory, queue, 0, 0);
+    publish(&mut memory, queue, QUEUE_SIZE, 0, 0);
     notify(&mut virtio);
     assert_eq!(virtio.service_queue(&mut memory).completed, 1);
     assert_eq!(
