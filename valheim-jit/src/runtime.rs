@@ -1513,6 +1513,48 @@ mod tests {
   }
 
   #[test]
+  fn precise_system_exit_restores_attempted_pc_and_raw_instruction() {
+    let mut cpu = RV64Cpu::new(None);
+    let start = RV64_MEMORY_BASE;
+    let first_raw = 0x0010_0093; // addi x1, x0, 1
+    let fault_raw = 0xffff_ffff;
+    let block = GuestBlock {
+      start_pc: start,
+      instructions: vec![
+        GuestInst {
+          pc: start,
+          raw: first_raw,
+          len: 4,
+          decoded: Instr::decode32(first_raw).unwrap(),
+        },
+        GuestInst {
+          pc: start + 4,
+          raw: 0x0020_0113,
+          len: 4,
+          decoded: Instr::decode32(0x0020_0113).unwrap(),
+        },
+      ],
+    };
+    let mut tlb = SoftwareTlb::new();
+    let mut frame = JitExecutor::new_native_frame(&mut tlb, &mut cpu);
+    frame.exit_kind = crate::memory::EXIT_ILLEGAL_INSTRUCTION;
+    frame.fault_pc = start + 4;
+    frame.raw_instr = fault_raw;
+    frame.attempted = 2;
+
+    let exit = JitExecutor::finish_native_exit(&mut cpu, &block, &frame, 2, false);
+
+    assert_eq!(
+      exit.outcome,
+      ExecOutcome::new(2, Err(Exception::IllegalInstruction))
+    );
+    assert_eq!(cpu.read_pc(), VirtAddr(start + 4));
+    assert_eq!(cpu.instr, fault_raw as u64);
+    assert_eq!(exit.pending_index, None);
+    assert!(!exit.completed_block);
+  }
+
+  #[test]
   fn system_fallback_profile_distinguishes_csr_reads_and_writes() {
     let mut cpu = RV64Cpu::new(None);
     let pc = VirtAddr(RV64_MEMORY_BASE);

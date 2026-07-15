@@ -2,6 +2,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use valheim_core::cpu::irq::Exception;
 use valheim_core::cpu::mmu::{AccessType, TranslationTarget, PAGE_SHIFT};
+use valheim_core::cpu::PrivilegeMode;
 use valheim_core::memory::VirtAddr;
 
 use crate::cranelift::JitFrame;
@@ -15,6 +16,9 @@ const FAULT_LOAD_PAGE: u32 = 5;
 const FAULT_STORE_PAGE: u32 = 6;
 pub const EXIT_SLOW_MEMORY: u32 = 7;
 pub const EXIT_DEFER_MEMORY: u32 = 8;
+pub const EXIT_ILLEGAL_INSTRUCTION: u32 = 9;
+pub const EXIT_BREAKPOINT: u32 = 10;
+pub const EXIT_ECALL: u32 = 11;
 
 pub const TLB_ACCESS_READ: u32 = 0;
 pub const TLB_ACCESS_WRITE: u32 = 1;
@@ -119,25 +123,37 @@ pub const WIDTH_16: u32 = 1;
 pub const WIDTH_32: u32 = 2;
 pub const WIDTH_64: u32 = 3;
 
-/// Records a precise native side-exit exception and accounts it in the shared JIT memory stats.
+/// Records a precise native side-exit exception.
 ///
-/// All fallible helpers use this function so the private numeric encoding cannot drift between
-/// ordinary memory operations and A-extension operations.
+/// Data-memory faults are also accounted in the shared JIT memory stats. System exceptions must
+/// not increment that counter: future fallible system helpers can therefore use the same private
+/// numeric encoding without making the native TLB fault statistic include non-memory exits.
 pub(crate) unsafe fn record_exception(frame: *mut JitFrame, exception: Exception) {
   let frame = &mut *frame;
-  let (kind, address) = match exception {
-    Exception::LoadAccessFault(address) => (FAULT_LOAD_ACCESS, address),
-    Exception::StoreAccessFault(address) => (FAULT_STORE_ACCESS, address),
-    Exception::LoadAddressMisaligned(address) => (FAULT_LOAD_MISALIGNED, address),
-    Exception::StoreAddressMisaligned(address) => (FAULT_STORE_MISALIGNED, address),
-    Exception::LoadPageFault(address) => (FAULT_LOAD_PAGE, address),
-    Exception::StorePageFault(address) => (FAULT_STORE_PAGE, address),
-    _ => (FAULT_LOAD_ACCESS, VirtAddr(frame.fault_pc)),
+  let (kind, address, memory_fault) = match exception {
+    Exception::LoadAccessFault(address) => (FAULT_LOAD_ACCESS, address, true),
+    Exception::StoreAccessFault(address) => (FAULT_STORE_ACCESS, address, true),
+    Exception::LoadAddressMisaligned(address) => (FAULT_LOAD_MISALIGNED, address, true),
+    Exception::StoreAddressMisaligned(address) => (FAULT_STORE_MISALIGNED, address, true),
+    Exception::LoadPageFault(address) => (FAULT_LOAD_PAGE, address, true),
+    Exception::StorePageFault(address) => (FAULT_STORE_PAGE, address, true),
+    Exception::IllegalInstruction => (EXIT_ILLEGAL_INSTRUCTION, VirtAddr(0), false),
+    Exception::Breakpoint => (EXIT_BREAKPOINT, VirtAddr(0), false),
+    Exception::UserEcall | Exception::SupervisorEcall | Exception::MachineEcall => {
+      (EXIT_ECALL, VirtAddr(0), false)
+    }
+    Exception::InstructionAddressMisaligned(_)
+    | Exception::InstructionAccessFault(_)
+    | Exception::InstructionPageFault(_) => {
+      unreachable!("instruction-fetch exception cannot originate in a native helper")
+    }
   };
   frame.exit_kind = kind;
   frame.fault_addr = address.0;
-  if let Some(stats) = frame.tlb_stats.as_mut() {
-    stats.faults = stats.faults.saturating_add(1);
+  if memory_fault {
+    if let Some(stats) = frame.tlb_stats.as_mut() {
+      stats.faults = stats.faults.saturating_add(1);
+    }
   }
 }
 
@@ -207,6 +223,16 @@ pub fn exception_from_frame(frame: &JitFrame) -> Option<Exception> {
     FAULT_STORE_MISALIGNED => Some(Exception::StoreAddressMisaligned(address)),
     FAULT_LOAD_PAGE => Some(Exception::LoadPageFault(address)),
     FAULT_STORE_PAGE => Some(Exception::StorePageFault(address)),
+    EXIT_ILLEGAL_INSTRUCTION => Some(Exception::IllegalInstruction),
+    EXIT_BREAKPOINT => Some(Exception::Breakpoint),
+    EXIT_ECALL => {
+      let cpu = unsafe { frame.cpu.as_ref() }.expect("native frame has a null CPU pointer");
+      Some(match cpu.mode {
+        PrivilegeMode::User => Exception::UserEcall,
+        PrivilegeMode::Supervisor => Exception::SupervisorEcall,
+        PrivilegeMode::Machine => Exception::MachineEcall,
+      })
+    }
     EXIT_SLOW_MEMORY | EXIT_DEFER_MEMORY => None,
     _ => Some(Exception::LoadAccessFault(address)),
   }
@@ -218,4 +244,81 @@ pub fn is_slow_memory_exit(frame: &JitFrame) -> bool {
 
 pub fn is_deferred_memory_exit(frame: &JitFrame) -> bool {
   frame.exit_kind == EXIT_DEFER_MEMORY
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use valheim_core::cpu::RV64Cpu;
+
+  fn frame_with_stats(cpu: &mut RV64Cpu, stats: &mut TlbStats) -> JitFrame {
+    let xregs = cpu.regs.x.as_mut_ptr();
+    JitFrame::new(
+      cpu,
+      xregs,
+      std::ptr::null_mut(),
+      std::ptr::null_mut(),
+      1,
+      stats,
+    )
+  }
+
+  #[test]
+  fn unified_ecall_exit_uses_current_privilege_mode() {
+    let mut cpu = RV64Cpu::new(None);
+    let mut stats = TlbStats::default();
+    let mut frame = frame_with_stats(&mut cpu, &mut stats);
+    frame.exit_kind = EXIT_ECALL;
+
+    for (mode, expected) in [
+      (PrivilegeMode::User, Exception::UserEcall),
+      (PrivilegeMode::Supervisor, Exception::SupervisorEcall),
+      (PrivilegeMode::Machine, Exception::MachineEcall),
+    ] {
+      cpu.mode = mode;
+      assert_eq!(exception_from_frame(&frame), Some(expected));
+    }
+  }
+
+  #[test]
+  fn system_exit_kinds_restore_exact_exceptions() {
+    let mut cpu = RV64Cpu::new(None);
+    let mut stats = TlbStats::default();
+    let mut frame = frame_with_stats(&mut cpu, &mut stats);
+
+    frame.exit_kind = EXIT_ILLEGAL_INSTRUCTION;
+    assert_eq!(
+      exception_from_frame(&frame),
+      Some(Exception::IllegalInstruction)
+    );
+    frame.exit_kind = EXIT_BREAKPOINT;
+    assert_eq!(exception_from_frame(&frame), Some(Exception::Breakpoint));
+  }
+
+  #[test]
+  fn system_exceptions_do_not_increment_memory_fault_stats() {
+    let mut cpu = RV64Cpu::new(None);
+    let mut stats = TlbStats::default();
+    let mut frame = frame_with_stats(&mut cpu, &mut stats);
+
+    unsafe {
+      record_exception(&mut frame, Exception::IllegalInstruction);
+    }
+    assert_eq!(frame.exit_kind, EXIT_ILLEGAL_INSTRUCTION);
+    assert_eq!(stats.faults, 0);
+
+    unsafe {
+      record_exception(&mut frame, Exception::MachineEcall);
+    }
+    assert_eq!(frame.exit_kind, EXIT_ECALL);
+    assert_eq!(stats.faults, 0);
+
+    let address = VirtAddr(0x1234);
+    unsafe {
+      record_exception(&mut frame, Exception::LoadPageFault(address));
+    }
+    assert_eq!(frame.exit_kind, FAULT_LOAD_PAGE);
+    assert_eq!(frame.fault_addr, address.0);
+    assert_eq!(stats.faults, 1);
+  }
 }

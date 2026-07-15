@@ -397,7 +397,7 @@ impl<'a, 'b> Lowering<'a, 'b> {
       .store(self.frame_flags, value, self.frame, offset as i32);
   }
 
-  fn prepare_memory_access(&mut self, inst: GuestInst, attempted: u32) {
+  fn prepare_precise_exit(&mut self, inst: GuestInst, attempted: u32) {
     self.store_frame_i32(offset_of!(JitFrame, exit_kind), FAULT_NONE);
     self.store_frame_i64(offset_of!(JitFrame, fault_pc), inst.pc);
     self.store_frame_i32(offset_of!(JitFrame, raw_instr), inst.raw);
@@ -418,7 +418,7 @@ impl<'a, 'b> Lowering<'a, 'b> {
     }
   }
 
-  fn return_memory_exit(&mut self, attempted: u32) {
+  fn return_precise_exit(&mut self, attempted: u32) {
     self.flush_dirty_registers();
     let fault_pc = self.builder.ins().load(
       types::I64,
@@ -450,7 +450,7 @@ impl<'a, 'b> Lowering<'a, 'b> {
     self.builder.ins().brif(failed, exit, &[], resume, &[]);
 
     self.builder.switch_to_block(exit);
-    self.return_memory_exit(attempted);
+    self.return_precise_exit(attempted);
 
     self.builder.switch_to_block(resume);
   }
@@ -498,10 +498,10 @@ impl<'a, 'b> Lowering<'a, 'b> {
         .brif(crosses_page, slow, &[], lookup, &[]);
 
       self.builder.switch_to_block(slow);
-      self.prepare_memory_access(inst, attempted);
+      self.prepare_precise_exit(inst, attempted);
       self.store_frame_i32(offset_of!(JitFrame, exit_kind), EXIT_SLOW_MEMORY);
       self.increment_tlb_stat(offset_of!(TlbStats, slow_paths));
-      self.return_memory_exit(attempted);
+      self.return_precise_exit(attempted);
 
       self.builder.switch_to_block(lookup);
     }
@@ -574,13 +574,13 @@ impl<'a, 'b> Lowering<'a, 'b> {
         .brif(should_defer, defer_exit, &[], fill, &[]);
 
       self.builder.switch_to_block(defer_exit);
-      self.prepare_memory_access(inst, attempted);
+      self.prepare_precise_exit(inst, attempted);
       self.store_frame_i32(offset_of!(JitFrame, exit_kind), EXIT_DEFER_MEMORY);
-      self.return_memory_exit(attempted);
+      self.return_precise_exit(attempted);
 
       self.builder.switch_to_block(fill);
     }
-    self.prepare_memory_access(inst, attempted);
+    self.prepare_precise_exit(inst, attempted);
     let access_value = self.builder.ins().iconst(types::I32, access as i64);
     let call = self
       .builder
@@ -604,7 +604,7 @@ impl<'a, 'b> Lowering<'a, 'b> {
       .brif(failed, miss_exit, &[], miss_ready, &[]);
 
     self.builder.switch_to_block(miss_exit);
-    self.return_memory_exit(attempted);
+    self.return_precise_exit(attempted);
 
     self.builder.switch_to_block(miss_ready);
     self.builder.ins().jump(ready, &[filled_host_page]);
@@ -685,7 +685,7 @@ impl<'a, 'b> Lowering<'a, 'b> {
       Some(rs2) => self.read(rs2)?,
       None => self.iconst(0),
     };
-    self.prepare_memory_access(inst, attempted);
+    self.prepare_precise_exit(inst, attempted);
     let operation = self
       .builder
       .ins()
