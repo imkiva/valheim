@@ -13,7 +13,8 @@ Valheim 是一个用 Rust 编写、以学习和参考实现为目的的 RISC-V 6
 - guest kernel/BIOS 必须是 raw binary，CLI 不解析 ELF。
 - VirtIO block 是 legacy VirtIO-MMIO version 1，队列长度为 8；现代要求 version 2 的 guest 驱动不兼容。
 - CLI 默认执行器是 `NaiveInterpreter`；`--engine jit` 启用 decoded-TB + Cranelift 分层
-  JIT，不支持的 system/F/D 指令精确回退到解释器。
+  JIT，不支持的 system/F/D 指令精确回退到解释器。native 路径可在一个 Machine budget
+  内批量执行多个 TB，并用 generation-guarded successor cache 连接常见边。
 - JIT-enabled CLI 和完整 workspace 明确只支持 Linux x86_64 System V ABI；
   `valheim-core` 等不依赖 `valheim-jit` 的 crate 仍可单独构建。
 - UART 直接连接宿主标准输入和标准输出，并实现 Linux 8250 驱动需要的 DLAB、IIR、RX/TX 中断和状态位。
@@ -172,7 +173,7 @@ cargo +nightly-2024-09-05 start \
 - `--test`：按 `riscv-tests` 的 ECALL 约定运行并返回测试退出码。
 - `--test-name`：测试输出中使用的名称。
 - `--engine naive|jit`：选择执行器，默认 `naive`。
-- `--jit-hot-threshold`：TB 在 decoded 层成功执行多少次后编译，默认 500，最小 1。
+- `--jit-hot-threshold`：TB 在 decoded 层成功执行多少次后编译，默认 750，最小 1。
 - `--jit-max-block-len`：每个 TB 的最大 guest 指令数，默认 32，有效范围 1–32。
 - `--jit-max-compiled-blocks`：每个 Cranelift module 的函数上限，默认 4096。
 - `--jit-max-code-bytes`：所有存活 module 的机器码总上限，默认 134217728
@@ -210,16 +211,16 @@ Rust workspace 单元测试：
 cargo +nightly-2024-09-05 test --workspace --locked
 ```
 
-该命令已验证为 89 个测试通过、0 个失败：`valheim-asm` 11 个，
-`valheim-core` 42 个，`valheim-jit` 24 个 unit + 8 个 native/naive integration tests，
-`xtask` 4 个。额外的 trace 语义回归为：
+该命令已验证为 114 个测试通过、0 个失败：`valheim-asm` 11 个，
+`valheim-core` 53 个，`valheim-jit` 34 个 unit + 8 个 native/naive differential +
+4 个 memory fast-path integration tests，`xtask` 4 个。额外的 trace 语义回归为：
 
 ```bash
 cargo +nightly-2024-09-05 test \
   --locked --package valheim-core --features trace
 ```
 
-该命令已验证 43 个测试通过。
+该命令已验证 54 个测试通过。
 
 完整 RISC-V ISA 测试需要交叉工具链和 `riscv-tests` 子模块：
 
@@ -398,9 +399,11 @@ id
 
 2026-07-14 已实际验证交互输入输出：`/etc/debian_version` 为 `13.6`，Bash 为 `5.2.37(1)-release`，`coreutils` 为 `9.7-3`，glibc 为 `2.41-12+deb13u3`，`id` 显示 root；超过 80 字节的连续 UART 输出后仍能继续交互。第一次运行还要下载和构建，耗时更长。按宿主 `Ctrl-C` 退出。
 
-2026-07-15 在同一 release binary 与已构建 artifact 上，从宿主进程启动到真实行末
-`debian13# ` 各测三次：naive 中位数 69.603 s，JIT 中位数 13.447 s，加速
-5.176×；详细环境、单次数据和 JIT 统计见根 `JIT-PLAN.md`。
+2026-07-15 第一阶段在同一 release binary 与已构建 artifact 上，从宿主进程启动到真实行末
+`debian13# ` 各测三次：naive 中位数 69.603 s，JIT 中位数 13.447 s，加速 5.176×；设计与
+第一阶段数据见根 `JIT-PLAN.md`。后续性能提交在固定 CPU 16 上重测当前树：naive 中位数
+60.926 s，JIT 中位数 4.806 s，加速 12.677×；逐项交错 A/B、profile 和剩余方向见
+`JIT-PERF.md`。两轮调度条件不同，不能用绝对 checkpoint 的差值归因单个优化。
 
 固定版本和来源：
 
@@ -488,6 +491,10 @@ openEuler 演示没有固定的 BIOS、kernel、rootfs、下载脚本或版本 h
 - `--trace` 默认无效，必须显式启用 feature。
 - JIT 暂不支持完整逐指令 trace；请求 JIT 同时传 `--trace` 或启用 trace feature
   时会强制使用 naive。
+- Cranelift IR verifier 在启用 debug assertions 的构建（包括默认 `cargo test`）中开启，
+  在所有 release 构建（包括 release tests）中为减少每个 TB 的编译成本而关闭。修改 lowering、
+  helper ABI 或 native exit 时，不能只跑默认 debug tests；必须补 release JIT tests、JIT ISA
+  和三个 release JIT demo，防止 malformed IR 在 release 中变成 panic 或错误机器码。
 - `fetch_mem()` 必须先取首个 16-bit parcel，并且只在确认为 32-bit 指令时取第二个；
   跨页时两个 parcel 必须分别以 Fetch 权限翻译。不能退回“翻译一次再读 u32”，否则会
   绕过第二页映射、X 权限及 `PC+2` fault address。
@@ -518,6 +525,24 @@ openEuler 演示没有固定的 BIOS、kernel、rootfs、下载脚本或版本 h
 cargo +nightly-2024-09-05 test --workspace --locked
 cargo +nightly-2024-09-05 build --release --locked --package valheim-cli
 ```
+
+修改 `valheim-jit` runtime、Cranelift lowering、helper ABI、cache/chaining 或 native side exit
+后，还应让 verifier-off 的 release 路径和真实 guest 通过：
+
+```bash
+cargo +nightly-2024-09-05 test \
+  --release --locked --package valheim-jit
+
+export PATH="$PWD/target/demo/gcc-riscv64-elf-2022.03.09/riscv/bin:$PATH"
+cargo +nightly-2024-09-05 run-riscv-tests -- --engine jit
+
+RESET_DISK=1 ./demo/xv6/run.sh --engine jit
+./demo/rustsbi/run.sh --engine jit
+./demo/linux/run.sh --engine jit
+```
+
+上述 release `valheim-jit` tests 和三个 release demo 覆盖 verifier-off 路径；`xtask`
+的 ISA 流程仍构建 debug CLI，以 verifier-on 配置覆盖 96 项 lowering。
 
 修改 CPU、CSR、MMU、异常/中断、总线、UART、PLIC、CLINT、VirtIO、DTB 或 Machine 启动逻辑后，还应运行：
 

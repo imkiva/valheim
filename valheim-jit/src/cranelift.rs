@@ -107,8 +107,8 @@ pub struct CraneliftBackend {
 
 impl CraneliftBackend {
   pub fn new() -> Result<Self, JitError> {
-    // Keep IR verification in debug/test builds where lowering mistakes should fail early; avoid
-    // repeating that validation for every TB on the release startup path.
+    // Keep IR verification whenever debug assertions are enabled so lowering mistakes fail early;
+    // avoid repeating that validation for every TB in release builds, including release tests.
     let enable_verifier = if cfg!(debug_assertions) { "true" } else { "false" };
     let mut builder = JITBuilder::with_flags(
       &[("opt_level", "speed"), ("enable_verifier", enable_verifier)],

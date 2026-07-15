@@ -5,35 +5,38 @@
 
 ## 实现与验收状态（2026-07-15）
 
-阶段 0–6 已完成；阶段 7 已完成本轮 profile 选中的 threshold 调优和有界 code
-arena，superblock、chaining 等未选候选项不是第一阶段完成条件：
+阶段 0–6 已完成；阶段 7 已完成有界 code arena，以及两轮由 profile/A/B 选出的 runtime、
+dispatcher 和编译期开销优化。superblock、direct machine-code chaining 等仍不是第一阶段
+完成条件；最新数据和后续方向见 [`JIT-PERF.md`](JIT-PERF.md)：
 
 - `valheim-core` 提供共享 `translate_to_host()`、显式执行 budget、批量 CLINT 推进及
   SATP/SFENCE.VMA/FENCE.I epoch。跨页 32-bit 取指会分别以 Fetch 权限翻译两个
   16-bit parcel；页表隐式访问与最终 endpoint fault 都保留原访问类型和 guest VA。
 - `valheim-jit` 提供 decoded TB、negative cache、Cranelift RV64I/M、A helper、SSA GPR、
   software TLB、DRAM direct access、精确 exception/MMIO side exit，以及有界 code arena。
-- JIT 每次 `RV64Executor::execute()` 最多执行一个 TB；MMIO 若位于 native 前缀之后，会先
-  返回 dispatcher，并在下一次 tick/IRQ 边界精确执行一次慢路径指令。
+- JIT 可在一个 Machine budget 内连续执行多个已编译 TB，并用 generation-guarded successor
+  cache 连接常见边；decoded/fallback、atomic、system、WFI、budget 或 side exit 会结束 batch。
+  MMIO 若位于 native 前缀之后，会先返回 dispatcher，并在下一次 tick/IRQ 边界精确执行。
 - 每个 Cranelift module 最多 4096 个函数；旧 module 只在其函数指针仍被 TB cache 引用时
   保留。所有存活 module 的机器码总量达到默认 128 MiB 上限后，在下一个
   dispatcher 安全点清 cache 并释放全部 module。
 - CLI 默认仍为 `naive`，可用 `--engine jit` 明确启用；完整 trace 会强制回到 naive。
-- 当前 JIT-enabled workspace 明确只支持 Linux x86_64 System V ABI；F/D、其他 host、native
-  block chaining 和逐指令 JIT trace 仍是非目标。
+- 当前 JIT-enabled workspace 明确只支持 Linux x86_64 System V ABI；F/D、其他 host、direct
+  machine-code tail chaining 和逐指令 JIT trace 仍是非目标。Rust 侧 successor cache 不会
+  patch native jump target。
 
 最终验证（固定 `nightly-2024-09-05`）：
 
 | 项目 | naive | JIT |
 | --- | --- | --- |
-| workspace / trace / 差分单元测试 | workspace 89/89、trace 43/43 | 24 个 JIT 单元测试 + 8 个 native/naive integration tests 通过 |
+| workspace / trace / 差分单元测试 | workspace 114/114、core trace 54/54 | 34 个 JIT unit + 8 个 differential + 4 个 memory fast-path tests；release 配置同样通过 |
 | `riscv-tests` | 96/96 | 96/96；xtask 使用 hot threshold 1 以覆盖热编译路径 |
 | xv6 | 进入 `$` 并执行 `echo` | 进入 `$` 并执行 `echo` |
 | RustSBI | success marker | success marker |
 | Debian 13 | 进入 `debian13#`，读取版本 `13.6` | 进入 `debian13#`，读取版本 `13.6` |
 
-性能环境为 Linux 6.6.87.2 WSL2、AMD Ryzen 9 9950X3D、32 logical CPUs，基于提交
-`e24b4d9` 的当前工作树。使用同一 release binary 和已构建的固定 Debian artifacts；外部计时
+第一阶段性能环境为 Linux 6.6.87.2 WSL2、AMD Ryzen 9 9950X3D、32 logical CPUs，基于
+`e24b4d9` 的验收树。使用同一 release binary 和已构建的固定 Debian artifacts；外部计时
 从进程启动到真实行末 `debian13# `，因此把少量相同的 CLI/镜像加载开销也计入两种 engine，
 并包含全部 JIT 编译成本：
 
@@ -47,7 +50,8 @@ compiled TB、1.604 s 累计编译时间（平均 287.2 µs，p50 187.1 µs，p9
 4,648,470 bytes（4.43 MiB）累计代码、3,635,810 bytes（3.47 MiB）峰值 live
 code、383,368,809 次 TLB hit 和 4,322,837 次
 miss（98.885% hit rate）、2999 次 memory slow path、20 次 memory fault，且 compile failure
-为 0。默认统一 hot threshold 最终由完整 Debian 调优为 500；早期 3/16/2 启发式没有保留。
+为 0。第一阶段默认统一 hot threshold 为 500；第二轮完整 Debian A/B 将当前默认调为 750，
+早期 3/16/2 启发式没有保留。当前约 4.8 s 的 checkpoint 和逐项数据见 `JIT-PERF.md`。
 
 ## 目标与已确定的范围
 
@@ -66,7 +70,8 @@ miss（98.885% hit rate）、2999 次 memory slow path、20 次 memory fault，�
   `translate_to_host()` 接口；JIT 不复制页表遍历或权限判断逻辑。
 - 为了让 Debian 获得实际加速，software TLB 和 DRAM fast path 属于早期里程碑，
   不能长期让所有访存都经过完整 Rust/MMU slow path。
-- 首版不实现 native block chaining，不支持 Windows x64 ABI，不直接编译浮点指令。
+- 首版不实现 direct native tail chaining，不支持 Windows x64 ABI，不直接编译浮点指令；
+  后续已加入不修改机器码的 Rust successor cache。
 
 非目标：
 
@@ -167,7 +172,8 @@ pub trait RV64Executor {
 
 - 使用 `&mut self`，让 JIT 可以直接维护 cache、hotness、Cranelift context 和 code arena。
 - `NaiveInterpreter` 每次仍只尝试一条指令。
-- `JitExecutor` 每次最多执行一个 TB。
+- `JitExecutor` 的 decoded/fallback 路径每次最多执行一个 TB；native 路径可在同一 budget 内
+  连续执行多个满足精确 side-exit 约束的 compiled TB。
 - native code 不直接进入 RISC-V trap；异常由 `Machine` 继续调用 `Exception::handle`。
 - `attempted` 包含 faulting instruction，因为当前模型在尝试该指令之前已经产生一次 CLINT tick。
 - 若 JIT 执行了一个可编译前缀，并在下一条 unsupported instruction 前退出，本轮只报告前缀；
@@ -184,7 +190,7 @@ Machine 调度顺序：
 
 1. 在 TB 前执行一次 `tick(1)`。
 2. 检查并处理 pending interrupt。
-3. 根据 `TB_MAX` 和距离 `mtimecmp` 的 tick 数计算 budget。
+3. 根据 executor ceiling 和距离 `mtimecmp` 的 tick 数计算 budget。
 4. 执行 TB，得到 `attempted = N`。
 5. 若 `N > 1`，执行 `advance(N - 1)`。
 6. 统一处理同步异常或进入下一次调度。
@@ -192,9 +198,10 @@ Machine 调度顺序：
 当当前 `mtime < mtimecmp` 时，budget 不得大于 `mtimecmp - mtime`，保证触发 timer interrupt
 的那次 tick 仍发生在下一条 guest 指令之前。
 
-外部设备中断第一版只在 TB 边界观察。初始 `TB_MAX` 使用 32，并通过测试和延迟数据决定是否
-调整。WFI 必须立即结束 TB；已经处于 WFI 状态时执行器返回 `attempted = 0`，外层仍继续推进
-CLINT 和轮询中断。
+外部设备中断在 Machine/executor batch 边界观察。初始 ceiling 为 32，第二轮 A/B 将其调为
+1024；未来 timer deadline 仍会精确缩短 budget，1024 上限则约束 UART/VirtIO 等异步设备的
+最坏轮询延迟。WFI 必须立即结束 TB；已经处于 WFI 状态时执行器返回 `attempted = 0`，外层
+仍继续推进 CLINT 和轮询中断。
 
 ## GuestBlock 构建
 
@@ -252,7 +259,7 @@ Cranelift 不应编译所有首次出现的代码。Debian 启动会经过大量
 - 含大量 fallback 的 TB 提高阈值或永久保留 decoded 形式。
 
 阈值必须可配置并进入统计数据，最终以完整 Debian 启动时间而不是微基准决定。
-最终实现没有采用上述 3/16/2 分类规则，而是使用统一可配阈值，默认为 500
+最终实现没有采用上述 3/16/2 分类规则，而是使用统一可配阈值，当前默认为 750
 且最小为 1。第 N 次 decoded TB 完整成功执行后编译，从下一次命中起运行 native。
 
 decoded-block executor 是独立里程碑：它仍循环调用现有 `cpu.execute()`，用于先验证 TB 边界、
@@ -512,7 +519,8 @@ struct TbKey {
 - 机器码字节数来自 Cranelift `code_info().total_size`，并记录 generated/live/peak 统计。
 - 所有存活 module 的机器码总量达到默认 128 MiB 上限时，下一个 dispatcher
   安全点清 TB cache 并整体释放所有 module，然后开始新 generation。
-- 没有 block chaining，因此整体 rotation 时不存在 native block 之间的悬空跳转边。
+- 没有 direct native jump patching；Rust successor cache 只保存 generation-guarded arena index，
+  因此整体 rotation 时不存在 native block 之间的悬空机器码跳转边。
 
 每次编译复用 Cranelift `Context` 和 `FunctionBuilderContext`，减少 host 分配。函数按需
 `define`/`finalize`；是否批量 finalize 由实际 profile 决定，不能为了理论吞吐增加首次热块延迟。
@@ -555,7 +563,7 @@ CLI 增加：
 
 当前默认 `naive`。同时已提供：
 
-- `--jit-hot-threshold N`，默认 500，最小 1
+- `--jit-hot-threshold N`，默认 750，最小 1
 - `--jit-max-block-len N`，默认 32，范围 1–32
 - `--jit-max-compiled-blocks N`，默认每 module 4096
 - `--jit-max-code-bytes N`，默认 134217728（aggregate live code）
@@ -658,11 +666,15 @@ CLI 增加：
 
 只根据统计和 profile 选择：
 
-- 已选：调整 hot threshold 和 TB_MAX
+- 已选：hot threshold 750、executor ceiling 1024
 - 已选：有界、分段的 native code arena rotation
+- 已选：native multi-TB batching、generation-guarded successor cache、batch 复用 `JitFrame`
+- 已选：native exit 热/冷路径拆分、关闭 disabled stats 开销
+- 已选：所有 release 构建（含 release tests）关闭 Cranelift IR verifier；启用 debug
+  assertions 的构建（含默认 tests）保持开启
 - 未选：更复杂的 TLB replacement
 - 未选：page-local trace/superblock
-- 未选：间接或直接 block chaining
+- 未选：direct machine-code tail chaining
 - 未选：更精细的 SFENCE.VMA 失效
 - 未选：逐块 code LRU
 
@@ -737,7 +749,7 @@ JIT 与 naive 两种 engine 都要覆盖适用的测试。验收必须进入 xv6
 | 所有访存走 helper，ALU 加速被 MMU 开销吞没 | 尽早实现 software TLB 和 DRAM fast path |
 | fault PC 或寄存器提交顺序错误 | 单一 JitFrame、统一 side exit、naive 差分 |
 | TB 跨过 timer deadline | Machine 根据 `mtimecmp` 限制 budget |
-| 外部 IRQ 延迟过大 | 限制 TB_MAX，暂不 chaining，按 demo 测量延迟 |
+| 外部 IRQ 延迟过大 | 以 executor ceiling 限制 native batch，不做 direct tail chaining，按 demo 测量延迟 |
 | 页表或指令缓存失效后执行陈旧代码 | SATP/SFENCE.VMA/FENCE.I epoch 和 conservative flush |
 | Rust layout 变化破坏 native code | 只访问 `repr(C)` frame，不硬编码 RV64Cpu offset |
 | JITModule 代码无法逐块回收 | 逻辑失效、容量上限、dispatcher 安全点整体 rotation |
