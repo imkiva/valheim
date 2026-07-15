@@ -1,7 +1,4 @@
-// TODO: rewrite this file.
-
-// https://github.com/qemu/qemu/blob/master/hw/intc/sifive_plic.c
-// https://github.com/qemu/qemu/blob/master/include/hw/intc/sifive_plic.h
+use std::cell::Cell;
 
 use crate::cpu::bus::PLIC_BASE;
 use crate::cpu::irq::Exception;
@@ -14,186 +11,385 @@ const SOURCE_PRIORITY: u64 = PLIC_BASE;
 const SOURCE_PRIORITY_END: u64 = PLIC_BASE + 0xfff;
 
 /// The address range for interrupt pending bits. 32 4-byte (1024 bits) registers exist.
-///
-/// https://github.com/riscv/riscv-plic-spec/blob/master/riscv-plic.adoc#memory-map
-/// base + 0x001000: Interrupt Pending bit 0-31
-/// base + 0x00107C: Interrupt Pending bit 992-1023
 const PENDING: u64 = PLIC_BASE + 0x1000;
 const PENDING_END: u64 = PLIC_BASE + 0x107f;
 
-/// The address range for enable registers. The maximum number of contexts is 15871 but this PLIC
-/// supports only 2 contexts.
-///
-/// https://github.com/riscv/riscv-plic-spec/blob/master/riscv-plic.adoc#memory-map
-/// base + 0x002000: Enable bits for sources 0-31 on context 0
-/// base + 0x002004: Enable bits for sources 32-63 on context 0
-/// ...
-/// base + 0x00207F: Enable bits for sources 992-1023 on context 0
-/// base + 0x002080: Enable bits for sources 0-31 on context 1
-/// base + 0x002084: Enable bits for sources 32-63 on context 1
-/// ...
-/// base + 0x0020FF: Enable bits for sources 992-1023 on context 1
+/// The address range for enable registers. This PLIC implements M-mode context 0 and S-mode
+/// context 1 for the single hart exposed by Valheim.
 const ENABLE: u64 = PLIC_BASE + 0x2000;
 const ENABLE_END: u64 = PLIC_BASE + 0x20ff;
 
-/// The address range for priority thresholds and claim/complete registers. The maximum number of
-/// contexts is 15871 but this PLIC supports only 2 contexts.
-///
-/// https://github.com/riscv/riscv-plic-spec/blob/master/riscv-plic.adoc#memory-map
-/// base + 0x200000: Priority threshold for context 0
-/// base + 0x200004: Claim/complete for context 0
-/// base + 0x200008: Reserved
-/// ...
-/// base + 0x200FFC: Reserved
-/// base + 0x201000: Priority threshold for context 1
-/// base + 0x201004: Claim/complete for context 1
+/// Context 0 starts at offset 0 and context 1 at offset 0x1000. Each context has a priority
+/// threshold at offset 0 and a claim/complete register at offset 4.
 const THRESHOLD_AND_CLAIM: u64 = PLIC_BASE + 0x200000;
 const THRESHOLD_AND_CLAIM_END: u64 = PLIC_BASE + 0x201007;
 
-const WORD_SIZE: u64 = 0x4;
+const WORD_SIZE: u64 = 4;
 const CONTEXT_OFFSET: u64 = 0x1000;
-const SOURCE_NUM: u64 = 1024;
+const SOURCE_NUM: usize = 1024;
+const SOURCE_WORDS: usize = SOURCE_NUM / 32;
+const CONTEXT_NUM: usize = 2;
+const NO_CONTEXT: u8 = 0;
 
-/// The platform-level-interrupt controller (PLIC).
+/// The platform-level interrupt controller (PLIC).
+///
+/// `Bus::read` only needs a shared reference, but reading a claim register is inherently
+/// stateful. Pending, level and in-service bookkeeping therefore use `Cell`; configuration writes
+/// still require an exclusive reference through the normal MMIO write path.
 pub struct Plic {
-  /// The interrupt priority for each interrupt source. A priority value of 0 is reserved to mean
-  /// "never interrupt" and effectively disables the interrupt. Priority 1 is the lowest active
-  /// priority, and priority 7 is the highest.
-  priority: [u32; SOURCE_NUM as usize],
-  /// Interrupt pending bits. If bit 1 is set, a global interrupt 1 is pending. A pending bit in
-  /// the PLIC core can be cleared by setting the associated enable bit then performing a claim.
-  pending: [u32; 32],
-  /// Interrupt Enable Bit of Interrupt Source #0 to #1023 for 2 contexts.
-  enable: [u32; 64],
-  /// The settings of a interrupt priority threshold of each context. The PLIC will mask all PLIC
-  /// interrupts of a priority less than or equal to `threshold`.
-  threshold: [u32; 2],
-  /// The ID of the highest priority pending interrupt or zero if there is no pending interrupt
-  /// for each context.
-  claim: [u32; 2],
+  priority: [u32; SOURCE_NUM],
+  pending: [Cell<u32>; SOURCE_WORDS],
+  enable: [u32; SOURCE_WORDS * CONTEXT_NUM],
+  threshold: [u32; CONTEXT_NUM],
+  claim: [Cell<u32>; CONTEXT_NUM],
+  level: [Cell<u32>; SOURCE_WORDS],
+  /// Zero means that the source is not in service; otherwise this stores `context + 1`.
+  in_service_context: [Cell<u8>; SOURCE_NUM],
 }
 
 impl Plic {
   pub fn new() -> Self {
     Self {
-      priority: [0; 1024],
-      pending: [0; 32],
-      enable: [0; 64],
-      threshold: [0; 2],
-      claim: [0; 2],
+      priority: [0; SOURCE_NUM],
+      pending: std::array::from_fn(|_| Cell::new(0)),
+      enable: [0; SOURCE_WORDS * CONTEXT_NUM],
+      threshold: [0; CONTEXT_NUM],
+      claim: std::array::from_fn(|_| Cell::new(0)),
+      level: std::array::from_fn(|_| Cell::new(0)),
+      in_service_context: std::array::from_fn(|_| Cell::new(NO_CONTEXT)),
     }
   }
 
-  pub fn update_pending(&mut self, irq: u64) {
-    let index = irq.wrapping_div(WORD_SIZE);
-    self.pending[index as usize] = self.pending[index as usize] | (1 << irq);
-
-    self.update_claim(irq);
+  fn source_position(irq: u64) -> Option<(usize, u32)> {
+    let irq = usize::try_from(irq).ok()?;
+    if irq == 0 || irq >= SOURCE_NUM {
+      return None;
+    }
+    Some((irq / 32, 1_u32 << (irq % 32)))
   }
 
-  fn clear_pending(&mut self, irq: u64) {
-    let index = irq.wrapping_div(WORD_SIZE);
-    self.pending[index as usize] = self.pending[index as usize] & !(1 << irq);
-
-    self.update_claim(0);
+  fn source_is_pending(&self, irq: usize) -> bool {
+    let word = irq / 32;
+    let mask = 1_u32 << (irq % 32);
+    self.pending[word].get() & mask != 0
   }
 
-  fn update_claim(&mut self, irq: u64) {
-    // TODO: Support highest priority to the `claim` register.
-    // claim[1] is claim/complete registers for S-mode (context 1). SCLAIM.
-    if self.is_enable(1, irq) || irq == 0 {
-      self.claim[1] = irq as u32;
+  fn source_level_is_high(&self, irq: usize) -> bool {
+    let word = irq / 32;
+    let mask = 1_u32 << (irq % 32);
+    self.level[word].get() & mask != 0
+  }
+
+  fn set_pending(&self, irq: u64) {
+    let Some((word, mask)) = Self::source_position(irq) else {
+      return;
+    };
+    let irq = irq as usize;
+    if self.in_service_context[irq].get() == NO_CONTEXT {
+      self.pending[word].set(self.pending[word].get() | mask);
+      self.recompute_claims();
     }
   }
 
-  fn is_enable(&self, context: u64, irq: u64) -> bool {
-    let index = (irq.wrapping_rem(SOURCE_NUM)).wrapping_div(WORD_SIZE * 8);
-    let offset = (irq.wrapping_rem(SOURCE_NUM)).wrapping_rem(WORD_SIZE * 8);
-    return ((self.enable[(context * 32 + index) as usize] >> offset) & 1) == 1;
+  fn clear_pending(&self, irq: usize) {
+    let word = irq / 32;
+    let mask = 1_u32 << (irq % 32);
+    self.pending[word].set(self.pending[word].get() & !mask);
+  }
+
+  /// Injects a pulse/edge request. This preserves the one-shot interface used by UART devices.
+  /// Pulses arriving while the source already has a pending or in-service request are coalesced by
+  /// the PLIC gateway.
+  pub fn update_pending(&self, irq: u64) {
+    self.set_pending(irq);
+  }
+
+  /// Sets the electrical level of an interrupt source. An asserted source creates one pending
+  /// request. If it remains asserted when software completes that request, the gateway creates a
+  /// new request; deasserting it prevents that re-pend.
+  pub fn set_source_level(&self, irq: u64, asserted: bool) {
+    let Some((word, mask)) = Self::source_position(irq) else {
+      return;
+    };
+    if asserted {
+      self.level[word].set(self.level[word].get() | mask);
+      self.set_pending(irq);
+    } else {
+      self.level[word].set(self.level[word].get() & !mask);
+    }
+  }
+
+  /// Whether S-mode context 1 currently has a claimable external interrupt.
+  pub fn supervisor_irq_pending(&self) -> bool {
+    self.claim[1].get() != 0
+  }
+
+  fn is_enabled(&self, context: usize, irq: usize) -> bool {
+    let word = irq / 32;
+    let mask = 1_u32 << (irq % 32);
+    self.enable[context * SOURCE_WORDS + word] & mask != 0
+  }
+
+  fn recompute_claim(&self, context: usize) {
+    let mut best_irq = 0;
+    let mut best_priority = self.threshold[context];
+    for irq in 1..SOURCE_NUM {
+      let priority = self.priority[irq];
+      if self.source_is_pending(irq)
+        && self.is_enabled(context, irq)
+        && priority > best_priority
+      {
+        best_irq = irq as u32;
+        best_priority = priority;
+      }
+    }
+    self.claim[context].set(best_irq);
+  }
+
+  fn recompute_claims(&self) {
+    for context in 0..CONTEXT_NUM {
+      self.recompute_claim(context);
+    }
+  }
+
+  fn claim(&self, context: usize) -> u32 {
+    self.recompute_claim(context);
+    let irq = self.claim[context].get();
+    if irq == 0 {
+      return 0;
+    }
+
+    self.clear_pending(irq as usize);
+    self.in_service_context[irq as usize].set(context as u8 + 1);
+    self.recompute_claims();
+    irq
+  }
+
+  fn complete(&self, context: usize, irq: u32) {
+    let irq = irq as usize;
+    if irq == 0
+      || irq >= SOURCE_NUM
+      || self.in_service_context[irq].get() != context as u8 + 1
+    {
+      return;
+    }
+
+    self.in_service_context[irq].set(NO_CONTEXT);
+    if self.source_level_is_high(irq) {
+      let word = irq / 32;
+      let mask = 1_u32 << (irq % 32);
+      self.pending[word].set(self.pending[word].get() | mask);
+    }
+    self.recompute_claims();
   }
 
   pub fn read(&self, addr: VirtAddr) -> Result<u32, Exception> {
-    // TODO: support CanIO types
     let addr = addr.0;
     match addr {
       SOURCE_PRIORITY..=SOURCE_PRIORITY_END => {
-        if (addr - SOURCE_PRIORITY).wrapping_rem(WORD_SIZE) != 0 {
+        if (addr - SOURCE_PRIORITY) % WORD_SIZE != 0 {
           return Err(Exception::LoadAccessFault(VirtAddr(addr)));
         }
-        let index = (addr - SOURCE_PRIORITY).wrapping_div(WORD_SIZE);
-        Ok(self.priority[index as usize])
+        let index = ((addr - SOURCE_PRIORITY) / WORD_SIZE) as usize;
+        Ok(self.priority[index])
       }
       PENDING..=PENDING_END => {
-        if (addr - PENDING).wrapping_rem(WORD_SIZE) != 0 {
+        if (addr - PENDING) % WORD_SIZE != 0 {
           return Err(Exception::LoadAccessFault(VirtAddr(addr)));
         }
-        let index = (addr - PENDING).wrapping_div(WORD_SIZE);
-        Ok(self.pending[index as usize])
+        let index = ((addr - PENDING) / WORD_SIZE) as usize;
+        Ok(self.pending[index].get())
       }
       ENABLE..=ENABLE_END => {
-        if (addr - ENABLE).wrapping_rem(WORD_SIZE) != 0 {
+        if (addr - ENABLE) % WORD_SIZE != 0 {
           return Err(Exception::LoadAccessFault(VirtAddr(addr)));
         }
-        let index = (addr - ENABLE).wrapping_div(WORD_SIZE);
-        Ok(self.enable[index as usize])
+        let index = ((addr - ENABLE) / WORD_SIZE) as usize;
+        Ok(self.enable[index])
       }
       THRESHOLD_AND_CLAIM..=THRESHOLD_AND_CLAIM_END => {
-        let context = (addr - THRESHOLD_AND_CLAIM).wrapping_div(CONTEXT_OFFSET);
-        let offset = addr - (THRESHOLD_AND_CLAIM + CONTEXT_OFFSET * context);
-        if offset == 0 {
-          Ok(self.threshold[context as usize])
-        } else if offset == 4 {
-          Ok(self.claim[context as usize])
-        } else {
-          return Err(Exception::LoadAccessFault(VirtAddr(addr)));
+        let context = ((addr - THRESHOLD_AND_CLAIM) / CONTEXT_OFFSET) as usize;
+        let offset = addr - (THRESHOLD_AND_CLAIM + CONTEXT_OFFSET * context as u64);
+        match offset {
+          0 => Ok(self.threshold[context]),
+          4 => Ok(self.claim(context)),
+          _ => Err(Exception::LoadAccessFault(VirtAddr(addr))),
         }
       }
-      _ => return Err(Exception::LoadAccessFault(VirtAddr(addr))),
+      _ => Err(Exception::LoadAccessFault(VirtAddr(addr))),
     }
   }
 
   pub fn write(&mut self, addr: VirtAddr, value: u32) -> Result<(), Exception> {
-    // TODO: support CanIO types
     let addr = addr.0;
     match addr {
       SOURCE_PRIORITY..=SOURCE_PRIORITY_END => {
-        if (addr - SOURCE_PRIORITY).wrapping_rem(WORD_SIZE) != 0 {
+        if (addr - SOURCE_PRIORITY) % WORD_SIZE != 0 {
           return Err(Exception::StoreAccessFault(VirtAddr(addr)));
         }
-        let index = (addr - SOURCE_PRIORITY).wrapping_div(WORD_SIZE);
-        self.priority[index as usize] = value;
+        let index = ((addr - SOURCE_PRIORITY) / WORD_SIZE) as usize;
+        if index != 0 {
+          self.priority[index] = value;
+          self.recompute_claims();
+        }
       }
       PENDING..=PENDING_END => {
-        if (addr - PENDING).wrapping_rem(WORD_SIZE) != 0 {
+        if (addr - PENDING) % WORD_SIZE != 0 {
           return Err(Exception::StoreAccessFault(VirtAddr(addr)));
         }
-        let index = (addr - PENDING).wrapping_div(WORD_SIZE);
-        self.pending[index as usize] = value;
+        // Pending registers are read-only. In particular, source 0 must remain hard-wired to zero.
       }
       ENABLE..=ENABLE_END => {
-        if (addr - ENABLE).wrapping_rem(WORD_SIZE) != 0 {
+        if (addr - ENABLE) % WORD_SIZE != 0 {
           return Err(Exception::StoreAccessFault(VirtAddr(addr)));
         }
-        let index = (addr - ENABLE).wrapping_div(WORD_SIZE);
-        self.enable[index as usize] = value;
+        let index = ((addr - ENABLE) / WORD_SIZE) as usize;
+        let context = index / SOURCE_WORDS;
+        self.enable[index] = if index % SOURCE_WORDS == 0 {
+          value & !1
+        } else {
+          value
+        };
+        self.recompute_claim(context);
       }
       THRESHOLD_AND_CLAIM..=THRESHOLD_AND_CLAIM_END => {
-        let context = (addr - THRESHOLD_AND_CLAIM).wrapping_div(CONTEXT_OFFSET);
-        let offset = addr - (THRESHOLD_AND_CLAIM + CONTEXT_OFFSET * context);
-        if offset == 0 {
-          self.threshold[context as usize] = value;
-        } else if offset == 4 {
-          //self.claim[context as usize] = value as u32;
-
-          // Clear pending bit.
-          self.clear_pending(value as u64);
-        } else {
-          return Err(Exception::StoreAccessFault(VirtAddr(addr)));
+        let context = ((addr - THRESHOLD_AND_CLAIM) / CONTEXT_OFFSET) as usize;
+        let offset = addr - (THRESHOLD_AND_CLAIM + CONTEXT_OFFSET * context as u64);
+        match offset {
+          0 => {
+            self.threshold[context] = value;
+            self.recompute_claim(context);
+          }
+          4 => self.complete(context, value),
+          _ => return Err(Exception::StoreAccessFault(VirtAddr(addr))),
         }
       }
       _ => return Err(Exception::StoreAccessFault(VirtAddr(addr))),
     }
-
     Ok(())
+  }
+}
+
+impl Default for Plic {
+  fn default() -> Self {
+    Self::new()
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::{Plic, ENABLE, PENDING, SOURCE_PRIORITY, THRESHOLD_AND_CLAIM};
+  use crate::memory::VirtAddr;
+
+  const S_ENABLE: u64 = ENABLE + 0x80;
+  const S_THRESHOLD: u64 = THRESHOLD_AND_CLAIM + 0x1000;
+  const S_CLAIM: u64 = S_THRESHOLD + 4;
+
+  fn configure_source(plic: &mut Plic, irq: u32, priority: u32) {
+    plic
+      .write(VirtAddr(SOURCE_PRIORITY + u64::from(irq) * 4), priority)
+      .unwrap();
+    let word = u64::from(irq / 32);
+    let old = plic.read(VirtAddr(S_ENABLE + word * 4)).unwrap();
+    plic
+      .write(VirtAddr(S_ENABLE + word * 4), old | (1_u32 << (irq % 32)))
+      .unwrap();
+  }
+
+  #[test]
+  fn pending_uses_irq_divided_by_32_and_source_zero_is_invalid() {
+    let plic = Plic::new();
+    plic.update_pending(33);
+    plic.update_pending(0);
+    plic.update_pending(1024);
+
+    assert_eq!(plic.read(VirtAddr(PENDING)).unwrap(), 0);
+    assert_eq!(plic.read(VirtAddr(PENDING + 4)).unwrap(), 1 << 1);
+  }
+
+  #[test]
+  fn supervisor_claim_recomputes_after_configuration_changes() {
+    let mut plic = Plic::new();
+    plic.update_pending(5);
+    assert!(!plic.supervisor_irq_pending());
+
+    plic.write(VirtAddr(SOURCE_PRIORITY + 5 * 4), 3).unwrap();
+    assert!(!plic.supervisor_irq_pending());
+
+    plic.write(VirtAddr(S_ENABLE), 1 << 5).unwrap();
+    assert!(plic.supervisor_irq_pending());
+
+    plic.write(VirtAddr(S_THRESHOLD), 3).unwrap();
+    assert!(!plic.supervisor_irq_pending());
+    plic.write(VirtAddr(S_THRESHOLD), 2).unwrap();
+    assert!(plic.supervisor_irq_pending());
+
+    plic.write(VirtAddr(S_ENABLE), 0).unwrap();
+    assert!(!plic.supervisor_irq_pending());
+  }
+
+  #[test]
+  fn claim_selects_highest_priority_and_marks_source_in_service() {
+    let mut plic = Plic::new();
+    configure_source(&mut plic, 5, 2);
+    configure_source(&mut plic, 6, 3);
+    plic.update_pending(5);
+    plic.update_pending(6);
+
+    assert_eq!(plic.read(VirtAddr(S_CLAIM)).unwrap(), 6);
+    assert_eq!(plic.read(VirtAddr(PENDING)).unwrap() & (1 << 6), 0);
+    assert_eq!(plic.in_service_context[6].get(), 2);
+    assert_eq!(plic.claim[1].get(), 5);
+  }
+
+  #[test]
+  fn equal_priority_claims_use_lowest_source_id() {
+    let mut plic = Plic::new();
+    configure_source(&mut plic, 5, 3);
+    configure_source(&mut plic, 6, 3);
+    plic.update_pending(6);
+    plic.update_pending(5);
+
+    assert_eq!(plic.read(VirtAddr(S_CLAIM)).unwrap(), 5);
+  }
+
+  #[test]
+  fn completing_asserted_level_source_repends_until_deasserted() {
+    let mut plic = Plic::new();
+    configure_source(&mut plic, 1, 1);
+    plic.set_source_level(1, true);
+
+    assert_eq!(plic.read(VirtAddr(S_CLAIM)).unwrap(), 1);
+    assert!(!plic.supervisor_irq_pending());
+    plic.write(VirtAddr(S_CLAIM), 1).unwrap();
+    assert!(plic.supervisor_irq_pending());
+
+    assert_eq!(plic.read(VirtAddr(S_CLAIM)).unwrap(), 1);
+    plic.set_source_level(1, false);
+    plic.write(VirtAddr(S_CLAIM), 1).unwrap();
+    assert!(!plic.supervisor_irq_pending());
+  }
+
+  #[test]
+  fn completing_pulse_source_does_not_repend() {
+    let mut plic = Plic::new();
+    configure_source(&mut plic, 10, 1);
+    plic.update_pending(10);
+
+    assert_eq!(plic.read(VirtAddr(S_CLAIM)).unwrap(), 10);
+    plic.write(VirtAddr(S_CLAIM), 10).unwrap();
+    assert!(!plic.supervisor_irq_pending());
+  }
+
+  #[test]
+  fn source_zero_priority_enable_and_pending_are_hardwired_to_zero() {
+    let mut plic = Plic::new();
+    plic.write(VirtAddr(SOURCE_PRIORITY), u32::MAX).unwrap();
+    plic.write(VirtAddr(S_ENABLE), u32::MAX).unwrap();
+    plic.write(VirtAddr(PENDING), u32::MAX).unwrap();
+
+    assert_eq!(plic.read(VirtAddr(SOURCE_PRIORITY)).unwrap(), 0);
+    assert_eq!(plic.read(VirtAddr(S_ENABLE)).unwrap() & 1, 0);
+    assert_eq!(plic.read(VirtAddr(PENDING)).unwrap() & 1, 0);
   }
 }

@@ -282,12 +282,12 @@ mod tests {
   use std::time::{Duration, Instant};
 
   use super::*;
-  use crate::cpu::bus::CLINT_BASE;
+  use crate::cpu::bus::{CLINT_BASE, PLIC_BASE};
   use crate::cpu::csr::CSRMap::{
     MCAUSE, MEPC, MIP, MSIE_MASK, MTIP_MASK, MTVEC, SEIE_MASK,
   };
   use crate::device::clint::{ClockSource, TIMEBASE_FREQUENCY};
-  use crate::device::ns16550a::UART_IER;
+  use crate::device::ns16550a::{UART_IER, UART_IRQ};
   use crate::device::Device;
   use crate::interp::ExecOutcome;
 
@@ -580,6 +580,14 @@ mod tests {
       .write_unchecked(MIE, SEIE_MASK | MTIE_MASK)
       .unwrap();
     cpu.csrs.write_mstatus_MIE(true);
+    cpu.bus
+      .plic
+      .write(VirtAddr(PLIC_BASE + UART_IRQ * 4), 1)
+      .unwrap();
+    cpu.bus
+      .plic
+      .write(VirtAddr(PLIC_BASE + 0x2080), 1 << UART_IRQ)
+      .unwrap();
     cpu
       .bus
       .clint

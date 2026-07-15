@@ -124,14 +124,19 @@ impl RV64Cpu {
       if let Some(irq_id) = external_irq {
         // tell PLIC that we have an external irq
         self.bus.plic.update_pending(irq_id);
-        // 3.1.9 Machine Interrupt Registers (mip and mie)
-        // SEIP is writable in mip, and may be written by M-mode software to
-        // indicate to S-mode that an external interrupt is pending. Additionally,
-        // the platform-level interrupt controller may generate supervisor-level external
-        // interrupts.
-        let _ = self.csrs.write_unchecked(MIP, self.csrs.read_unchecked(MIP) | SEIP_MASK);
       }
     }
+
+    // SEIP is a level presented by S-context 1 of the PLIC, not a one-shot notification. Rebuild
+    // it on every interrupt poll so claim, complete, enable, threshold and priority changes are
+    // reflected even when no device emits a new event in this round.
+    let mip = self.csrs.read_unchecked(MIP);
+    let mip = if self.bus.plic.supervisor_irq_pending() {
+      mip | SEIP_MASK
+    } else {
+      mip & !SEIP_MASK
+    };
+    let _ = self.csrs.write_unchecked(MIP, mip);
 
     // 3.1.9 Machine Interrupt Registers (mip and mie)
     // Multiple simultaneous interrupts destined for M-mode are handled
@@ -289,6 +294,35 @@ mod tests {
 
     assert_eq!(cpu.pending_interrupt(), None);
     assert_eq!(cpu.csrs.read_unchecked(MIP) & STIP_MASK, STIP_MASK);
+  }
+
+  #[test]
+  fn seip_tracks_plic_claimable_state_each_round() {
+    use crate::cpu::bus::PLIC_BASE;
+    use crate::cpu::csr::CSRMap::SEIP_MASK;
+
+    const IRQ: u64 = 1;
+    const S_ENABLE: u64 = PLIC_BASE + 0x2080;
+    const S_CLAIM: u64 = PLIC_BASE + 0x201004;
+
+    let mut cpu = RV64Cpu::new(None);
+    cpu.bus
+      .plic
+      .write(VirtAddr(PLIC_BASE + IRQ * 4), 1)
+      .unwrap();
+    cpu.bus
+      .plic
+      .write(VirtAddr(S_ENABLE), 1 << IRQ)
+      .unwrap();
+    cpu.bus.plic.update_pending(IRQ);
+
+    assert_eq!(cpu.csrs.read_unchecked(MIP) & SEIP_MASK, 0);
+    assert_eq!(cpu.pending_interrupt(), None);
+    assert_eq!(cpu.csrs.read_unchecked(MIP) & SEIP_MASK, SEIP_MASK);
+
+    assert_eq!(cpu.bus.plic.read(VirtAddr(S_CLAIM)).unwrap(), IRQ as u32);
+    assert_eq!(cpu.pending_interrupt(), None);
+    assert_eq!(cpu.csrs.read_unchecked(MIP) & SEIP_MASK, 0);
   }
 }
 
