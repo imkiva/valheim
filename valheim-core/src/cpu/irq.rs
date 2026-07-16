@@ -61,6 +61,7 @@ impl RV64Cpu {
     if virtio.dma_write {
       self.reserved.clear();
     }
+    self.bus.service_rtc();
 
     // 3.1.6.1 Privilege and Global Interrupt-Enable Stack in mstatus register
     // Global interrupt-enable bits, MIE and SIE, are provided for M-mode and S-mode respectively.
@@ -167,6 +168,9 @@ impl RV64Cpu {
 mod tests {
   use std::collections::VecDeque;
   use std::io;
+  use std::sync::atomic::{AtomicU64, Ordering};
+  use std::sync::Arc;
+  use std::time::Duration;
 
   use memmap2::MmapMut;
 
@@ -177,6 +181,9 @@ mod tests {
   };
   use crate::cpu::PrivilegeMode;
   use crate::device::virtio::{EthernetBackend, VIRTIO_NET_IRQ};
+  use crate::device::rtc::{
+    GoldfishRtc, RtcClock, RTC_ALARM_LOW, RTC_CLEAR_INTERRUPT, RTC_IRQ, RTC_IRQ_ENABLED,
+  };
   use crate::memory::VirtAddr;
 
   struct ReceiveBackend {
@@ -516,6 +523,53 @@ mod tests {
       .write(claim, VIRTIO_NET_IRQ as u32)
       .unwrap();
     assert!(!cpu.bus.plic.supervisor_irq_pending());
+  }
+
+  #[derive(Default)]
+  struct ManualRtcClock(AtomicU64);
+
+  impl RtcClock for ManualRtcClock {
+    fn now(&self) -> Duration {
+      Duration::from_nanos(self.0.load(Ordering::Relaxed))
+    }
+  }
+
+  #[test]
+  fn rtc_clear_interrupt_lowers_irq_eleven_before_plic_completion() {
+    const S_ENABLE: u64 = PLIC_BASE + 0x2080;
+    const S_CLAIM: u64 = PLIC_BASE + 0x201004;
+
+    let clock = Arc::new(ManualRtcClock::default());
+    clock.0.store(100, Ordering::Relaxed);
+    let mut cpu = RV64Cpu::new(None);
+    cpu.bus.rtc = GoldfishRtc::new_with_clock(clock);
+    cpu.bus
+      .plic
+      .write(VirtAddr(PLIC_BASE + RTC_IRQ * 4), 1)
+      .unwrap();
+    cpu.bus
+      .plic
+      .write(VirtAddr(S_ENABLE), 1 << RTC_IRQ)
+      .unwrap();
+
+    cpu.bus
+      .write::<u32>(VirtAddr(RTC_ALARM_LOW), 100)
+      .unwrap();
+    cpu.bus
+      .write::<u32>(VirtAddr(RTC_IRQ_ENABLED), 1)
+      .unwrap();
+    assert!(cpu.bus.plic.supervisor_irq_pending());
+    assert_eq!(cpu.bus.plic.read(VirtAddr(S_CLAIM)).unwrap(), RTC_IRQ as u32);
+
+    cpu.bus
+      .write::<u32>(VirtAddr(RTC_CLEAR_INTERRUPT), 1)
+      .unwrap();
+    cpu.bus
+      .plic
+      .write(VirtAddr(S_CLAIM), RTC_IRQ as u32)
+      .unwrap();
+    assert!(!cpu.bus.plic.supervisor_irq_pending());
+    assert_eq!(cpu.bus.plic.read(VirtAddr(S_CLAIM)).unwrap(), 0);
   }
 }
 

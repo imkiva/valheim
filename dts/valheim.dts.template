@@ -78,6 +78,13 @@
     compatible = "simple-bus";
     ranges;
 
+    rtc@101000 {
+      interrupts = <0x0b>;
+      interrupt-parent = <0x03>;
+      reg = <0x00 0x101000 0x00 0x1000>;
+      compatible = "google,goldfish-rtc";
+    };
+
     interrupt-controller@c000000 {
       phandle = <0x03>;
       riscv,ndev = <0x35>;

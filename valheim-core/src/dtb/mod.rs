@@ -119,5 +119,9 @@ mod tests {
     assert!(dts.contains("virtio_mmio@10002000"));
     assert!(dts.contains("reg = <0x00 0x10002000 0x00 0x1000>;"));
     assert!(dts.contains("interrupts = <0x02>;"));
+    assert!(dts.contains("rtc@101000"));
+    assert!(dts.contains("compatible = \"google,goldfish-rtc\";"));
+    assert!(dts.contains("reg = <0x00 0x101000 0x00 0x1000>;"));
+    assert!(dts.contains("interrupts = <0x0b>;"));
   }
 }

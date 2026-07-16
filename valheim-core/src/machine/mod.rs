@@ -9,7 +9,7 @@ use valheim_asm::isa::rv64::CSRAddr;
 use valheim_asm::isa::typed::{Imm32, Reg};
 
 use crate::cpu::bus::VIRT_MROM_BASE;
-use crate::cpu::csr::CSRMap::{MIE, MTIE_MASK};
+use crate::cpu::csr::CSRMap::{MIE, MTIE_MASK, SEIE_MASK};
 use crate::cpu::irq::Exception;
 use crate::cpu::RV64Cpu;
 use crate::device::ns16550a::Uart16550a;
@@ -29,6 +29,7 @@ const DEFAULT_CMDLINE: &str = "root=/dev/vda ro console=ttyS0";
 // deadlines do not map to an instruction count, so active execution always uses this ceiling.
 const MAX_EXECUTOR_BUDGET: u32 = 1024;
 
+#[derive(Debug, PartialEq, Eq)]
 enum WfiWait {
   NotIdle,
   AsyncDevice,
@@ -140,10 +141,10 @@ impl Machine {
 
   fn wait_if_still_idle(&self, wake_generation: Option<u64>) {
     if let Some(wake_generation) = wake_generation {
-      // Anchor the absolute deadline before sampling CLINT. If this thread is descheduled at any
-      // later point, the condvar wait observes the already-expired deadline instead of re-adding a
-      // stale relative timeout after it resumes. An early host wake is harmless: the dispatcher
-      // rechecks MTIP before allowing the guest to execute.
+      // Anchor the absolute deadline before sampling timer devices. If this thread is descheduled
+      // at any later point, the condvar wait observes the already-expired deadline instead of
+      // re-adding a stale relative timeout after it resumes. An early host wake is harmless: the
+      // dispatcher rechecks interrupt levels before allowing the guest to execute.
       let wait_anchor = Instant::now();
       // run_next may have observed an interrupt and cleared WFI. Recompute the timer delay after
       // polling so time spent in the dispatcher cannot make an old timeout fire early.
@@ -171,13 +172,26 @@ impl Machine {
     if !self.cpu.wfi {
       return WfiWait::NotIdle;
     }
-    if self.cpu.csrs.read_unchecked(MIE) & MTIE_MASK == 0 {
-      return WfiWait::AsyncDevice;
+    let mie = self.cpu.csrs.read_unchecked(MIE);
+    let mut earliest = None;
+
+    if mie & MTIE_MASK != 0 {
+      match self.cpu.bus.clint.duration_until_timer() {
+        Some(timeout) => earliest = Some(timeout),
+        None => return WfiWait::TimerReady,
+      }
     }
-    match self.cpu.bus.clint.duration_until_timer() {
-      Some(timeout) => WfiWait::Timer(timeout),
-      None => WfiWait::TimerReady,
+
+    if mie & SEIE_MASK != 0 {
+      if let Some(timeout) = self.cpu.bus.rtc.duration_until_alarm() {
+        if timeout.is_zero() {
+          return WfiWait::TimerReady;
+        }
+        earliest = Some(earliest.map_or(timeout, |current: Duration| current.min(timeout)));
+      }
     }
+
+    earliest.map_or(WfiWait::AsyncDevice, WfiWait::Timer)
   }
 
   pub fn run_for_test(&mut self, test_name: String) -> i32 {
@@ -304,6 +318,9 @@ mod tests {
   };
   use crate::device::clint::{ClockSource, TIMEBASE_FREQUENCY};
   use crate::device::ns16550a::{UART_IER, UART_IRQ};
+  use crate::device::rtc::{
+    GoldfishRtc, RtcClock, RTC_ALARM_HIGH, RTC_ALARM_LOW, RTC_IRQ, RTC_IRQ_ENABLED,
+  };
   use crate::device::virtio::{
     EthernetBackend, EthernetBackendFactory, NetworkWake, VIRTIO_NET_IRQ,
   };
@@ -387,6 +404,12 @@ mod tests {
   }
 
   impl ClockSource for ManualClock {
+    fn now(&self) -> Duration {
+      Duration::from_nanos(self.nanos.load(Ordering::Relaxed))
+    }
+  }
+
+  impl RtcClock for ManualClock {
     fn now(&self) -> Duration {
       Duration::from_nanos(self.nanos.load(Ordering::Relaxed))
     }
@@ -481,6 +504,112 @@ mod tests {
     assert!(machine.cpu.wfi);
     assert_eq!(machine.cpu.bus.clint.mtime(), 0);
     assert!(started.elapsed() < Duration::from_millis(900));
+  }
+
+  #[test]
+  fn rtc_alarm_deadline_preempts_a_later_clint_deadline() {
+    let clock = Arc::new(ManualClock::default());
+    let mut cpu = cpu_with_clock(clock.clone());
+    cpu.bus.rtc = GoldfishRtc::new_with_clock(clock);
+    cpu.wfi = true;
+    cpu.csrs
+      .write_unchecked(MIE, MTIE_MASK | SEIE_MASK)
+      .unwrap();
+    cpu
+      .bus
+      .clint
+      .write::<u64>(VirtAddr(CLINT_BASE + 0x4000), TIMEBASE_FREQUENCY)
+      .unwrap();
+    cpu.bus
+      .write::<u32>(VirtAddr(RTC_ALARM_HIGH), 0)
+      .unwrap();
+    cpu.bus
+      .write::<u32>(VirtAddr(RTC_ALARM_LOW), 20_000_000)
+      .unwrap();
+    cpu.bus
+      .write::<u32>(VirtAddr(RTC_IRQ_ENABLED), 1)
+      .unwrap();
+    let machine = Machine {
+      cpu,
+      executor: Box::new(NaiveInterpreter::new()),
+    };
+
+    assert_eq!(
+      machine.wfi_wait(),
+      WfiWait::Timer(Duration::from_millis(20)),
+    );
+  }
+
+  #[test]
+  fn rtc_alarm_expiring_between_poll_and_wait_never_blocks_the_machine() {
+    let clock = Arc::new(ManualClock::default());
+    let budgets = Arc::new(Mutex::new(Vec::new()));
+    let mut cpu = cpu_with_clock(clock.clone());
+    cpu.bus.rtc = GoldfishRtc::new_with_clock(clock.clone());
+    cpu.wfi = true;
+    cpu.csrs.write_unchecked(MIE, SEIE_MASK).unwrap();
+    cpu.bus
+      .plic
+      .write(VirtAddr(PLIC_BASE + RTC_IRQ * 4), 1)
+      .unwrap();
+    cpu.bus
+      .plic
+      .write(VirtAddr(PLIC_BASE + 0x2080), 1 << RTC_IRQ)
+      .unwrap();
+    cpu.bus
+      .write::<u32>(VirtAddr(RTC_ALARM_HIGH), 0)
+      .unwrap();
+    cpu.bus
+      .write::<u32>(VirtAddr(RTC_ALARM_LOW), 100)
+      .unwrap();
+    cpu.bus
+      .write::<u32>(VirtAddr(RTC_IRQ_ENABLED), 1)
+      .unwrap();
+    let mut machine = Machine {
+      cpu,
+      executor: Box::new(RecordingExecutor {
+        budgets,
+        attempted: 0,
+      }),
+    };
+
+    let wake_generation = machine.prepare_wfi_wait();
+    assert!(machine.run_next());
+    assert!(machine.cpu.wfi);
+
+    clock.set_ticks(1);
+    let started = Instant::now();
+    machine.wait_if_still_idle(wake_generation);
+    assert!(started.elapsed() < Duration::from_millis(100));
+
+    assert!(machine.run_next());
+    assert!(!machine.cpu.wfi);
+  }
+
+  #[test]
+  fn pending_rtc_alarm_with_masked_plic_source_does_not_busy_wait() {
+    let clock = Arc::new(ManualClock::default());
+    let mut cpu = cpu_with_clock(clock.clone());
+    cpu.bus.rtc = GoldfishRtc::new_with_clock(clock);
+    cpu.wfi = true;
+    cpu.csrs.write_unchecked(MIE, SEIE_MASK).unwrap();
+    cpu.bus
+      .write::<u32>(VirtAddr(RTC_ALARM_LOW), 0)
+      .unwrap();
+    cpu.bus
+      .write::<u32>(VirtAddr(RTC_IRQ_ENABLED), 1)
+      .unwrap();
+    let mut machine = Machine {
+      cpu,
+      executor: Box::new(RecordingExecutor {
+        budgets: Arc::new(Mutex::new(Vec::new())),
+        attempted: 0,
+      }),
+    };
+
+    assert!(machine.run_next());
+    assert!(machine.cpu.wfi);
+    assert_eq!(machine.wfi_wait(), WfiWait::AsyncDevice);
   }
 
   #[test]

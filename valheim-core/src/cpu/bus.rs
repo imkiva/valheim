@@ -6,6 +6,7 @@ use crate::cpu::irq::Exception;
 use crate::device::clint::{Clint, ClockSource, HostClock};
 use crate::device::Device;
 use crate::device::plic::Plic;
+use crate::device::rtc::{GoldfishRtc, RTC_BASE, RTC_IRQ};
 use crate::device::virtio::{
   EthernetBackendFactory, NetworkWake, Virtio, VirtioNet, VirtioServiceResult, VIRTIO_IRQ,
   VIRTIO_NET_IRQ,
@@ -28,6 +29,9 @@ pub const CLINT_END: u64 = CLINT_BASE + CLINT_SIZE;
 pub const PLIC_BASE: u64 = 0xc00_0000;
 pub const PLIC_SIZE: u64 = 0x208000;
 pub const PLIC_END: u64 = PLIC_BASE + PLIC_SIZE;
+
+pub const RTC_SIZE: u64 = 0x1000;
+pub const RTC_END: u64 = RTC_BASE + RTC_SIZE;
 
 /// The address which virtio starts.
 pub const VIRTIO_BASE: u64 = 0x1000_1000;
@@ -60,6 +64,7 @@ pub struct Bus {
   pub device_tree: Memory,
   pub clint: Clint,
   pub plic: Plic,
+  pub rtc: GoldfishRtc,
   pub virtio: Virtio,
   pub virtio_net: VirtioNet,
   pub(crate) wake_hub: Arc<WakeHub>,
@@ -89,6 +94,7 @@ impl Bus {
       device_tree: Memory::new(VIRT_MROM_BASE, VIRT_MROM_SIZE as usize)?,
       clint: Clint::new_with_clock(clock),
       plic: Plic::new(),
+      rtc: GoldfishRtc::new(),
       virtio: Virtio::new(0),
       virtio_net: VirtioNet::new(VIRTIO_NET_BASE, VIRTIO_NET_DEFAULT_MAC),
       wake_hub: Arc::new(WakeHub::new()),
@@ -119,6 +125,13 @@ impl Bus {
     let wake_hub = Arc::clone(&self.wake_hub);
     let wake: NetworkWake = Arc::new(move || wake_hub.notify());
     self.virtio_net.start_backend(factory, wake)
+  }
+
+  /// Samples the wall-clock alarm and keeps its level-triggered PLIC input synchronized.
+  pub(crate) fn service_rtc(&self) {
+    self
+      .plic
+      .set_source_level(RTC_IRQ, self.rtc.interrupt_asserted());
   }
 
   /// Services pending VirtIO block and network queues and synchronizes both level-triggered PLIC
@@ -172,6 +185,13 @@ impl Bus {
         Err(Exception::StoreAccessFault(addr))
       };
     }
+    if Bus::range_contains(RTC_BASE, RTC_END, addr, width) {
+      return if self.rtc.accepts(addr, width) {
+        Ok(())
+      } else {
+        Err(Exception::StoreAccessFault(addr))
+      };
+    }
     if Bus::range_contains(PLIC_BASE, PLIC_END, addr, width) {
       return if width == 4 {
         Ok(())
@@ -214,6 +234,12 @@ impl Bus {
     }
     if Bus::range_contains(CLINT_BASE, CLINT_END, addr, width) {
       return Ok(Bus::safe_reinterpret_as_T(self.clint.read::<T>(addr)?));
+    }
+    if Bus::range_contains(RTC_BASE, RTC_END, addr, width) {
+      if width != 4 {
+        return Err(Exception::LoadAccessFault(addr));
+      }
+      return Ok(Bus::safe_reinterpret_as_T(self.rtc.read(addr)? as u64));
     }
     if Bus::range_contains(PLIC_BASE, PLIC_END, addr, width) {
       if width != 4 {
@@ -265,6 +291,20 @@ impl Bus {
       return self
         .clint
         .write::<T>(addr, Bus::safe_reinterpret_as_u64(val));
+    }
+    if Bus::range_contains(RTC_BASE, RTC_END, addr, width) {
+      if width != 4 {
+        return Err(Exception::StoreAccessFault(addr));
+      }
+      let result = self
+        .rtc
+        .write(addr, Bus::safe_reinterpret_as_u64(val) as u32);
+      if result.is_ok() {
+        // CLEAR_INTERRUPT and IRQ_ENABLED must change the PLIC input before a following claim
+        // completion in the same translated block can observe the old level.
+        self.service_rtc();
+      }
+      return result;
     }
     if Bus::range_contains(PLIC_BASE, PLIC_END, addr, width) {
       if width != 4 {
@@ -377,7 +417,7 @@ impl Bus {
 
 #[cfg(test)]
 mod tests {
-  use super::{Bus, CLINT_BASE, RV64_MEMORY_BASE, RV64_MEMORY_END};
+  use super::{Bus, CLINT_BASE, RTC_BASE, RV64_MEMORY_BASE, RV64_MEMORY_END};
   use crate::cpu::irq::Exception;
   use crate::memory::VirtAddr;
 
@@ -435,6 +475,15 @@ mod tests {
     assert_eq!(
       bus.probe_write(mtime + VirtAddr(1), 8),
       Err(Exception::StoreAccessFault(mtime + VirtAddr(1))),
+    );
+    assert_eq!(bus.probe_write(VirtAddr(RTC_BASE), 4), Ok(()));
+    assert_eq!(
+      bus.probe_write(VirtAddr(RTC_BASE), 2),
+      Err(Exception::StoreAccessFault(VirtAddr(RTC_BASE))),
+    );
+    assert_eq!(
+      bus.probe_write(VirtAddr(RTC_BASE + 2), 4),
+      Err(Exception::StoreAccessFault(VirtAddr(RTC_BASE + 2))),
     );
   }
 }
