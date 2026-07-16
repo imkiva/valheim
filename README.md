@@ -26,6 +26,10 @@ IPv4 outbound NAT; networking remains disabled when `--net nat` is absent:
 The default subnet is `10.172.0.0/16` (guest `.15`, gateway `.2`, DNS `.3`). The current backend
 does not provide IPv6, host-to-guest connections, or inbound port forwarding.
 
+The virtual platform also exposes the QEMU `virt` Goldfish RTC at `0x00101000` on PLIC IRQ 11.
+It follows the host wall clock, so a Linux guest with the built-in Goldfish driver initializes
+`CLOCK_REALTIME` through `rtc0`/HCTOSYS during boot without depending on guest networking or NTP.
+
 The first run downloads the pinned guest sources and toolchains. All downloaded and generated
 files are kept under `target/demo/`; only the minimal static inputs under `demo/` are
 tracked by Git. See each demo's README and [AGENTS.md](AGENTS.md) for prerequisites, pinned
@@ -37,6 +41,8 @@ versions, and expected output.
 - Full emulation trace (registers, memory, etc.) like persistent data structures, which is useful for debugging the real hardware.
 - Legacy VirtIO-MMIO block and network devices, including opt-in IPv4 outbound NAT through a
   replaceable host-network backend.
+- QEMU-compatible Goldfish RTC with host wall-clock time, guest time setting, alarms, and
+  level-triggered PLIC delivery that can wake an idle hart without busy polling.
 - [MISA]() = `RV64ACDFIMSU`
   - RV64G (IMAFD_Zicsr_Zifencei) instruction set
   - RVC extension

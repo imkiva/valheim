@@ -29,6 +29,13 @@ Valheim 是一个用 Rust 编写、以学习和参考实现为目的的 RISC-V 6
 - JIT-enabled CLI 和完整 workspace 明确只支持 Linux x86_64 System V ABI；
   `valheim-core` 等不依赖 `valheim-jit` 的 crate 仍可单独构建。
 - UART 直接连接宿主标准输入和标准输出，并实现 Linux 8250 驱动需要的 DLAB、IIR、RX/TX 中断和状态位。
+- QEMU `virt` Goldfish RTC 以 Unix epoch 纳秒为接口并直接跟随宿主 wall clock；Linux
+  `rtc0` 可通过 HCTOSYS 在驱动注册时初始化 guest 日历时间。设备支持 guest `set_time`、
+  一次性 alarm 和 PLIC level IRQ；启用的未来 alarm 会作为 WFI 的绝对宿主 deadline，
+  guest 空闲时不需要忙轮询。
+- 当前 CPU 外部中断路径只把 PLIC supervisor context 投影为 SEIP；machine context 的
+  PLIC 寄存器虽存在，MEIP/MEIE 投递仍未接线。Linux S-mode 的 block/network/RTC 路径
+  不受影响，M-mode guest 不能依赖 PLIC 外部中断。
 - CLINT `mtime` 由宿主 monotonic clock 以 DTB 声明的 10 MHz 实时驱动；`TIME`
   CSR 是同一计数器的只读视图；MMIO 写 `mtime` 会重设 guest/host anchor，随后继续
   实时推进。完整 `Machine::run`/`run_for_test` 在 WFI 上按
@@ -46,8 +53,8 @@ Valheim 是一个用 Rust 编写、以学习和参考实现为目的的 RISC-V 6
 | `valheim-core/` | 模拟器核心：CPU/寄存器、CSR、异常和中断、MMU、指令执行、解释器、内存总线、设备、DTB、运行循环和 trace。 |
 | `valheim-core/src/cpu/` | CPU 状态、执行语义、CSR、异常/中断、系统总线，以及解释器/JIT 共用的唯一 `translate_to_host()` 页表与权限逻辑。 |
 | `valheim-core/src/interp/` | 共享 `RV64Executor`/`ExecOutcome` 执行器契约与朴素解释器实现。 |
-| `valheim-core/src/device/` | CLINT、level-aware PLIC、NS16550A UART、共用 legacy VirtIO-MMIO transport，以及支持 direct/indirect split queue 的 block/network frontend。 |
-| `valheim-core/src/machine/` | 将 CPU、可注入执行器、DTB、UART、kernel、BIOS、磁盘和可选网络 backend 组合成可运行的虚拟机。 |
+| `valheim-core/src/device/` | CLINT、Goldfish RTC、level-aware PLIC、NS16550A UART、共用 legacy VirtIO-MMIO transport，以及支持 direct/indirect split queue 的 block/network frontend。 |
+| `valheim-core/src/machine/` | 将 CPU、可注入执行器、DTB、RTC、UART、kernel、BIOS、磁盘和可选网络 backend 组合成可运行的虚拟机。 |
 | `valheim-jit/` | decoded TB/cache/runtime、页内 fetch translation cache、Cranelift RV64I/M lowering、A 扩展 helper、software TLB 和 DRAM fast path。 |
 | `valheim-cli/` | `valheim-cli` 命令行入口，负责参数解析和加载镜像。 |
 | `valheim-net/` | 可替换的宿主网络策略层；当前实现 Linux `passt` backend、IPv4 subnet/address 规则和 helper 生命周期，未来纯 Rust NAT 可在这里替换。 |
@@ -68,6 +75,7 @@ Valheim 是一个用 Rust 编写、以学习和参考实现为目的的 RISC-V 6
 | DTB | 带 32 字节前缀的副本仍位于 MROM `0x1000`；裸 FDT 另复制到 DRAM `0x87f0_0000`，guest 的 `a1/x11` 指向后者 |
 | RAM | `256 MiB @ 0x8000_0000` |
 | CLINT | `0x0200_0000`；10 MHz host-monotonic realtime `mtime` |
+| Goldfish RTC | `0x0010_1000`，大小 `0x1000`，IRQ 11；DT compatible `google,goldfish-rtc` |
 | PLIC | `0x0c00_0000`；M/S 两个 context，claim/complete 和 level re-pend |
 | UART | `0x1000_0000`，IRQ 10 |
 | VirtIO block | `0x1000_1000`，IRQ 1，legacy version 1 |
@@ -264,8 +272,8 @@ Rust workspace 单元测试：
 cargo +nightly-2024-09-05 test --workspace --locked
 ```
 
-该命令已验证为 248 个测试通过、0 个失败：`valheim-asm` 11 个、
-`valheim-cli` 5 个、`valheim-core` 129 个、`valheim-net` 28 个，
+该命令已验证为 262 个测试通过、0 个失败：`valheim-asm` 11 个、
+`valheim-cli` 5 个、`valheim-core` 143 个、`valheim-net` 28 个，
 `valheim-jit` 56 个 unit + 11 个 native/naive differential + 4 个 memory fast-path
 integration tests，`xtask` 4 个。额外的 trace 语义回归为：
 
@@ -274,7 +282,7 @@ cargo +nightly-2024-09-05 test \
   --locked --package valheim-core --features trace
 ```
 
-该命令已验证 130 个测试通过。
+该命令已验证 144 个测试通过。
 
 完整 RISC-V ISA 测试需要交叉工具链和 `riscv-tests` 子模块：
 
@@ -494,10 +502,20 @@ NoCloud 路径用 release JIT 启动；Linux 5.17 均发现 `virtio1`，DHCP 获
 IPv4 DNS、HTTP/TCP 出站与 network IRQ 增长均通过，guest 未启用 IPv6。OCI 还验证了
 自定义 `10.173.0.0/16`、默认离线启动；两个来源都验证 `sync` 后跨进程持久化及各自的
 `RESET_DISK=1` 清除。NoCloud 保留原有 resolver symlink，并在联网 guest 中再次验证
-392-package profile、`dpkg --audit` 和 GCC 编译运行。guest 没有 RTC、启动时间为 1970，
-所以未手工校时前 HTTPS 证书时间校验失败不属于网络故障；基础联网验收使用 HTTP。
+392-package profile、`dpkg --audit` 和 GCC 编译运行。当次基础联网验收使用 HTTP，
+不包含后来加入的 RTC/HCTOSYS 或 HTTPS 验收。
 另以 OCI/NoCloud 两个 guest 并行启动验证：两个隔离实例可以同时复用默认地址，均完成
 DNS 与 HTTP/TCP 出站，宿主没有 Valheim/passt listener，退出后没有遗留 helper。
+
+2026-07-16 已实际完成 RTC 验收：默认 NoCloud 以 release JIT 分别离线和 NAT 启动，
+OCI 以 release naive 离线启动，三次启动均发现 `goldfish_rtc 101000.rtc`、注册 `rtc0`
+并由 HCTOSYS 设置 2026 UTC，`hctosys=1` 且 `since_epoch` 持续前进。NoCloud 中自编译
+ioctl helper 的两秒 alarm 在 1.307 秒后返回 `RTC_AF`，IRQ 11 从 0 增至 1，读取事件后
+pending 清除；`RTC_SET_TIME` 写入 +90 秒可立即读回，新模拟器进程又恢复宿主当前时间。
+修复后的最终 release binary 上，NoCloud JIT 的 `rtcwake` 在 3.112 秒后成功返回；
+OCI naive 路径另在 2.511 秒后成功返回，两者 IRQ 11 均从 0 增至 1。NoCloud NAT 还以
+`curl` 完成 TLS 1.3
+证书时间/主机名校验并取得 `https://www.debian.org/` 的 HTTP/2 200。
 
 2026-07-15 在开发包扩展前，已实际用默认 NoCloud 路径和 release JIT 验证原始
 271-package 适配版：GPT/p1、固定 e2fsprogs 1.47.2、read-write ext4、基础工具、
@@ -592,7 +610,10 @@ NoCloud 官方输入有 271 个 dpkg package；固定 chroot profile 新增 121 
 Autotools、Bison/Flex、GDB/strace/lsof、jq/rsync、Python headers/pip/venv 等基础
 开发环境。
 demo kernel 将 `CONFIG_NET`、`CONFIG_PACKET`、`CONFIG_UNIX`、`CONFIG_INET`、
-kernel DHCP 和 `CONFIG_VIRTIO_NET` 直接编进 `Image`，并明确关闭 `CONFIG_IPV6`。
+kernel DHCP 和 `CONFIG_VIRTIO_NET` 直接编进 `Image`，并明确关闭 `CONFIG_IPV6`；同时
+显式内建 `CONFIG_GOLDFISH`、`CONFIG_RTC_CLASS`、HCTOSYS、RTC sysfs/proc/字符设备接口和
+`CONFIG_RTC_DRV_GOLDFISH`，且固定 `CONFIG_RTC_HCTOSYS_DEVICE="rtc0"`。Goldfish 驱动注册
+`rtc0` 时由 kernel RTC core 设置系统日历时间，`/init` 不需要再执行 `hwclock -s`。
 脚本默认仍离线启动；显式 `--net nat` 时才构建/启动 `passt` 并在默认 cmdline 加
 `ip=dhcp`。此时 NoCloud/OCI 中的 `curl`、wget、Git 和 APT 可使用 IPv4 出站连接，
 但实际 package 可用性仍受镜像 sources 和固定 snapshot 状态约束。当前没有
@@ -780,11 +801,24 @@ openEuler 演示没有固定的 BIOS、kernel、rootfs、下载脚本或版本 h
   mount 残留后释放；来源 runtime lock 与实际 disk inode lock 则跨 `exec` 持有。
 - PLIC 会在 priority/enable/threshold/claim/complete 和 source level 变化后重算各 context
   的 claim；CPU 每轮 interrupt poll 再按 S-context claimability 重建 SEIP。VirtIO block
-  IRQ 1 和 network IRQ 2 都使用真正的 level input，ACK 后才 deassert；network RX backend
+  IRQ 1、network IRQ 2 和 RTC IRQ 11 都使用真正的 level input；block/network 明确
+  ACK 后才 deassert，RTC 则在 `CLEAR_INTERRUPT` 或禁用 IRQ 后 deassert。network RX backend
   还必须通过 WakeHub 解除 WFI，避免 guest 空闲时依赖宿主轮询。UART 仍通过 one-shot pulse
   接口注入；CPU 只在 WFI 或 SEIP 对当前特权全局可投递时轮询 pulse device，避免在常见的
   S-mode 临界区提前消费下一脉冲。若改成完整 NS16550 line-level IRQ，必须继续保持 PLIC
   gateway 的 in-service/coalescing 语义。
+- Goldfish RTC 与 CLINT 使用不同的时间域。production `RtcClock` 每次读取宿主
+  `SystemTime`，因此反映 wall-clock 调整；guest `set_time` 只改变当前 RTC 实例的 offset，
+  新建或重新启动模拟器实例后重新跟随宿主，不能修改宿主时钟或持久化到 guest 磁盘。MMIO 只接受
+  32-bit 对齐访问；读 `TIME_LOW` 必须原子采样完整 epoch-nanoseconds 并 latch
+  `TIME_HIGH`，写 `TIME_HIGH/TIME_LOW` 更新当前实例时间，写 `ALARM_HIGH` 后再写
+  `ALARM_LOW` 才提交并 arm 一次性 alarm。已 arm alarm 使用独立的宿主 deadline；后续
+  `ALARM_HIGH` staging 或 `set_time` 不得误改该 deadline，只有下一次 `ALARM_LOW` 才重排。
+  alarm 到期后 IRQ pending 与 PLIC source 都保持 level，直到 guest 写
+  `CLEAR_INTERRUPT` 或禁用 IRQ；`CLEAR_ALARM` 只取消尚未到期的 alarm。启用的未来 alarm
+  必须参与 WFI 的最早绝对 deadline，同时仍允许 UART/network WakeHub 更早唤醒；为捕获
+  宿主校时和 suspend/resume 的 wall-clock 跳变，RTC WFI 最多等待一秒就重采样，但不得
+  退回 CPU 忙轮询或 alarm fast-forward。
 - production CLINT 只支持 host-monotonic realtime：`mtime` 以 10 MHz 在 guest 执行、
   WFI 和宿主被抢占期间持续流逝，不得恢复 instruction-tick 或 WFI fast-forward。
   `ClockSource` 注入只用于无 sleep 的可重复测试，不是面向 CLI 的 deterministic/turbo
@@ -875,6 +909,31 @@ Valheim 正常退出和 `Ctrl-C` 后都没有遗留 helper/worker，两个并行
 同一 guest-visible subnet，并且没有 host→guest listener/端口转发。frontend、backend 或
 WFI 路径的测试还应覆盖 direct/indirect RX/TX、malformed descriptor、队列 wrap、IRQ
 ACK/deassert、backend backpressure/failure、异步 RX 唤醒和 clean shutdown/reap。
+
+修改 Goldfish RTC、RTC DTB、PLIC IRQ 11 或 RTC alarm/WFI 路径时，必须先用离线 Linux
+启动排除 NTP 干扰，并至少运行：
+
+```bash
+dmesg | grep -E 'registered as rtc0|setting system clock to'
+test "$(cat /sys/class/rtc/rtc0/hctosys)" = 1
+cat /proc/driver/rtc
+date -u
+rtc_before="$(cat /sys/class/rtc/rtc0/since_epoch)"
+sleep 2
+rtc_after="$(cat /sys/class/rtc/rtc0/since_epoch)"
+test "$((rtc_after - rtc_before))" -ge 1
+grep -i rtc /proc/interrupts
+time rtcwake --utc --mode on --seconds 2
+grep -i rtc /proc/interrupts
+```
+
+启动日志必须确认 `rtc0` 注册及 HCTOSYS，guest `date` 和 RTC sysfs 应与启动时宿主 UTC 只差
+正常执行耗时；RTC 应持续走时，`rtcwake --seconds 2` 应在约 2–4 秒内返回（包含 guest
+执行开销），IRQ 11 计数增长，清中断后不得
+形成 interrupt storm。默认 NoCloud profile 不含 `hwclock`；另在其他验收结束后用基于
+`<linux/rtc.h>` 的 `RTC_SET_TIME`/`RTC_RD_TIME` ioctl helper 检查 `set_time` 读回，再重启
+确认 RTC 恢复宿主当前 wall clock。NAT guest 还应完成一次 HTTPS
+证书时间检查，但外部网络和 CA 失败不能替代 MMIO、alarm、level IRQ 与 WFI 单元测试。
 
 修改 CLINT、TIME CSR、WFI 或 RustSBI timer relay 时，Debian 还必须确认启动日志包含
 `SBI TIME extension detected` 和 10 MHz `sched_clock`，`time sleep 1` 约为一秒、

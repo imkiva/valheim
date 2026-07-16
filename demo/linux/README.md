@@ -22,6 +22,21 @@ demo kernel 将 IPv4、kernel DHCP 和 VirtIO network 驱动直接编进 `Image`
 或端口转发；APT 是否能安装特定 package 还取决于镜像内的 sources 与固定 snapshot
 状态。
 
+Valheim 还提供 QEMU `virt` 布局的 Goldfish RTC：MMIO 位于 `0x0010_1000`、大小
+`0x1000`，使用 PLIC IRQ 11，DT compatible 为 `google,goldfish-rtc`。RTC 的 Unix
+epoch 纳秒计数直接跟随宿主 wall clock，与 CLINT 的 host-monotonic 10 MHz `mtime`
+分工独立。Linux 的 `RTC_CLASS`、HCTOSYS、
+sysfs/proc/字符设备接口和 `RTC_DRV_GOLDFISH` 都显式内建进 `Image`，并固定以 `rtc0`
+在驱动注册时初始化 guest `CLOCK_REALTIME`；这条路径不依赖网络或 NTP。设备同时支持
+guest `set_time`、一次性 alarm、level-triggered IRQ 和 alarm deadline 上的 WFI 唤醒。
+已 arm alarm 的宿主 deadline 与后续 `set_time`/`ALARM_HIGH` staging 相互独立；WFI
+在长 alarm 上最多每秒重采样一次 wall clock，以覆盖宿主校时或 suspend/resume。
+
+2026-07-16 已在 NoCloud release JIT 中实际验证 `rtc0`/HCTOSYS、持续走时、
+`RTC_SET_TIME` 读回、进程重启恢复宿主时间，以及 `rtcwake` 的 IRQ 11 唤醒；OCI
+release naive 另验证了 `rtc0`/HCTOSYS 和 `rtcwake`。NoCloud NAT 还通过了 TLS 1.3
+证书校验和 HTTPS HTTP/2 200。
+
 根文件系统以无分区表的 raw ext4 镜像通过 Valheim legacy VirtIO-MMIO block
 设备挂载为 `/dev/vda`。kernel `Image` 不再内嵌完整 initramfs；VirtIO、
 VirtIO-MMIO、VirtIO block 和 ext4 都直接编进 kernel，默认命令行为：
@@ -157,8 +172,8 @@ IPv4 出站 TCP、UDP 和 DNS，不提供 IPv6、host→guest 连接或入站端
    下载固定的 static qemu-riscv64，在临时 p1 chroot 中从固定 Debian snapshot 安装
    开发包，然后生成并校验选中来源的 ext4 base。NoCloud 仅在 base cache miss 时需要
    sudo；首次运行或显式重置时创建该来源独立的可写 runtime。
-4. 构建包含内建 VirtIO block、VirtIO network、IPv4/kernel DHCP 和 ext4 驱动的
-   raw `Image`；只有显式 NAT 模式才启动 DHCP。
+4. 构建包含内建 VirtIO block、VirtIO network、IPv4/kernel DHCP、Goldfish RTC 和
+   ext4 驱动的 raw `Image`；只有显式 NAT 模式才启动 DHCP，RTC/HCTOSYS 始终可用。
 5. 调用 `demo/rustsbi/run.sh --build-only` 构建历史 RustSBI firmware。
 6. 构建 release 版 `valheim-cli`，自动传入 runtime `--disk`，然后进入交互式 guest。
 
@@ -330,14 +345,39 @@ printf 'installed='; dpkg-query -W -f='${db:Status-Abbrev}\n' | grep -c '^ii '
 printf '#include <stdio.h>\nint main(void){puts("CC_OK");}\n' >/tmp/hello.c
 gcc -O2 -Wall -Werror /tmp/hello.c -o /tmp/hello && /tmp/hello
 awk '$2 == "/" { print $1, $3, $4 }' /proc/mounts
+dmesg | grep -E 'registered as rtc0|setting system clock to'
+cat /sys/class/rtc/rtc0/name
+cat /sys/class/rtc/rtc0/hctosys
+cat /proc/driver/rtc
+date -u
+rtc_before="$(cat /sys/class/rtc/rtc0/since_epoch)"
+sleep 2
+rtc_after="$(cat /sys/class/rtc/rtc0/since_epoch)"
+test "$((rtc_after - rtc_before))" -ge 1
 grep riscv-timer /proc/interrupts
 time sleep 1
 grep riscv-timer /proc/interrupts
+grep -i rtc /proc/interrupts
+time rtcwake --utc --mode on --seconds 2
+grep -i rtc /proc/interrupts
 ```
 
 `SBI TIME extension detected`、`sched_clock: 64 bits at 10MHz`、VirtIO block 识别、
 ext4 以 read-write 方式挂载、`sleep 1` 约一秒且
 前后两次 `riscv-timer` IRQ 计数增加，是 realtime/timer-relay 验收的一部分。
+RTC 启动日志应包含 `registered as rtc0` 和 `setting system clock to ... UTC`，
+`/sys/class/rtc/rtc0/hctosys` 应为 `1`；`date -u`、RTC sysfs 和启动时的宿主 UTC
+应只相差正常执行耗时。两次 `since_epoch` 读数应随宿主 wall clock 前进，
+`rtcwake --seconds 2` 应在约 2–4 秒内返回（包含 guest 执行开销），并使
+`/proc/interrupts` 中 RTC/IRQ 11 的计数增长；清中断后不应
+持续增长形成 interrupt storm。RTC 是日历时间来源，不能替代 CLINT/SBI timer 的
+调度时钟验收。
+
+默认 NoCloud profile 不安装 `hwclock`。需要额外检查 guest `set_time` 路径时，在本次
+VM 的其他验收完成后编译一个基于 `<linux/rtc.h>` 的小程序，通过 `/dev/rtc0` 执行
+`RTC_SET_TIME` 后立即 `RTC_RD_TIME`；读回值应与刚写入的时间一致且继续正常走时。
+该偏移只属于当前模拟器进程；退出并重新启动后会重新跟随宿主 wall clock，不会把
+guest 设置持久化到磁盘或宿主系统时钟。
 
 显式使用 `--net nat` 时，还应看到 `virtio_net` 绑定第二个 VirtIO-MMIO 设备。默认
 网段可用以下命令检查 DHCP 地址、路由、DNS 数据与 IPv4 出站连接：
@@ -348,13 +388,13 @@ ip -4 route
 cat /proc/net/pnp
 cat /etc/resolv.conf
 getent ahostsv4 debian.org
-wget -4 -qO /dev/null http://example.com/
+curl -4 --fail --head --silent --show-error https://www.debian.org/
 ```
 
 地址应包含 `10.172.0.15/16`，default route 应指向 `10.172.0.2`，resolver 应包含
 `10.172.0.3`。公共网络检查会受宿主网络策略影响，不应替代后端 frame/queue 单元测试。
-Valheim 尚未提供 RTC，guest 初始时间为 1970；未手工校时前 HTTPS 证书时间检查会失败，
-因此这里故意用 HTTP 只验收网络路径。
+HTTPS 检查同时要求 RTC/HCTOSYS 已提供正确 UTC、guest CA 证书有效且宿主网络允许访问；
+其中任何外部条件失败都不应替代对 RTC MMIO/alarm 和网络 frame/queue 的独立测试。
 
 验证 runtime 可写和跨进程持久化：
 
