@@ -165,15 +165,37 @@ impl RV64Cpu {
 
 #[cfg(test)]
 mod tests {
+  use std::collections::VecDeque;
+  use std::io;
+
   use memmap2::MmapMut;
 
   use super::{IRQ, RV64Cpu};
-  use crate::cpu::bus::{PLIC_BASE, VIRTIO_BASE};
+  use crate::cpu::bus::{PLIC_BASE, VIRTIO_BASE, VIRTIO_NET_BASE};
   use crate::cpu::csr::CSRMap::{
     MCAUSE, MEPC, MIDELEG, MIE, MIP, MTIE_MASK, MTIP_MASK, MTVEC, STIE_MASK, STIP_MASK,
   };
   use crate::cpu::PrivilegeMode;
+  use crate::device::virtio::{EthernetBackend, VIRTIO_NET_IRQ};
   use crate::memory::VirtAddr;
+
+  struct ReceiveBackend {
+    frames: VecDeque<Vec<u8>>,
+  }
+
+  impl EthernetBackend for ReceiveBackend {
+    fn try_send(&mut self, _frame: &[u8]) -> io::Result<bool> {
+      Ok(true)
+    }
+
+    fn try_recv(&mut self) -> io::Result<Option<Vec<u8>>> {
+      Ok(self.frames.pop_front())
+    }
+
+    fn shutdown(&mut self) -> io::Result<()> {
+      Ok(())
+    }
+  }
 
   fn waiting_cpu_with_timer_interrupt(
     individually_enabled: bool,
@@ -402,6 +424,97 @@ mod tests {
       .write::<u32>(VirtAddr(VIRTIO_BASE + 0x64), 1)
       .unwrap();
     cpu.bus.plic.write(claim, 1).unwrap();
+    assert!(!cpu.bus.plic.supervisor_irq_pending());
+  }
+
+  #[test]
+  fn virtio_net_rx_progresses_without_a_kick_and_ack_lowers_irq_two_before_completion() {
+    const QUEUE_BASE: u64 = 0x8000_6000;
+    const AVAIL_BASE: u64 = QUEUE_BASE + 16 * 8;
+    const USED_BASE: u64 = 0x8000_7000;
+    const BUFFER: u64 = 0x8000_8000;
+    const QUEUE_NUM: u32 = 8;
+
+    let frame = vec![0x5a; 60];
+    let mut cpu = RV64Cpu::new(None);
+    cpu.bus
+      .virtio_net
+      .set_backend(ReceiveBackend {
+        frames: VecDeque::from([frame.clone()]),
+      })
+      .unwrap();
+    cpu.bus
+      .plic
+      .write(VirtAddr(PLIC_BASE + VIRTIO_NET_IRQ * 4), 1)
+      .unwrap();
+    cpu.bus
+      .plic
+      .write(VirtAddr(PLIC_BASE + 0x2080), 1 << VIRTIO_NET_IRQ)
+      .unwrap();
+
+    cpu.bus
+      .write::<u32>(VirtAddr(VIRTIO_NET_BASE + 0x28), 0x1000)
+      .unwrap();
+    cpu.bus
+      .write::<u32>(VirtAddr(VIRTIO_NET_BASE + 0x30), 0)
+      .unwrap();
+    cpu.bus
+      .write::<u32>(VirtAddr(VIRTIO_NET_BASE + 0x38), QUEUE_NUM)
+      .unwrap();
+    cpu.bus
+      .write::<u32>(VirtAddr(VIRTIO_NET_BASE + 0x3c), 0x1000)
+      .unwrap();
+    cpu.bus
+      .write::<u32>(
+        VirtAddr(VIRTIO_NET_BASE + 0x40),
+        (QUEUE_BASE / 0x1000) as u32,
+      )
+      .unwrap();
+    cpu.bus
+      .write::<u32>(VirtAddr(VIRTIO_NET_BASE + 0x70), 4)
+      .unwrap();
+
+    let mut descriptor = [0_u8; 16];
+    descriptor[0..8].copy_from_slice(&BUFFER.to_le_bytes());
+    descriptor[8..12].copy_from_slice(&(10_u32 + frame.len() as u32).to_le_bytes());
+    descriptor[12..14].copy_from_slice(&2_u16.to_le_bytes());
+    cpu.bus
+      .mem
+      .write_bytes(VirtAddr(QUEUE_BASE), &descriptor)
+      .unwrap();
+    cpu.bus
+      .mem
+      .write_bytes(VirtAddr(AVAIL_BASE + 2), &1_u16.to_le_bytes())
+      .unwrap();
+    cpu.bus
+      .mem
+      .write_bytes(VirtAddr(AVAIL_BASE + 4), &0_u16.to_le_bytes())
+      .unwrap();
+
+    cpu.reserved.push(VirtAddr(0x8000_9000));
+    assert_eq!(cpu.pending_interrupt(), None);
+
+    assert!(cpu.reserved.is_empty());
+    assert_eq!(cpu.bus.mem.read::<u16>(VirtAddr(USED_BASE + 2)), Some(1));
+    assert_eq!(
+      cpu.bus.mem.read::<u32>(VirtAddr(USED_BASE + 8)),
+      Some((10 + frame.len()) as u32),
+    );
+    assert_eq!(cpu.bus.mem.slice(VirtAddr(BUFFER), 10), Some(&[0; 10][..]));
+    assert_eq!(
+      cpu.bus.mem.slice(VirtAddr(BUFFER + 10), frame.len()),
+      Some(frame.as_slice()),
+    );
+
+    let claim = VirtAddr(PLIC_BASE + 0x201004);
+    assert_eq!(cpu.bus.plic.read(claim).unwrap(), VIRTIO_NET_IRQ as u32);
+    cpu.bus
+      .write::<u32>(VirtAddr(VIRTIO_NET_BASE + 0x64), 1)
+      .unwrap();
+    cpu.bus
+      .plic
+      .write(claim, VIRTIO_NET_IRQ as u32)
+      .unwrap();
     assert!(!cpu.bus.plic.supervisor_irq_pending());
   }
 }

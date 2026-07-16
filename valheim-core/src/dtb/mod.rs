@@ -114,5 +114,10 @@ mod tests {
     assert!(dts.contains(&format!(
       "valheim,release = \"Valheim {VALHEIM_VERSION}\\nGitHub: {VALHEIM_REPOSITORY}\\n\";"
     )));
+    assert!(dts.contains("virtio_mmio@10001000"));
+    assert!(dts.contains("reg = <0x00 0x10001000 0x00 0x1000>;"));
+    assert!(dts.contains("virtio_mmio@10002000"));
+    assert!(dts.contains("reg = <0x00 0x10002000 0x00 0x1000>;"));
+    assert!(dts.contains("interrupts = <0x02>;"));
   }
 }

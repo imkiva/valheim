@@ -6,7 +6,10 @@ use crate::cpu::irq::Exception;
 use crate::device::clint::{Clint, ClockSource, HostClock};
 use crate::device::Device;
 use crate::device::plic::Plic;
-use crate::device::virtio::{Virtio, VirtioServiceResult, VIRTIO_IRQ};
+use crate::device::virtio::{
+  EthernetBackendFactory, NetworkWake, Virtio, VirtioNet, VirtioServiceResult, VIRTIO_IRQ,
+  VIRTIO_NET_IRQ,
+};
 use crate::memory::{CanIO, Memory, VirtAddr};
 use crate::wake::WakeHub;
 
@@ -31,6 +34,10 @@ pub const VIRTIO_BASE: u64 = 0x1000_1000;
 pub const VIRTIO_SIZE: u64 = 0x1000;
 pub const VIRTIO_END: u64 = VIRTIO_BASE + VIRTIO_SIZE;
 
+pub const VIRTIO_NET_BASE: u64 = 0x1000_2000;
+pub const VIRTIO_NET_END: u64 = VIRTIO_NET_BASE + VIRTIO_SIZE;
+pub const VIRTIO_NET_DEFAULT_MAC: [u8; 6] = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
+
 const HOST_PAGE_SIZE: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +61,7 @@ pub struct Bus {
   pub clint: Clint,
   pub plic: Plic,
   pub virtio: Virtio,
+  pub virtio_net: VirtioNet,
   pub(crate) wake_hub: Arc<WakeHub>,
 }
 
@@ -82,6 +90,7 @@ impl Bus {
       clint: Clint::new_with_clock(clock),
       plic: Plic::new(),
       virtio: Virtio::new(0),
+      virtio_net: VirtioNet::new(VIRTIO_NET_BASE, VIRTIO_NET_DEFAULT_MAC),
       wake_hub: Arc::new(WakeHub::new()),
     })
   }
@@ -97,20 +106,40 @@ impl Bus {
   }
 
   pub fn halt(&mut self) {
+    if let Err(error) = self.virtio_net.shutdown() {
+      eprintln!("Error shutting down VirtIO network backend: {error}");
+    }
     self.devices.iter().for_each(|dev| match dev.destroy() {
       Ok(_) => (),
       Err(_) => eprintln!("Error destroying device: {}", (*dev).name()),
     });
   }
 
-  /// Services pending VirtIO block requests and keeps the PLIC input synchronized with the
-  /// device's level-triggered interrupt-status register.
+  pub fn enable_network(&mut self, factory: Box<dyn EthernetBackendFactory>) -> std::io::Result<()> {
+    let wake_hub = Arc::clone(&self.wake_hub);
+    let wake: NetworkWake = Arc::new(move || wake_hub.notify());
+    self.virtio_net.start_backend(factory, wake)
+  }
+
+  /// Services pending VirtIO block and network queues and synchronizes both level-triggered PLIC
+  /// inputs. Device DMA must make progress independently of guest interrupt-enable state.
   pub(crate) fn service_virtio(&mut self) -> VirtioServiceResult {
-    let result = self.virtio.service_queue(&mut self.mem);
+    let block = self.virtio.service_queue(&mut self.mem);
+    let network = self.virtio_net.service_queues(&mut self.mem);
+    if let Some(error) = self.virtio_net.take_backend_error() {
+      eprintln!("VirtIO network backend stopped: {error}");
+    }
     self
       .plic
-      .set_source_level(VIRTIO_IRQ, result.interrupt_asserted);
-    result
+      .set_source_level(VIRTIO_IRQ, block.interrupt_asserted);
+    self
+      .plic
+      .set_source_level(VIRTIO_NET_IRQ, network.interrupt_asserted);
+    VirtioServiceResult {
+      completed: block.completed.saturating_add(network.completed),
+      interrupt_asserted: block.interrupt_asserted || network.interrupt_asserted,
+      dma_write: block.dma_write || network.dma_write,
+    }
   }
 
   /// Returns the host page backing a DRAM address. Device and unmapped addresses never receive a
@@ -157,6 +186,13 @@ impl Bus {
         Err(Exception::StoreAccessFault(addr))
       };
     }
+    if Bus::range_contains(VIRTIO_NET_BASE, VIRTIO_NET_END, addr, width) {
+      return if matches!(width, 1 | 2 | 4) {
+        Ok(())
+      } else {
+        Err(Exception::StoreAccessFault(addr))
+      };
+    }
 
     let mapped_device = self.io_map.iter().any(|((base, end), dev_id)| {
       self.devices.get(*dev_id).is_some() && Bus::range_contains(base.0, end.0, addr, width)
@@ -189,6 +225,11 @@ impl Bus {
     if Bus::range_contains(VIRTIO_BASE, VIRTIO_END, addr, width) {
       return Ok(Bus::safe_reinterpret_as_T(
         self.virtio.read::<T>(addr)? as u64
+      ));
+    }
+    if Bus::range_contains(VIRTIO_NET_BASE, VIRTIO_NET_END, addr, width) {
+      return Ok(Bus::safe_reinterpret_as_T(
+        self.virtio_net.read::<T>(addr)? as u64
       ));
     }
 
@@ -243,6 +284,17 @@ impl Bus {
         self
           .plic
           .set_source_level(VIRTIO_IRQ, self.virtio.interrupt_asserted());
+      }
+      return result;
+    }
+    if Bus::range_contains(VIRTIO_NET_BASE, VIRTIO_NET_END, addr, width) {
+      let result = self
+        .virtio_net
+        .write::<T>(addr, Bus::safe_reinterpret_as_u64(val) as u32);
+      if result.is_ok() {
+        self
+          .plic
+          .set_source_level(VIRTIO_NET_IRQ, self.virtio_net.interrupt_asserted());
       }
       return result;
     }

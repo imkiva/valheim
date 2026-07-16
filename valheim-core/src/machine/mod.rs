@@ -13,6 +13,7 @@ use crate::cpu::csr::CSRMap::{MIE, MTIE_MASK};
 use crate::cpu::irq::Exception;
 use crate::cpu::RV64Cpu;
 use crate::device::ns16550a::Uart16550a;
+use crate::device::virtio::EthernetBackendFactory;
 use crate::dtb::generate_device_tree_rom;
 use crate::interp::naive::NaiveInterpreter;
 use crate::interp::RV64Executor;
@@ -193,7 +194,7 @@ impl Machine {
           let a0 = self.cpu.read_reg(Reg::X(Fin::new(10))).unwrap();
           let a7 = self.cpu.read_reg(Reg::X(Fin::new(17))).unwrap();
           if a7 != 93 { continue; } // not the result telling ecall
-          return if a0 == 0 && gp == 1 {
+          let exit_code = if a0 == 0 && gp == 1 {
             println!("[Valheim:{:?}] {}: Test passed!", self.cpu.mode, test_name);
             0
           } else {
@@ -202,6 +203,8 @@ impl Machine {
             self.show_status();
             1
           };
+          self.shutdown();
+          return exit_code;
         }
       }
     }
@@ -222,9 +225,13 @@ impl Machine {
   }
 
   pub fn halt(&mut self) {
+    self.shutdown();
+    self.show_status();
+  }
+
+  fn shutdown(&mut self) {
     self.cpu.bus.halt();
     self.cpu.journal.flush();
-    self.show_status();
   }
 
   pub fn show_status(&self) {
@@ -273,27 +280,96 @@ impl Machine {
     self.cpu.bus.virtio.set_image(mmap)?;
     Ok(())
   }
+
+  pub fn enable_network(
+    &mut self,
+    factory: Box<dyn EthernetBackendFactory>,
+  ) -> Result<(), std::io::Error> {
+    self.cpu.bus.enable_network(factory)
+  }
 }
 
 #[cfg(test)]
 mod tests {
+  use std::collections::VecDeque;
+  use std::io;
   use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
   use std::sync::{mpsc, Arc, Mutex};
   use std::time::{Duration, Instant};
 
   use super::*;
-  use crate::cpu::bus::{CLINT_BASE, PLIC_BASE};
+  use crate::cpu::bus::{CLINT_BASE, PLIC_BASE, VIRTIO_NET_BASE};
   use crate::cpu::csr::CSRMap::{
-    MCAUSE, MEPC, MIP, MSIE_MASK, MTIP_MASK, MTVEC, SEIE_MASK,
+    MCAUSE, MEPC, MIE, MIP, MSIE_MASK, MTIP_MASK, MTVEC, SEIE_MASK,
   };
   use crate::device::clint::{ClockSource, TIMEBASE_FREQUENCY};
   use crate::device::ns16550a::{UART_IER, UART_IRQ};
+  use crate::device::virtio::{
+    EthernetBackend, EthernetBackendFactory, NetworkWake, VIRTIO_NET_IRQ,
+  };
   use crate::device::Device;
   use crate::interp::ExecOutcome;
 
   struct RecordingExecutor {
     budgets: Arc<Mutex<Vec<u32>>>,
     attempted: u32,
+  }
+
+  struct SharedNetworkBackend {
+    frames: Arc<Mutex<VecDeque<Vec<u8>>>>,
+  }
+
+  impl EthernetBackend for SharedNetworkBackend {
+    fn try_send(&mut self, _frame: &[u8]) -> io::Result<bool> {
+      Ok(true)
+    }
+
+    fn try_recv(&mut self) -> io::Result<Option<Vec<u8>>> {
+      Ok(self.frames.lock().unwrap().pop_front())
+    }
+
+    fn shutdown(&mut self) -> io::Result<()> {
+      Ok(())
+    }
+  }
+
+  struct SharedNetworkFactory {
+    frames: Arc<Mutex<VecDeque<Vec<u8>>>>,
+    wake: Arc<Mutex<Option<NetworkWake>>>,
+  }
+
+  struct ShutdownBackend(Arc<AtomicBool>);
+
+  impl EthernetBackend for ShutdownBackend {
+    fn try_send(&mut self, _frame: &[u8]) -> io::Result<bool> {
+      Ok(true)
+    }
+
+    fn try_recv(&mut self) -> io::Result<Option<Vec<u8>>> {
+      Ok(None)
+    }
+
+    fn shutdown(&mut self) -> io::Result<()> {
+      self.0.store(true, Ordering::Release);
+      Ok(())
+    }
+  }
+
+  struct TestExitExecutor;
+
+  impl RV64Executor for TestExitExecutor {
+    fn execute(&mut self, _cpu: &mut RV64Cpu, _budget: u32) -> ExecOutcome {
+      ExecOutcome::new(1, Err(Exception::MachineEcall))
+    }
+  }
+
+  impl EthernetBackendFactory for SharedNetworkFactory {
+    fn start(self: Box<Self>, wake: NetworkWake) -> io::Result<Box<dyn EthernetBackend>> {
+      *self.wake.lock().unwrap() = Some(wake);
+      Ok(Box::new(SharedNetworkBackend {
+        frames: Arc::clone(&self.frames),
+      }))
+    }
   }
 
   #[derive(Default)]
@@ -325,6 +401,27 @@ mod tests {
       self.budgets.lock().unwrap().push(budget);
       ExecOutcome::new(self.attempted.min(budget), Ok(()))
     }
+  }
+
+  #[test]
+  fn test_run_shuts_down_an_attached_network_backend_before_returning() {
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let mut machine = Machine {
+      cpu: RV64Cpu::new(None),
+      executor: Box::new(TestExitExecutor),
+    };
+    machine
+      .cpu
+      .bus
+      .virtio_net
+      .set_backend(ShutdownBackend(Arc::clone(&shutdown)))
+      .unwrap();
+    machine.cpu.write_reg(Reg::X(Fin::new(3)), 1);
+    machine.cpu.write_reg(Reg::X(Fin::new(10)), 0);
+    machine.cpu.write_reg(Reg::X(Fin::new(17)), 93);
+
+    assert_eq!(machine.run_for_test("network-shutdown".into()), 0);
+    assert!(shutdown.load(Ordering::Acquire));
   }
 
   #[test]
@@ -631,6 +728,128 @@ mod tests {
     assert!(!machine.cpu.wfi);
     assert_eq!(machine.cpu.read_pc(), VirtAddr(0x8000_0100));
     assert_eq!(machine.cpu.csrs.read_unchecked(MCAUSE), (1_u64 << 63) | 9);
+  }
+
+  #[test]
+  fn network_frame_between_wfi_poll_and_wait_wakes_and_services_rx() {
+    const QUEUE_BASE: u64 = 0x8000_a000;
+    const AVAIL_BASE: u64 = QUEUE_BASE + 16 * 8;
+    const USED_BASE: u64 = 0x8000_b000;
+    const BUFFER: u64 = 0x8000_c000;
+
+    let frames = Arc::new(Mutex::new(VecDeque::new()));
+    let wake = Arc::new(Mutex::new(None));
+    let budgets = Arc::new(Mutex::new(Vec::new()));
+    let mut machine = Machine {
+      cpu: RV64Cpu::new(None),
+      executor: Box::new(RecordingExecutor {
+        budgets,
+        attempted: 0,
+      }),
+    };
+    machine
+      .enable_network(Box::new(SharedNetworkFactory {
+        frames: Arc::clone(&frames),
+        wake: Arc::clone(&wake),
+      }))
+      .unwrap();
+
+    machine
+      .cpu
+      .bus
+      .plic
+      .write(VirtAddr(PLIC_BASE + VIRTIO_NET_IRQ * 4), 1)
+      .unwrap();
+    machine
+      .cpu
+      .bus
+      .plic
+      .write(VirtAddr(PLIC_BASE + 0x2080), 1 << VIRTIO_NET_IRQ)
+      .unwrap();
+    machine.cpu.csrs.write_unchecked(MIE, SEIE_MASK).unwrap();
+
+    machine
+      .cpu
+      .bus
+      .write::<u32>(VirtAddr(VIRTIO_NET_BASE + 0x28), 0x1000)
+      .unwrap();
+    machine
+      .cpu
+      .bus
+      .write::<u32>(VirtAddr(VIRTIO_NET_BASE + 0x30), 0)
+      .unwrap();
+    machine
+      .cpu
+      .bus
+      .write::<u32>(VirtAddr(VIRTIO_NET_BASE + 0x38), 8)
+      .unwrap();
+    machine
+      .cpu
+      .bus
+      .write::<u32>(VirtAddr(VIRTIO_NET_BASE + 0x3c), 0x1000)
+      .unwrap();
+    machine
+      .cpu
+      .bus
+      .write::<u32>(
+        VirtAddr(VIRTIO_NET_BASE + 0x40),
+        (QUEUE_BASE / 0x1000) as u32,
+      )
+      .unwrap();
+    machine
+      .cpu
+      .bus
+      .write::<u32>(VirtAddr(VIRTIO_NET_BASE + 0x70), 4)
+      .unwrap();
+
+    let frame = vec![0xa5; 60];
+    let mut descriptor = [0_u8; 16];
+    descriptor[0..8].copy_from_slice(&BUFFER.to_le_bytes());
+    descriptor[8..12].copy_from_slice(&(10_u32 + frame.len() as u32).to_le_bytes());
+    descriptor[12..14].copy_from_slice(&2_u16.to_le_bytes());
+    machine
+      .cpu
+      .bus
+      .mem
+      .write_bytes(VirtAddr(QUEUE_BASE), &descriptor)
+      .unwrap();
+    machine
+      .cpu
+      .bus
+      .mem
+      .write_bytes(VirtAddr(AVAIL_BASE + 2), &1_u16.to_le_bytes())
+      .unwrap();
+    machine
+      .cpu
+      .bus
+      .mem
+      .write_bytes(VirtAddr(AVAIL_BASE + 4), &0_u16.to_le_bytes())
+      .unwrap();
+
+    machine.cpu.wfi = true;
+    let wake_generation = machine.prepare_wfi_wait();
+    assert!(machine.run_next());
+    assert!(machine.cpu.wfi);
+
+    frames.lock().unwrap().push_back(frame.clone());
+    wake.lock().unwrap().as_ref().unwrap()();
+    machine.wait_if_still_idle(wake_generation);
+    assert!(machine.cpu.wfi);
+
+    assert!(machine.run_next());
+    assert!(!machine.cpu.wfi);
+    assert_eq!(
+      machine.cpu.bus.mem.read::<u16>(VirtAddr(USED_BASE + 2)),
+      Some(1),
+    );
+    assert_eq!(
+      machine
+        .cpu
+        .bus
+        .mem
+        .slice(VirtAddr(BUFFER + 10), frame.len()),
+      Some(frame.as_slice()),
+    );
   }
 
   #[test]
