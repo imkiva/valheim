@@ -1,0 +1,13 @@
+[package]
+name = "valheim-net"
+version = "0.2.0"
+edition = "2021"
+repository = "https://github.com/imkiva/valheim"
+description = "Host networking backends for the Valheim RISC-V emulator"
+license = "MIT"
+
+[dependencies]
+valheim-core = { path = "../valheim-core", version = "0.2.0" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
