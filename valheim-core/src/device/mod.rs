@@ -3,6 +3,7 @@ use crate::memory::{Memory, VirtAddr};
 pub mod ns16550a;
 pub mod clint;
 pub mod plic;
+pub mod rtc;
 pub mod virtio;
 
 pub trait Device {
