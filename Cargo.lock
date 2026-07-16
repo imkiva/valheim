@@ -604,6 +604,7 @@ dependencies = [
  "clap",
  "valheim-core",
  "valheim-jit",
+ "valheim-net",
 ]
 
 [[package]]
