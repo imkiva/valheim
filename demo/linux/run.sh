@@ -1167,6 +1167,13 @@ configure_kernel() {
     --enable RISCV_SBI \
     --enable RISCV_SBI_V01 \
     --enable SOC_VIRT \
+    --enable RTC_CLASS \
+    --enable RTC_HCTOSYS \
+    --set-str RTC_HCTOSYS_DEVICE rtc0 \
+    --enable RTC_INTF_SYSFS \
+    --enable RTC_INTF_PROC \
+    --enable RTC_INTF_DEV \
+    --enable RTC_DRV_GOLDFISH \
     --enable RISCV_ISA_C \
     --enable FPU \
     --enable DEVTMPFS \
@@ -1198,6 +1205,14 @@ configure_kernel() {
     grep -Fqx "${option}=y" "${config}" || die \
       "kernel config did not build ${option} into the Image"
   done
+  for option in \
+    CONFIG_GOLDFISH CONFIG_RTC_CLASS CONFIG_RTC_HCTOSYS CONFIG_RTC_INTF_SYSFS \
+    CONFIG_RTC_INTF_PROC CONFIG_RTC_INTF_DEV CONFIG_RTC_DRV_GOLDFISH; do
+    grep -Fqx "${option}=y" "${config}" || die \
+      "kernel config did not build ${option} into the Image"
+  done
+  grep -Fqx 'CONFIG_RTC_HCTOSYS_DEVICE="rtc0"' "${config}" || die \
+    'kernel config did not select rtc0 for hardware-clock initialization'
   grep -Fqx '# CONFIG_IPV6 is not set' "${config}" || die \
     "kernel config unexpectedly enabled IPv6"
   grep -Fqx '# CONFIG_SMP is not set' "${config}" || die \
