@@ -28,6 +28,9 @@ const DEFAULT_CMDLINE: &str = "root=/dev/vda ro console=ttyS0";
 // Bound interrupt-poll latency while amortizing Machine/JIT dispatcher work. Real-time timer
 // deadlines do not map to an instruction count, so active execution always uses this ceiling.
 const MAX_EXECUTOR_BUDGET: u32 = 1024;
+// SystemTime changes do not notify WakeHub. Periodically resample an armed RTC while idle so host
+// wall-clock steps and suspend/resume cannot postpone an alarm until its stale Instant deadline.
+const RTC_WALL_CLOCK_RECHECK_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, PartialEq, Eq)]
 enum WfiWait {
@@ -187,6 +190,7 @@ impl Machine {
         if timeout.is_zero() {
           return WfiWait::TimerReady;
         }
+        let timeout = timeout.min(RTC_WALL_CLOCK_RECHECK_INTERVAL);
         earliest = Some(earliest.map_or(timeout, |current: Duration| current.min(timeout)));
       }
     }
@@ -538,6 +542,37 @@ mod tests {
       machine.wfi_wait(),
       WfiWait::Timer(Duration::from_millis(20)),
     );
+  }
+
+  #[test]
+  fn rtc_alarm_wait_periodically_rechecks_host_wall_clock() {
+    let clock = Arc::new(ManualClock::default());
+    let mut cpu = cpu_with_clock(clock.clone());
+    cpu.bus.rtc = GoldfishRtc::new_with_clock(clock.clone());
+    cpu.wfi = true;
+    cpu.csrs.write_unchecked(MIE, SEIE_MASK).unwrap();
+    cpu.bus
+      .write::<u32>(VirtAddr(RTC_ALARM_HIGH), 1)
+      .unwrap();
+    cpu.bus
+      .write::<u32>(VirtAddr(RTC_ALARM_LOW), 705_032_704)
+      .unwrap();
+    cpu.bus
+      .write::<u32>(VirtAddr(RTC_IRQ_ENABLED), 1)
+      .unwrap();
+    let machine = Machine {
+      cpu,
+      executor: Box::new(NaiveInterpreter::new()),
+    };
+
+    assert_eq!(
+      machine.wfi_wait(),
+      WfiWait::Timer(RTC_WALL_CLOCK_RECHECK_INTERVAL),
+    );
+
+    // Simulate the host realtime clock stepping directly to the five-second alarm deadline.
+    clock.set_ticks(5 * TIMEBASE_FREQUENCY);
+    assert_eq!(machine.wfi_wait(), WfiWait::TimerReady);
   }
 
   #[test]

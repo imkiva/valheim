@@ -48,6 +48,7 @@ pub struct GoldfishRtc {
   clock: Arc<dyn RtcClock>,
   tick_offset: Cell<u64>,
   alarm_next: Cell<u64>,
+  alarm_deadline: Cell<u64>,
   alarm_running: Cell<bool>,
   irq_pending: Cell<bool>,
   irq_enabled: Cell<bool>,
@@ -64,6 +65,7 @@ impl GoldfishRtc {
       clock,
       tick_offset: Cell::new(0),
       alarm_next: Cell::new(0),
+      alarm_deadline: Cell::new(0),
       alarm_running: Cell::new(false),
       irq_pending: Cell::new(false),
       irq_enabled: Cell::new(false),
@@ -88,8 +90,8 @@ impl GoldfishRtc {
     );
   }
 
-  fn refresh_alarm(&self) -> bool {
-    if self.alarm_running.get() && self.alarm_next.get() <= self.count() {
+  fn refresh_alarm_at(&self, host_nanos: u64) -> bool {
+    if self.alarm_running.get() && self.alarm_deadline.get() <= host_nanos {
       self.alarm_running.set(false);
       self.irq_pending.set(true);
       true
@@ -98,11 +100,20 @@ impl GoldfishRtc {
     }
   }
 
+  fn refresh_alarm(&self) -> bool {
+    self.refresh_alarm_at(self.host_nanos())
+  }
+
   fn arm_alarm(&self) {
-    if self.alarm_next.get() <= self.count() {
+    let host_nanos = self.host_nanos();
+    let current = host_nanos.wrapping_add(self.tick_offset.get());
+    if self.alarm_next.get() <= current {
       self.alarm_running.set(false);
       self.irq_pending.set(true);
     } else {
+      self.alarm_deadline.set(
+        host_nanos.saturating_add(self.alarm_next.get().saturating_sub(current)),
+      );
       self.alarm_running.set(true);
     }
   }
@@ -117,7 +128,8 @@ impl GoldfishRtc {
   /// `Some(Duration::ZERO)` means that the level is already asserted. `None` means no enabled
   /// future or pending alarm currently needs a host deadline.
   pub fn duration_until_alarm(&self) -> Option<Duration> {
-    let fired = self.refresh_alarm();
+    let host_nanos = self.host_nanos();
+    let fired = self.refresh_alarm_at(host_nanos);
     if !self.irq_enabled.get() {
       return None;
     }
@@ -131,7 +143,7 @@ impl GoldfishRtc {
       return None;
     }
     Some(Duration::from_nanos(
-      self.alarm_next.get().saturating_sub(self.count()),
+      self.alarm_deadline.get().saturating_sub(host_nanos),
     ))
   }
 
@@ -202,6 +214,7 @@ impl GoldfishRtc {
   pub fn reset(&self) {
     self.tick_offset.set(0);
     self.alarm_next.set(0);
+    self.alarm_deadline.set(0);
     self.alarm_running.set(false);
     self.irq_pending.set(false);
     self.irq_enabled.set(false);
@@ -290,6 +303,51 @@ mod tests {
     rtc.write(VirtAddr(RTC_CLEAR_INTERRUPT), 1).unwrap();
     assert!(!rtc.interrupt_asserted());
     assert_eq!(rtc.duration_until_alarm(), None);
+  }
+
+  #[test]
+  fn alarm_high_write_does_not_reschedule_an_active_alarm() {
+    let now = 0x0000_0002_0000_0064;
+    let (rtc, clock) = rtc_with_clock(now);
+    rtc.write(VirtAddr(RTC_ALARM_HIGH), 3).unwrap();
+    rtc.write(VirtAddr(RTC_ALARM_LOW), 50).unwrap();
+    rtc.write(VirtAddr(RTC_IRQ_ENABLED), 1).unwrap();
+
+    // Linux stages a replacement high half before committing it with ALARM_LOW. The intermediate
+    // register value is in the past, but the already-scheduled host timer must remain active.
+    rtc.write(VirtAddr(RTC_ALARM_HIGH), 2).unwrap();
+    assert!(!rtc.interrupt_asserted());
+    assert_eq!(
+      rtc.duration_until_alarm(),
+      Some(Duration::from_nanos(0xffff_ffce)),
+    );
+
+    rtc.write(VirtAddr(RTC_ALARM_LOW), 200).unwrap();
+    assert!(!rtc.interrupt_asserted());
+    assert_eq!(rtc.duration_until_alarm(), Some(Duration::from_nanos(100)));
+
+    clock.set_nanos(now + 100);
+    assert_eq!(rtc.duration_until_alarm(), Some(Duration::ZERO));
+    assert!(rtc.interrupt_asserted());
+  }
+
+  #[test]
+  fn setting_time_does_not_move_an_active_alarm_host_deadline() {
+    let (rtc, clock) = rtc_with_clock(1_000);
+    rtc.write(VirtAddr(RTC_ALARM_HIGH), 0).unwrap();
+    rtc.write(VirtAddr(RTC_ALARM_LOW), 2_000).unwrap();
+    rtc.write(VirtAddr(RTC_IRQ_ENABLED), 1).unwrap();
+    assert_eq!(rtc.duration_until_alarm(), Some(Duration::from_nanos(1_000)));
+
+    rtc.write(VirtAddr(RTC_TIME_HIGH), 0).unwrap();
+    rtc.write(VirtAddr(RTC_TIME_LOW), 5_000).unwrap();
+    assert_eq!(rtc.count(), 5_000);
+    assert!(!rtc.interrupt_asserted());
+    assert_eq!(rtc.duration_until_alarm(), Some(Duration::from_nanos(1_000)));
+
+    clock.set_nanos(2_000);
+    assert_eq!(rtc.duration_until_alarm(), Some(Duration::ZERO));
+    assert!(rtc.interrupt_asserted());
   }
 
   #[test]
