@@ -23,16 +23,13 @@ readonly OCI_ROOTFS_BASE_IMAGE="${BUILD_DIR}/debian-13-slim-riscv64.ext4"
 readonly OCI_ROOTFS_BASE_STAMP="${BUILD_DIR}/debian-13-slim-riscv64.ext4.stamp"
 readonly OCI_ROOTFS_RUNTIME_IMAGE="${RUNTIME_DIR}/rootfs.ext4"
 readonly OCI_ROOTFS_RUNTIME_STAMP="${RUNTIME_DIR}/rootfs.ext4.schema"
-readonly OCI_ROOTFS_SCHEMA_VERSION="1"
+readonly OCI_ROOTFS_SCHEMA_VERSION="2"
 readonly OCI_ROOTFS_SIZE_BYTES="$((256 * 1024 * 1024))"
 readonly OCI_ROOTFS_BLOCK_SIZE="4096"
 readonly OCI_ROOTFS_BLOCK_COUNT="$((OCI_ROOTFS_SIZE_BYTES / OCI_ROOTFS_BLOCK_SIZE))"
 readonly OCI_ROOTFS_UUID="3f3434d2-6c1e-4f8b-98e8-4f525649534b"
 readonly OCI_ROOTFS_LABEL="VALHEIMROOT"
 readonly OCI_ROOTFS_FEATURES="has_journal,ext_attr,resize_inode,dir_index,filetype,extent,64bit,flex_bg,sparse_super,large_file,huge_file,dir_nlink,extra_isize,metadata_csum"
-# Accept the pre-NoCloud OCI runtime only for the one banner-only /init migration below.
-readonly OCI_LEGACY_INIT_SHA256="74304df7964e80dd596c63ce374b0ea021d179797950e271629fe5c527b2c0c5"
-readonly OCI_NEUTRAL_INIT_SHA256="11e8c52a61fbd27e841f49418e7849117d612e850dde2a498800a5c70fc9ba1d"
 
 readonly NOCLOUD_BUILD_ID="20260712-2537"
 readonly NOCLOUD_ARCHIVE_NAME="debian-13-nocloud-riscv64-${NOCLOUD_BUILD_ID}.tar.xz"
@@ -46,7 +43,7 @@ readonly NOCLOUD_ROOTFS_BASE_IMAGE="${BUILD_DIR}/debian-13-nocloud-riscv64.ext4"
 readonly NOCLOUD_ROOTFS_BASE_STAMP="${BUILD_DIR}/debian-13-nocloud-riscv64.ext4.stamp"
 readonly NOCLOUD_ROOTFS_RUNTIME_IMAGE="${RUNTIME_DIR}/nocloud-rootfs.ext4"
 readonly NOCLOUD_ROOTFS_RUNTIME_STAMP="${RUNTIME_DIR}/nocloud-rootfs.ext4.schema"
-readonly NOCLOUD_ROOTFS_SCHEMA_VERSION="2"
+readonly NOCLOUD_ROOTFS_SCHEMA_VERSION="3"
 readonly NOCLOUD_DISK_SIZE_BYTES="$((3 * 1024 * 1024 * 1024))"
 readonly NOCLOUD_SECTOR_SIZE="512"
 readonly NOCLOUD_ROOT_START_SECTORS="262144"
@@ -112,6 +109,19 @@ readonly E2FSPROGS_E2FSCK="${E2FSPROGS_BUILD_DIR}/e2fsck/e2fsck"
 readonly E2FSPROGS_DEBUGFS="${E2FSPROGS_BUILD_DIR}/debugfs/debugfs"
 readonly E2FSPROGS_BUILD_STAMP="${E2FSPROGS_BUILD_DIR}/valheim-build.stamp"
 readonly E2FSPROGS_BUILD_SCHEMA="v1:sha256=${E2FSPROGS_SHA256}:private-libuuid:private-libblkid"
+
+readonly PASST_VERSION="2026_06_11.a9c61ff"
+readonly PASST_ARCHIVE_NAME="passt-${PASST_VERSION}.tar.xz"
+readonly PASST_ARCHIVE="${DOWNLOAD_DIR}/${PASST_ARCHIVE_NAME}"
+readonly PASST_URL="https://passt.top/passt/snapshot/${PASST_ARCHIVE_NAME}"
+readonly PASST_SHA256="b94b235cb96ce1b7aeab6552b7e0b4c9a780e5d700ced500c65e429b2d8b8450"
+readonly PASST_SOURCE_DIR="${HOST_TOOLS_DIR}/passt-${PASST_VERSION}-source"
+readonly PASST_SOURCE_STAMP="${PASST_SOURCE_DIR}/valheim-source.stamp"
+readonly PASST_BUILD_DIR="${HOST_TOOLS_DIR}/passt-${PASST_VERSION}-build"
+readonly PASST_BINARY="${PASST_BUILD_DIR}/passt"
+readonly PASST_AVX2_BINARY="${PASST_BUILD_DIR}/passt.avx2"
+readonly PASST_BUILD_STAMP="${PASST_BUILD_DIR}/valheim-build.stamp"
+readonly PASST_BUILD_SCHEMA="v2:version=${PASST_VERSION}:sha256=${PASST_SHA256}:x86_64-avx2-dispatch"
 
 ROOTFS_SOURCE=""
 ROOTFS_BASE_IMAGE=""
@@ -421,6 +431,49 @@ prepare_nocloud_e2fsprogs() {
   TEMPORARY_PATHS=()
   nocloud_e2fsprogs_is_expected || die \
     "the pinned host e2fsprogs build has an unexpected version"
+}
+
+passt_is_expected() {
+  local version
+  [[ -d "${PASST_SOURCE_DIR}" && -f "${PASST_SOURCE_STAMP}" && \
+     -x "${PASST_BINARY}" && ! -L "${PASST_BINARY}" && \
+     -x "${PASST_AVX2_BINARY}" && ! -L "${PASST_AVX2_BINARY}" && \
+     -f "${PASST_BUILD_STAMP}" ]] || return 1
+  grep -Fqx "${PASST_BUILD_SCHEMA}" "${PASST_SOURCE_STAMP}" || return 1
+  grep -Fqx "${PASST_BUILD_SCHEMA}" "${PASST_BUILD_STAMP}" || return 1
+  version="$("${PASST_BINARY}" --version 2>&1)" || return 1
+  grep -Fq "${PASST_VERSION}" <<<"${version}"
+}
+
+prepare_passt() {
+  local jobs="$1"
+  local temporary_source="${PASST_SOURCE_DIR}.tmp.$$"
+  local temporary_build="${PASST_BUILD_DIR}.tmp.$$"
+
+  if passt_is_expected; then
+    printf 'Using pinned passt %s: %s\n' "${PASST_VERSION}" "${PASST_BINARY}"
+    return
+  fi
+
+  download_checked "${PASST_ARCHIVE}" "${PASST_SHA256}" "${PASST_URL}"
+  TEMPORARY_PATHS=("${temporary_source}" "${temporary_build}")
+  rm -rf -- "${temporary_source}" "${temporary_build}"
+  mkdir -p -- "${temporary_source}" "${temporary_build}"
+  printf 'Building pinned passt %s for unprivileged NAT...\n' "${PASST_VERSION}"
+  tar -xJf "${PASST_ARCHIVE}" --strip-components=1 -C "${temporary_source}"
+  cp -a -- "${temporary_source}/." "${temporary_build}/"
+  make -C "${temporary_build}" VERSION="${PASST_VERSION}" -j"${jobs}" passt passt.avx2
+  [[ -x "${temporary_build}/passt" && ! -L "${temporary_build}/passt" && \
+     -x "${temporary_build}/passt.avx2" && ! -L "${temporary_build}/passt.avx2" ]] || die \
+    "the pinned passt build did not produce its baseline and AVX2 executables"
+  printf '%s\n' "${PASST_BUILD_SCHEMA}" > "${temporary_source}/valheim-source.stamp"
+  printf '%s\n' "${PASST_BUILD_SCHEMA}" > "${temporary_build}/valheim-build.stamp"
+
+  rm -rf -- "${PASST_SOURCE_DIR}" "${PASST_BUILD_DIR}"
+  mv -- "${temporary_source}" "${PASST_SOURCE_DIR}"
+  mv -- "${temporary_build}" "${PASST_BUILD_DIR}"
+  TEMPORARY_PATHS=()
+  passt_is_expected || die "the pinned passt build has an unexpected version"
 }
 
 nocloud_dev_profile_sha256() {
@@ -999,7 +1052,7 @@ prepare_rootfs_base() {
 }
 
 prepare_runtime_rootfs() {
-  local expected_schema actual_schema="" base_sha runtime_sha runtime_schema_valid=0
+  local expected_schema actual_schema="" base_sha runtime_sha
   local temporary="${ROOTFS_RUNTIME_IMAGE}.tmp.$$"
   local temporary_stamp="${ROOTFS_RUNTIME_STAMP}.tmp.$$"
   expected_schema="$(rootfs_schema)"
@@ -1012,15 +1065,7 @@ prepare_runtime_rootfs() {
   if [[ "${RESET_DISK:-0}" != 1 && \
         -f "${ROOTFS_RUNTIME_IMAGE}" && -f "${ROOTFS_RUNTIME_STAMP}" ]]; then
     IFS= read -r actual_schema < "${ROOTFS_RUNTIME_STAMP}" || true
-    if [[ "${actual_schema}" == "schema=${expected_schema}" ]]; then
-      runtime_schema_valid=1
-    elif [[ "${ROOTFS_SOURCE}" == "oci" && \
-            "${expected_schema}" == \
-              "$(oci_rootfs_schema "${OCI_NEUTRAL_INIT_SHA256}")" && \
-            "${actual_schema}" == "schema=$(oci_rootfs_schema "${OCI_LEGACY_INIT_SHA256}")" ]]; then
-      runtime_schema_valid=1
-    fi
-    if [[ "${runtime_schema_valid}" == 1 && \
+    if [[ "${actual_schema}" == "schema=${expected_schema}" && \
           "$(stat -c '%s' "${ROOTFS_RUNTIME_IMAGE}")" == "${ROOTFS_SIZE_BYTES}" ]]; then
       printf 'Reusing writable Debian ext4 runtime: %s\n' "${ROOTFS_RUNTIME_IMAGE}"
       return
@@ -1090,11 +1135,19 @@ configure_kernel() {
     --disable HOTPLUG_CPU \
     --disable MODULES \
     --disable VIRTUALIZATION \
-    --disable NET \
+    --enable NET \
+    --enable PACKET \
+    --enable UNIX \
+    --enable INET \
+    --disable IPV6 \
+    --enable NETDEVICES \
+    --enable IP_PNP \
+    --enable IP_PNP_DHCP \
     --disable PCI \
     --enable BLOCK \
     --enable VIRTIO \
     --enable VIRTIO_BLK \
+    --enable VIRTIO_NET \
     --enable VIRTIO_MMIO \
     --disable VIRTIO_PCI \
     --disable SCSI \
@@ -1138,10 +1191,15 @@ configure_kernel() {
     "kernel config unexpectedly embeds an initramfs"
   grep -Fqx 'CONFIG_BLK_DEV_INITRD=y' "${config}" || die \
     "kernel config did not retain empty-initramfs support"
-  for option in CONFIG_VIRTIO CONFIG_VIRTIO_BLK CONFIG_VIRTIO_MMIO CONFIG_EXT4_FS; do
+  for option in \
+    CONFIG_NET CONFIG_PACKET CONFIG_UNIX CONFIG_INET CONFIG_NETDEVICES \
+    CONFIG_IP_PNP CONFIG_IP_PNP_DHCP \
+    CONFIG_VIRTIO CONFIG_VIRTIO_BLK CONFIG_VIRTIO_NET CONFIG_VIRTIO_MMIO CONFIG_EXT4_FS; do
     grep -Fqx "${option}=y" "${config}" || die \
       "kernel config did not build ${option} into the Image"
   done
+  grep -Fqx '# CONFIG_IPV6 is not set' "${config}" || die \
+    "kernel config unexpectedly enabled IPv6"
   grep -Fqx '# CONFIG_SMP is not set' "${config}" || die \
     "kernel config unexpectedly enabled SMP"
 }
@@ -1153,12 +1211,16 @@ main() {
   local disk_overridden=0
   local i
   local managed_path
+  local net_mode="none"
+  local net_subnet_overridden=0
+  local passt_overridden=0
   local rootfs_source="nocloud"
   local -a cli_args=("$@")
   local -a passthrough_args=()
   local -a engine_args=(--engine jit)
   local -a cmdline_args=(--cmdline "${KERNEL_CMDLINE}")
   local -a disk_args=()
+  local -a passt_args=()
   for ((i = 0; i < ${#cli_args[@]}; i++)); do
     argument="${cli_args[i]}"
     case "${argument}" in
@@ -1177,6 +1239,41 @@ main() {
         ;;
       --engine=*)
         engine_args=()
+        ;;
+      --net)
+        ((i + 1 < ${#cli_args[@]})) || die "--net requires a mode"
+        i=$((i + 1))
+        net_mode="${cli_args[i]}"
+        passthrough_args+=("${net_mode}")
+        ;;
+      --net=*)
+        net_mode="${argument#--net=}"
+        ;;
+      --net-subnet)
+        net_subnet_overridden=1
+        ((i + 1 < ${#cli_args[@]})) || die "--net-subnet requires an IPv4 CIDR"
+        i=$((i + 1))
+        [[ -n "${cli_args[i]}" ]] || die "--net-subnet requires a non-empty IPv4 CIDR"
+        passthrough_args+=("${cli_args[i]}")
+        ;;
+      --net-subnet=)
+        die "--net-subnet requires a non-empty IPv4 CIDR"
+        ;;
+      --net-subnet=*)
+        net_subnet_overridden=1
+        ;;
+      --passt)
+        passt_overridden=1
+        ((i + 1 < ${#cli_args[@]})) || die "--passt requires a path"
+        i=$((i + 1))
+        [[ -n "${cli_args[i]}" ]] || die "--passt requires a non-empty path"
+        passthrough_args+=("${cli_args[i]}")
+        ;;
+      --passt=)
+        die "--passt requires a non-empty path"
+        ;;
+      --passt=*)
+        passt_overridden=1
         ;;
       --disk | -d)
         disk_overridden=1
@@ -1205,6 +1302,19 @@ main() {
         ;;
     esac
   done
+  case "${net_mode}" in
+    none)
+      if [[ "${net_subnet_overridden}" == 1 || "${passt_overridden}" == 1 ]]; then
+        die "--net-subnet and --passt require --net nat"
+      fi
+      ;;
+    nat)
+      if [[ ${#cmdline_args[@]} -ne 0 ]]; then
+        cmdline_args=(--cmdline "${KERNEL_CMDLINE} ip=dhcp")
+      fi
+      ;;
+    *) die "--net mode must be none or nat" ;;
+  esac
   select_rootfs_source "${rootfs_source}"
 
   case "${RESET_DISK:-0}" in
@@ -1220,6 +1330,9 @@ main() {
     perl python3 rm rustup sha256sum stat tar xz; do
     require_command "${command}"
   done
+  if [[ "${net_mode}" == "nat" && "${passt_overridden}" == 0 ]]; then
+    require_command getconf
+  fi
   if [[ "${disk_overridden}" == 0 ]]; then
     if [[ "${ROOTFS_SOURCE}" == "nocloud" ]]; then
       for command in dd sfdisk sha512sum; do
@@ -1249,6 +1362,10 @@ main() {
   acquire_prepare_lock
   prepare_toolchain
   prepare_linux_source
+  if [[ "${net_mode}" == "nat" && "${passt_overridden}" == 0 ]]; then
+    prepare_passt "${jobs}"
+    passt_args=(--passt "${PASST_BINARY}")
+  fi
   if [[ "${disk_overridden}" == 0 ]]; then
     if [[ "${ROOTFS_SOURCE}" == "oci" ]]; then
       printf 'Using the pinned Debian 13 slim OCI rootfs source (--from-oci).\n'
@@ -1311,6 +1428,7 @@ main() {
     --kernel "${KERNEL_IMAGE}" \
     "${disk_args[@]}" \
     "${cmdline_args[@]}" \
+    "${passt_args[@]}" \
     "${passthrough_args[@]}"
 }
 

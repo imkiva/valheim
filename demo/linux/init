@@ -3,6 +3,7 @@
 export HOME=/root
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export TERM=vt100
+umask 022
 
 exec </dev/console >/dev/console 2>&1
 
@@ -12,6 +13,39 @@ mount -t sysfs sysfs /sys || echo "warning: could not mount sysfs"
 mount -t tmpfs tmpfs /run || echo "warning: could not mount /run"
 mkdir -p /dev/pts
 mount -t devpts devpts /dev/pts || echo "warning: could not mount devpts"
+
+# Debian NoCloud points /etc/resolv.conf at a systemd-resolved runtime path while the OCI image
+# contains a regular resolver file.  This demo starts its minimal /init instead of systemd, so
+# update the appropriate file only when kernel IP autoconfiguration actually obtained DNS servers
+# through DHCP.  An offline boot leaves both forms untouched.
+if [ -r /proc/net/pnp ]; then
+  if resolver_entries="$(awk '
+    $0 == "#PROTO: DHCP" { dhcp = 1 }
+    $1 == "nameserver" && NF == 2 {
+      entries = entries "nameserver " $2 "\n"
+      nameservers++
+    }
+    END {
+      if (dhcp && nameservers > 0) {
+        printf "%s", entries
+      } else {
+        exit 1
+      }
+    }
+  ' /proc/net/pnp)"; then
+    resolver_path=
+    if [ -L /etc/resolv.conf ] && \
+       [ "$(readlink /etc/resolv.conf)" = "../run/systemd/resolve/stub-resolv.conf" ]; then
+      mkdir -p /run/systemd/resolve
+      resolver_path=/run/systemd/resolve/stub-resolv.conf
+    elif [ ! -L /etc/resolv.conf ] && [ -f /etc/resolv.conf ]; then
+      resolver_path=/etc/resolv.conf
+    fi
+    if [ -n "${resolver_path}" ]; then
+      printf '%s\n' "${resolver_entries}" > "${resolver_path}"
+    fi
+  fi
+fi
 
 root_source=
 root_fstype=
