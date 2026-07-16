@@ -15,9 +15,12 @@ riscv64 build `20260712-2537` 的 Bash。它比原有 `debian:13-slim` 容器层
 - GDB、strace、lsof、jq、rsync、wget、fakeroot、patch、tree 和 zip/unzip。
 - Python 3 的 headers、pip 和 venv。
 
-Valheim 目前没有网卡，demo kernel 也显式关闭 `CONFIG_NET`；这些包是在宿主有网络时
-预装进 base 的，guest 启动后不需要网络。NoCloud 里虽然有 `curl`、`wget`、Git 和
-`apt`，它们在 guest 中不能访问外网；`apt update` 或在线安装其他包仍不会成功。
+demo kernel 将 IPv4、kernel DHCP 和 VirtIO network 驱动直接编进 `Image`，但脚本
+默认不启用网络，guest 离线启动仍不需要宿主网络。显式传入 `--net nat` 后，Valheim
+通过独立的 `passt` 进程为 guest 提供 IPv4 出站 NAT；NoCloud 中预装的 `curl`、
+`wget`、Git 和 APT 才具备出站连通条件。当前不支持 IPv6、host 到 guest 的入站连接
+或端口转发；APT 是否能安装特定 package 还取决于镜像内的 sources 与固定 snapshot
+状态。
 
 根文件系统以无分区表的 raw ext4 镜像通过 Valheim legacy VirtIO-MMIO block
 设备挂载为 `/dev/vda`。kernel `Image` 不再内嵌完整 initramfs；VirtIO、
@@ -49,17 +52,19 @@ target/demo/linux/runtime/rootfs.ext4                    # OCI writable runtime 
 `--disk` 传给模拟器。runtime 默认跨运行保留；`RESET_DISK=1` 只会从当前
 选中来源的 base 重置它自己的 runtime，不会改动另一来源中的 guest 数据。
 每个 runtime 都有独立 schema；如果 schema 缺失或变化，脚本会停止并要求用户先
-备份，不会静默删除 guest 数据。唯一的兼容例外是引入 NoCloud 时把共享 `/init`
-banner 从 `official slim rootfs` 改成来源中性文字：脚本只为这次纯提示文字变化
-接受旧 OCI schema，因此已有 `runtime/rootfs.ext4` 可继续原样复用。
-当前 development profile 将 NoCloud schema 升为 v2；若目录中仍有扩展前的旧
-`runtime/nocloud-rootfs.ext4`，先备份它，再用 `RESET_DISK=1` 从新 base 重建。
-`RESET_DISK=1` 不会重新联网安装 package，只复制已校验的 v2 base。
+备份，不会静默删除 guest 数据。DHCP DNS 接入改变了共享 `/init` 的运行语义，因此
+NoCloud schema 已升为 v3、OCI schema 已升为 v2，过去只为 banner 文字迁移保留的
+OCI 兼容例外也不再适用。已有任一来源的旧 runtime 时，先备份 guest 数据，再为同一
+来源显式使用 `RESET_DISK=1`。脚本只会复制通过当前 schema 验证的 base；如果 base
+也因 schema 变化需要重建，NoCloud 路径会再次需要联网 chroot 和相应宿主权限。
 
 两个来源都使用以下最小 Valheim 启动接入：
 
 - `/init`：挂载 devtmpfs、proc、sysfs、tmpfs 和 devpts，确认 `/` 实际是 read-write
-  ext4，然后用 `/bin/bash` 启动交互 shell。
+  ext4；若 kernel DHCP 在 `/proc/net/pnp` 提供 DNS，则为 NoCloud 的
+  `/etc/resolv.conf` symlink 创建 `/run/systemd/resolve/stub-resolv.conf`，或更新 OCI
+  的普通 `/etc/resolv.conf`，最后用 `/bin/bash` 启动交互 shell。离线启动不会改写
+  resolver 文件。
 - `/dev/console`、`/dev/null`、`/dev/tty`：让 PID 1 在挂载 devtmpfs 前就能打开控制台。
 
 NoCloud rootfs 虽然含有 systemd，但这个 demo 通过 kernel cmdline 显式使用上述
@@ -110,6 +115,38 @@ rootfs 来源都可与两种 engine 组合：
 ./demo/linux/run.sh --from-oci --engine naive
 ```
 
+### IPv4 出站 NAT
+
+网络默认关闭。使用默认 `10.172.0.0/16` 私有网段启动 NAT：
+
+```bash
+./demo/linux/run.sh --net nat
+```
+
+默认地址为 guest `10.172.0.15`、网关 `10.172.0.2`、DNS proxy
+`10.172.0.3`；每个 Valheim/passt 实例相互隔离，因此并行实例可以复用这组
+guest-visible 地址。可用 canonical RFC 1918 CIDR（完全位于 `10/8`、`172.16/12`
+或 `192.168/16`，且不窄于 `/27`）覆盖网段，guest、网关和 DNS 仍分别使用网络
+地址加 15、2 和 3 的偏移：
+
+```bash
+./demo/linux/run.sh --net nat --net-subnet 10.173.0.0/16
+```
+
+脚本可靠识别 `--net nat` 和 `--net=nat`，只在 NAT 模式下给它自动提供的 kernel
+cmdline 追加 `ip=dhcp`。如果同时用 `--cmdline`/`-c` 完全覆盖 cmdline，调用者必须
+自行保留 `ip=dhcp` 或在 guest 中手工配置网络；离线模式不会等待 DHCP。
+
+NAT 模式默认下载、校验并构建下文固定版本的 `passt`，然后给 CLI 传入它的绝对路径。
+也可以显式提供已有 binary，跳过 demo 自带 passt 的下载和构建：
+
+```bash
+./demo/linux/run.sh --net nat --passt /absolute/path/to/passt
+```
+
+直接调用 `valheim-cli` 时同样可用 `--passt PATH` 指定 helper。该模式目前只提供 guest
+IPv4 出站 TCP、UDP 和 DNS，不提供 IPv6、host→guest 连接或入站端口映射。
+
 脚本使用自身路径定位仓库，所以也可以从其他工作目录调用。首次运行会依次：
 
 1. 下载并解压固定的 RISC-V Linux GNU 工具链到共享目录
@@ -120,7 +157,8 @@ rootfs 来源都可与两种 engine 组合：
    下载固定的 static qemu-riscv64，在临时 p1 chroot 中从固定 Debian snapshot 安装
    开发包，然后生成并校验选中来源的 ext4 base。NoCloud 仅在 base cache miss 时需要
    sudo；首次运行或显式重置时创建该来源独立的可写 runtime。
-4. 构建包含内建 VirtIO block/ext4 驱动的 raw `Image`。
+4. 构建包含内建 VirtIO block、VirtIO network、IPv4/kernel DHCP 和 ext4 驱动的
+   raw `Image`；只有显式 NAT 模式才启动 DHCP。
 5. 调用 `demo/rustsbi/run.sh --build-only` 构建历史 RustSBI firmware。
 6. 构建 release 版 `valheim-cli`，自动传入 runtime `--disk`，然后进入交互式 guest。
 
@@ -128,12 +166,14 @@ rootfs 来源都可与两种 engine 组合：
 工具链位于 `target/demo/gcc-riscv64-glibc-2022.03.09/`。下载和构建产物都有
 缓存；再次运行会重新校验固定摘要和选中来源的 ext4 base，复用正确的
 下载、工具链、该来源的 runtime 以及增量 kernel 构建。
-NoCloud 专用 e2fsprogs 的源码和 out-of-tree build 分别缓存在：
+NoCloud 专用 e2fsprogs、static qemu 和 NAT 模式的 passt source/build 缓存在：
 
 ```text
 target/demo/linux/host-tools/e2fsprogs-1.47.2-source
 target/demo/linux/host-tools/e2fsprogs-1.47.2-build
 target/demo/linux/host-tools/qemu-user-static-6.2+dfsg-2ubuntu6.31
+target/demo/linux/host-tools/passt-2026_06_11.a9c61ff-source
+target/demo/linux/host-tools/passt-2026_06_11.a9c61ff-build
 ```
 
 两条路径共同需要 `curl`、`make`、`cc`、`bc`、`bison`、`flex`、`perl`、
@@ -187,7 +227,9 @@ NoCloud `disk.raw` 逻辑大小为 3 GiB，p1 base/runtime 逻辑大小约为 2.
 确保 Rust/Cargo 下载和构建产物不落到仓库外。`CARGO_HOME` 只注入
 实际 Cargo 子进程，以便继续复用宿主已安装的 rustup 代理。
 
-除 `--from-oci` 外的额外参数继续透传给 `valheim-cli`。脚本默认注入
+除 `--from-oci` 外的额外参数继续透传给 `valheim-cli`。`--net nat` 会按需注入
+固定 passt binary 和默认 cmdline 的 `ip=dhcp`；显式 `--passt` 与显式 cmdline 分别
+覆盖这两个默认值。脚本默认注入
 `--engine jit`，显式 `--engine naive` 可覆盖。脚本也会自动注入选中来源
 runtime 的 `--disk`；若用户显式提供
 `--disk PATH`、`--disk=PATH`、`-d PATH`、`-dPATH` 或 `-d=PATH`，则不会重复注入。
@@ -221,6 +263,7 @@ cmdline。直接调用 `valheim-cli --disk ...` 会绕过这个 advisory lock �
 | Debian `13-slim` OCI index | `registry-1.docker.io/v2/library/debian` | `020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd` |
 | riscv64 OCI manifest | 同上；index 中 `architecture=riscv64` 的 manifest | `7244fbb388f7b59c9f584bb2bb7ef3a60b23aa1e55f1ad1d0641bd5ec12390f3` |
 | Debian rootfs layer | manifest 中唯一的 gzip layer | `3ed37bd5491de4685b6418abd6b83c4b16cc06b7a51e46da7f154c5a149a41a5` |
+| passt userspace NAT | `https://passt.top/passt/snapshot/passt-2026_06_11.a9c61ff.tar.xz` | SHA-256 `b94b235cb96ce1b7aeab6552b7e0b4c9a780e5d700ced500c65e429b2d8b8450` |
 | Linux 5.17 | `https://cdn.kernel.org/pub/linux/kernel/v5.x/linux-5.17.tar.xz` | `555fef61dddb591a83d62dd04e252792f9af4ba9ef14683f64840e46fa20b1b1` |
 | RISC-V GNU/Linux toolchain | `riscv-collab/riscv-gnu-toolchain` release `2022.03.09` 的 Ubuntu 20.04 glibc asset | `02b97cf3502d9542943b62c7470d99f97c0c9148be95e1277df96d4b5c2fdb41` |
 
@@ -295,6 +338,23 @@ grep riscv-timer /proc/interrupts
 `SBI TIME extension detected`、`sched_clock: 64 bits at 10MHz`、VirtIO block 识别、
 ext4 以 read-write 方式挂载、`sleep 1` 约一秒且
 前后两次 `riscv-timer` IRQ 计数增加，是 realtime/timer-relay 验收的一部分。
+
+显式使用 `--net nat` 时，还应看到 `virtio_net` 绑定第二个 VirtIO-MMIO 设备。默认
+网段可用以下命令检查 DHCP 地址、路由、DNS 数据与 IPv4 出站连接：
+
+```bash
+ip -4 address show dev eth0
+ip -4 route
+cat /proc/net/pnp
+cat /etc/resolv.conf
+getent ahostsv4 debian.org
+wget -4 -qO /dev/null http://example.com/
+```
+
+地址应包含 `10.172.0.15/16`，default route 应指向 `10.172.0.2`，resolver 应包含
+`10.172.0.3`。公共网络检查会受宿主网络策略影响，不应替代后端 frame/queue 单元测试。
+Valheim 尚未提供 RTC，guest 初始时间为 1970；未手工校时前 HTTPS 证书时间检查会失败，
+因此这里故意用 HTTP 只验收网络路径。
 
 验证 runtime 可写和跨进程持久化：
 

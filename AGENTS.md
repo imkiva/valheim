@@ -18,6 +18,10 @@ Valheim 是一个用 Rust 编写、以学习和参考实现为目的的 RISC-V 6
 - VirtIO block 是 legacy VirtIO-MMIO version 1，队列上限为 128，支持 direct 和协商后的
   indirect split-queue descriptor chain、读写、FLUSH 和 `SEG_MAX=126`；Linux 5.17 的
   legacy 驱动已通过 writable ext4 root 验证，要求 VirtIO-MMIO version 2 的 guest 驱动仍不兼容。
+- VirtIO network 同样是 legacy VirtIO-MMIO version 1，使用各一个 RX/TX split queue、
+  固定 MAC `52:54:00:12:34:56` 和队列上限 128。CLI 默认不接入 backend；显式
+  `--net nat` 时由独立的非特权 `passt` 进程提供 IPv4 guest 出站 NAT。当前不支持
+  IPv6、host→guest 入站连接或端口转发。
 - CLI 默认执行器是 `NaiveInterpreter`；`--engine jit` 启用 decoded-TB + Cranelift 分层
   JIT。system/F/D 等无法 native lower 的指令作为 fallback TB 起点且完整 fetch/decode 后，
   negative cache 会保存完整 `GuestInst`；命中后直接调用共享 CPU 语义执行。native 路径可在
@@ -33,7 +37,8 @@ Valheim 是一个用 Rust 编写、以学习和参考实现为目的的 RISC-V 6
 
 ## Workspace 与模块职责
 
-根 `Cargo.toml` 包含五个成员，但 `default-members = ["xtask"]`。因此裸 `cargo run` 或 `cargo build` 默认操作的是 `xtask`，不是模拟器 CLI。
+根 `Cargo.toml` 包含六个成员，但 `default-members = ["xtask"]`。因此裸 `cargo run`
+或 `cargo build` 默认操作的是 `xtask`，不是模拟器 CLI。
 
 | 路径 | 职责 |
 | --- | --- |
@@ -41,10 +46,11 @@ Valheim 是一个用 Rust 编写、以学习和参考实现为目的的 RISC-V 6
 | `valheim-core/` | 模拟器核心：CPU/寄存器、CSR、异常和中断、MMU、指令执行、解释器、内存总线、设备、DTB、运行循环和 trace。 |
 | `valheim-core/src/cpu/` | CPU 状态、执行语义、CSR、异常/中断、系统总线，以及解释器/JIT 共用的唯一 `translate_to_host()` 页表与权限逻辑。 |
 | `valheim-core/src/interp/` | 共享 `RV64Executor`/`ExecOutcome` 执行器契约与朴素解释器实现。 |
-| `valheim-core/src/device/` | CLINT、level-aware PLIC、NS16550A UART 和支持 direct/indirect split queue、FLUSH 的 legacy VirtIO block。 |
-| `valheim-core/src/machine/` | 将 CPU、可注入执行器、DTB、UART、kernel、BIOS 和磁盘组合成可运行的虚拟机。 |
+| `valheim-core/src/device/` | CLINT、level-aware PLIC、NS16550A UART、共用 legacy VirtIO-MMIO transport，以及支持 direct/indirect split queue 的 block/network frontend。 |
+| `valheim-core/src/machine/` | 将 CPU、可注入执行器、DTB、UART、kernel、BIOS、磁盘和可选网络 backend 组合成可运行的虚拟机。 |
 | `valheim-jit/` | decoded TB/cache/runtime、页内 fetch translation cache、Cranelift RV64I/M lowering、A 扩展 helper、software TLB 和 DRAM fast path。 |
 | `valheim-cli/` | `valheim-cli` 命令行入口，负责参数解析和加载镜像。 |
+| `valheim-net/` | 可替换的宿主网络策略层；当前实现 Linux `passt` backend、IPv4 subnet/address 规则和 helper 生命周期，未来纯 Rust NAT 可在这里替换。 |
 | `xtask/` | 自动构建、转换并运行上游 `riscv-tests`。 |
 | `dts/` | 启动时由 `dtc` 编译的设备树模板。 |
 | `valheim-testing/` | 固定的 `riscv-tests` 子模块、启用/禁用测试列表和测试安装目录。 |
@@ -65,13 +71,14 @@ Valheim 是一个用 Rust 编写、以学习和参考实现为目的的 RISC-V 6
 | PLIC | `0x0c00_0000`；M/S 两个 context，claim/complete 和 level re-pend |
 | UART | `0x1000_0000`，IRQ 10 |
 | VirtIO block | `0x1000_1000`，IRQ 1，legacy version 1 |
+| VirtIO network | `0x1000_2000`，IRQ 2，legacy version 1；RX queue 0、TX queue 1，队列上限 128 |
 | CLI 默认 kernel cmdline | `root=/dev/vda ro console=ttyS0`；Linux demo 显式覆盖为 ext4 `rw` |
 
 `Machine::new` 每次都会根据 `dts/valheim.dts.template` 调用外部 `dtc` 生成 DTB。因此 `dtc` 不只是构建依赖，也是每次运行 CLI 和 ISA 测试时的依赖。DTB 必须复制到普通 DRAM：Linux 建立最终页表后不会继续映射 Valheim 的低地址 MROM，若只传旧地址 `0x1020`，内核会在切换页表后访问异常。
 
 ## 已验证的本机工具环境
 
-最后一次完整验证日期：2026-07-15。
+最后一次完整验证日期：2026-07-16。
 
 - Valheim Rust：`nightly-2024-09-05`。根 `rust-toolchain` 只写了不固定版本的 `nightly`，为了复现不要依赖它解析到的最新版本。
 - 历史 RustSBI demo Rust：`nightly-2022-02-14`，已安装 target `riscv64imac-unknown-none-elf`。旧源码使用已从现代 Rust 删除的 generator API，不能改用新 nightly。
@@ -86,6 +93,11 @@ Valheim 是一个用 Rust 编写、以学习和参考实现为目的的 RISC-V 6
   `chroot` 和 `update-binfmts`，非 root 用户还需要 `sudo`；宿主内核必须支持 p1 的
   `orphan_file` ext4 feature，容器还必须提供 loop device 和 `CAP_SYS_ADMIN`。缓存命中
   与 `--from-oci` 不需要这条特权路径。
+- Linux NAT helper：demo 固定 `passt 2026_06_11.a9c61ff`，snapshot URL 为
+  `https://passt.top/passt/snapshot/passt-2026_06_11.a9c61ff.tar.xz`，SHA-256 为
+  `b94b235cb96ce1b7aeab6552b7e0b4c9a780e5d700ced500c65e429b2d8b8450`。脚本只在
+  `--net nat` 且未显式传 `--passt` 时下载并从源码构建；构建同时保留 `passt` 和
+  x86_64 runtime dispatcher 需要的 `passt.avx2`，不需要 root、TAP 或 network namespace。
 - RISC-V bare-metal GNU toolchain：
   `target/demo/gcc-riscv64-elf-2022.03.09/`
   - GCC `11.1.0 (g5964b5cd727)`
@@ -191,6 +203,13 @@ cargo +nightly-2024-09-05 start \
 - `--bios` / `-b`：可选 raw BIOS；存在时 kernel 改为加载到 `0x8020_0000`。
 - `--disk` / `-d`：可选 VirtIO block 镜像，以读写方式 mmap；guest 写入会直接修改文件。
 - `--cmdline` / `-c`：替换 DTB 中的 bootargs。
+- `--net none|nat`：选择网络模式，默认 `none`；`nat` 在 Linux 宿主启动一个独立
+  `passt` backend，只提供 guest IPv4 出站连接。
+- `--net-subnet CIDR`：NAT 的 canonical RFC 1918 IPv4 network，默认
+  `10.172.0.0/16`，最窄 `/27`；guest、gateway 和 DNS 固定为 network 加 15、2、3。
+  只有 `--net nat` 时可用。
+- `--passt PATH`：NAT 使用的 `passt` 可执行文件；默认从 `PATH` 查找 `passt`，只有
+  `--net nat` 时可用。
 - `--trace`：指定 trace 追加输出文件，但只有启用 `valheim-core/trace` feature 才生效。
 - `--test`：按 `riscv-tests` 的 ECALL 约定运行并返回测试退出码。
 - `--test-name`：测试输出中使用的名称。
@@ -223,6 +242,18 @@ cargo +nightly-2024-09-05 start \
   --cmdline 'root=/dev/vda ro console=ttyS0'
 ```
 
+需要网络的 guest 还必须启用 legacy VirtIO network、IPv4 并自行使用 DHCP 或固定地址；
+CLI 只负责接入设备和 backend。使用默认地址布局启动出站 NAT：
+
+```bash
+./target/release/valheim-cli \
+  --bios path/to/bios.bin \
+  --kernel path/to/kernel.bin \
+  --disk path/to/rootfs.img \
+  --cmdline 'root=/dev/vda rw console=ttyS0 ip=dhcp' \
+  --net nat
+```
+
 磁盘会被原地修改。手工运行未知 guest 前，先复制镜像，不要直接挂载唯一原件。
 
 ## 测试
@@ -233,16 +264,17 @@ Rust workspace 单元测试：
 cargo +nightly-2024-09-05 test --workspace --locked
 ```
 
-该命令已验证为 204 个测试通过、0 个失败：`valheim-asm` 11 个，
-`valheim-core` 118 个，`valheim-jit` 56 个 unit + 11 个 native/naive differential +
-4 个 memory fast-path integration tests，`xtask` 4 个。额外的 trace 语义回归为：
+该命令已验证为 248 个测试通过、0 个失败：`valheim-asm` 11 个、
+`valheim-cli` 5 个、`valheim-core` 129 个、`valheim-net` 28 个，
+`valheim-jit` 56 个 unit + 11 个 native/naive differential + 4 个 memory fast-path
+integration tests，`xtask` 4 个。额外的 trace 语义回归为：
 
 ```bash
 cargo +nightly-2024-09-05 test \
   --locked --package valheim-core --features trace
 ```
 
-该命令已验证 119 个测试通过。
+该命令已验证 130 个测试通过。
 
 完整 RISC-V ISA 测试需要交叉工具链和 `riscv-tests` 子模块：
 
@@ -415,6 +447,22 @@ Docker Official Image 回归口径，传入由 demo 脚本消费、不透传给 
 ./demo/linux/run.sh --from-oci
 ```
 
+网络默认关闭；显式启用 IPv4 guest 出站 NAT：
+
+```bash
+./demo/linux/run.sh --net nat
+./demo/linux/run.sh --net nat --net-subnet 10.173.0.0/16
+./demo/linux/run.sh --net nat --passt /absolute/path/to/passt
+```
+
+默认 subnet 是 `10.172.0.0/16`，guest、gateway、DNS 分别固定为
+`10.172.0.15`、`10.172.0.2`、`10.172.0.3`，MAC 固定为
+`52:54:00:12:34:56`。每个 Valheim/`passt` 实例拥有独立的 userspace network
+状态，因此并行实例可复用同一组 guest-visible 地址。`--net-subnet` 只接受完全位于
+RFC 1918 地址空间的 canonical network，且不能窄于 `/27`；三个固定地址仍分别使用
+network 加 15、2、3。`run.sh` 只在使用脚本默认 cmdline 时为 NAT 自动追加
+`ip=dhcp`；显式 `--cmdline`/`-c` 后调用者必须自行保留 DHCP 或配置静态网络。
+
 脚本会固定并校验选中来源及其他所有外部输入，复用 `target/demo` 下的两个
 GNU 工具链，构建 RustSBI、Linux 和 Valheim，然后进入真实 Debian Bash：
 
@@ -439,6 +487,17 @@ id
 UART 输出后仍能继续交互。第一次运行还要下载和构建，耗时更长。按宿主
 `Ctrl-C` 退出。除非另有新的实际运行记录，不得把这些版本和交互结果改写为
 默认 NoCloud 路径的已验证结果。
+
+2026-07-16 已实际验证当前 IPv4 NAT：OCI 路径分别用 release naive/JIT 启动，默认
+NoCloud 路径用 release JIT 启动；Linux 5.17 均发现 `virtio1`，DHCP 获得
+`10.172.0.15/16`，默认路由和 resolver 分别指向 `10.172.0.2`、`10.172.0.3`，公网
+IPv4 DNS、HTTP/TCP 出站与 network IRQ 增长均通过，guest 未启用 IPv6。OCI 还验证了
+自定义 `10.173.0.0/16`、默认离线启动；两个来源都验证 `sync` 后跨进程持久化及各自的
+`RESET_DISK=1` 清除。NoCloud 保留原有 resolver symlink，并在联网 guest 中再次验证
+392-package profile、`dpkg --audit` 和 GCC 编译运行。guest 没有 RTC、启动时间为 1970，
+所以未手工校时前 HTTPS 证书时间校验失败不属于网络故障；基础联网验收使用 HTTP。
+另以 OCI/NoCloud 两个 guest 并行启动验证：两个隔离实例可以同时复用默认地址，均完成
+DNS 与 HTTP/TCP 出站，宿主没有 Valheim/passt listener，退出后没有遗留 helper。
 
 2026-07-15 在开发包扩展前，已实际用默认 NoCloud 路径和 release JIT 验证原始
 271-package 适配版：GPT/p1、固定 e2fsprogs 1.47.2、read-write ext4、基础工具、
@@ -495,6 +554,11 @@ translation cache 将 prompt 中位数从 2.481824 s 降至 2.215396 s（-10.735
   `2d22939f98f2ee8b84c5cc53b01082a4a937cfc7b4a8aa432788b9eaf4a14a41`；提取出的
   `qemu-riscv64-static` SHA-256 为
   `ee063e5feaae2475b1eabe82ead98574c94fbbdbf6e0131379ea686ab6e3b437`。
+- NAT helper：`passt 2026_06_11.a9c61ff`，snapshot SHA-256 为
+  `b94b235cb96ce1b7aeab6552b7e0b4c9a780e5d700ced500c65e429b2d8b8450`；源码和构建
+  cache 分别位于 `host-tools/passt-2026_06_11.a9c61ff-source` 和
+  `host-tools/passt-2026_06_11.a9c61ff-build`，build schema 是
+  `v2:version=2026_06_11.a9c61ff:sha256=b94b235cb96ce1b7aeab6552b7e0b4c9a780e5d700ced500c65e429b2d8b8450:x86_64-avx2-dispatch`。
 - 可选 userspace：`--from-oci` 使用 Docker Official Image 的 `debian:13-slim` /
   `trixie-slim` riscv64 rootfs；脚本按不可变 OCI digest 从 Docker Hub 的
   `library/debian` 下载。
@@ -527,27 +591,38 @@ NoCloud 官方输入有 271 个 dpkg package；固定 chroot profile 新增 121 
 默认还包含 build-essential、GCC/G++/make、Binutils、Git、CMake/Ninja/Meson、
 Autotools、Bison/Flex、GDB/strace/lsof、jq/rsync、Python headers/pip/venv 等基础
 开发环境。
-Valheim 未实现网卡，该 demo kernel 也关闭 `CONFIG_NET`；因此即使 NoCloud 中存在
-`curl`、wget、Git 和 apt，guest 也不能通过它们访问网络。APT 只在宿主首次构建
-NoCloud base 的 chroot 阶段使用；guest 中的 `apt update` 或联网安装仍不可用。
+demo kernel 将 `CONFIG_NET`、`CONFIG_PACKET`、`CONFIG_UNIX`、`CONFIG_INET`、
+kernel DHCP 和 `CONFIG_VIRTIO_NET` 直接编进 `Image`，并明确关闭 `CONFIG_IPV6`。
+脚本默认仍离线启动；显式 `--net nat` 时才构建/启动 `passt` 并在默认 cmdline 加
+`ip=dhcp`。此时 NoCloud/OCI 中的 `curl`、wget、Git 和 APT 可使用 IPv4 出站连接，
+但实际 package 可用性仍受镜像 sources 和固定 snapshot 状态约束。当前没有
+host→guest 入站、端口转发或 IPv6。
 
 两个来源拥有彼此独立的只读 base 和持久化可写 runtime；kernel 不再内嵌
 rootfs，而是用 built-in VirtIO block/ext4 驱动直接挂载选中 runtime 为
 `/dev/vda`。`RESET_DISK=1` 只会用选中来源的 base 重置它自己的 runtime；
 不会删除或覆盖另一来源的 guest 写入。base、runtime 与实际 disk inode 都有
-防误用校验或 nonblocking `flock`。脚本仅为引入 NoCloud 时那次来源中性 banner
-变更接受旧 OCI `/init` schema，以便原有 `runtime/rootfs.ext4` 不丢失；未来
-`/init` 再变化不会自动套用这个兼容例外。开发包扩展把 NoCloud schema 升为 v2；
-旧 NoCloud runtime 不会被静默覆盖，必须先备份再显式 `RESET_DISK=1`。重置只复制
-已验证 base，不会重复联网安装。guest `sync` 后写入已在 OCI 历史路径验证可跨
-进程和 journal recovery 保留。FDT 仍位于 guest DRAM `0x87f0_0000`，UART 继续作为
-Linux 8250 console。
+防误用校验或 nonblocking `flock`。DHCP resolver 接入改变了共享 `/init` 的运行语义，
+因此 NoCloud schema 已升为 v3、OCI schema 已升为 v2；过去仅为来源中性 banner
+变更接受旧 OCI schema 的兼容例外已移除。任一来源的旧 runtime 都不会被静默覆盖，
+必须先备份再为同一来源显式 `RESET_DISK=1`。重置只复制已验证 base，不会重复联网
+安装。guest `sync` 后写入已在 OCI 历史路径验证可跨进程和 journal recovery 保留。
+`/init` 只在 `/proc/net/pnp` 明确报告 DHCP nameserver 时写 resolver：NoCloud 的
+`/etc/resolv.conf` 保持 symlink，并创建其固定 target
+`/run/systemd/resolve/stub-resolv.conf`；OCI 则更新原有 regular
+`/etc/resolv.conf`。离线启动不改写 resolver。FDT 仍位于 guest DRAM
+`0x87f0_0000`，UART 继续作为 Linux 8250 console。
 
 常用覆盖变量：
 
 - `JOBS`：并行构建任务数。
 - `--from-oci`：使用原 slim OCI 路径；该参数由 `run.sh` 消费，不是
   `valheim-cli` 参数。
+- `--net nat`：启用 IPv4 guest 出站 NAT；省略时网络关闭。demo 只在该模式且未覆盖
+  helper 时准备固定 `passt`。
+- `--net-subnet CIDR`：覆盖默认 `10.172.0.0/16`；只接受 canonical RFC 1918
+  network，最窄 `/27`，且要求 `--net nat`。
+- `--passt PATH`：用现有 `passt` binary 替代 demo 固定构建，要求 `--net nat`。
 - `RESET_DISK=1`：从当前选中来源的只读 base 重建它自己的默认可写
   ext4 runtime；默认复用该来源现有的 guest 写入。
 - `VALHEIM_RUST_TOOLCHAIN`：默认 `nightly-2024-09-05`。
@@ -558,8 +633,10 @@ Linux 8250 console。
 e2fsprogs 1.47.2 和 Linux tarball 在 `downloads/`，Linux 源码在 `source/`，NoCloud 专用
 e2fsprogs 源码/build 缓存分别在 `host-tools/e2fsprogs-1.47.2-source` 和
 `host-tools/e2fsprogs-1.47.2-build`，static qemu 缓存在
-`host-tools/qemu-user-static-6.2+dfsg-2ubuntu6.31`，NoCloud/OCI 只读 ext4 base 与
-kernel 输出在 `build/`；base 分别为 `build/debian-13-nocloud-riscv64.ext4`
+`host-tools/qemu-user-static-6.2+dfsg-2ubuntu6.31`，固定 passt 源码/build 缓存分别在
+`host-tools/passt-2026_06_11.a9c61ff-source` 和
+`host-tools/passt-2026_06_11.a9c61ff-build`。NoCloud/OCI 只读 ext4 base 与 kernel
+输出在 `build/`；base 分别为 `build/debian-13-nocloud-riscv64.ext4`
 和 `build/debian-13-slim-riscv64.ext4`，两个来源的可写 runtime 分别为
 `runtime/nocloud-rootfs.ext4` 和保留旧路径的 OCI `runtime/rootfs.ext4`。archive 内的
 整个 sparse
@@ -648,9 +725,30 @@ openEuler 演示没有固定的 BIOS、kernel、rootfs、下载脚本或版本 h
   Fetch/Read/Write 类型报告 guest VA；跨页数据访问应报告实际故障 fragment 的 VA，不能
   把页表或 endpoint 的物理地址泄漏进 `mtval/stval`。解释器与 JIT slow path 共用该不变量。
 - 测试和普通运行循环都没有 watchdog/超时，坏 guest 可能永久循环。
-- 当前 VirtIO 是 legacy version 1，QueueNumMax 为 128，公布 FLUSH、SEG_MAX（126）和
-  `VIRTIO_F_RING_INDIRECT_DESC`，接受 direct 以及协商后的 indirect descriptor chain；仍必须
-  选择明确支持 legacy VirtIO-MMIO v1 的 guest 驱动，不能只根据 guest 的发布年份判断。
+- 当前 block/network 都是 legacy VirtIO-MMIO version 1，QueueNumMax 为 128；仍必须
+  选择明确支持 legacy v1 的 guest 驱动，不能只根据 guest 的发布年份判断。block 公布
+  FLUSH、SEG_MAX（126）和 `VIRTIO_F_RING_INDIRECT_DESC`；network 公布固定 MAC 和
+  `VIRTIO_F_RING_INDIRECT_DESC`，使用 non-mergeable 10-byte network header、RX queue 0
+  和 TX queue 1。两者都接受 direct 以及协商后的 indirect descriptor chain。
+- 离线模式仍在 DTB 中保留 `0x1000_2000` 的 VirtIO-MMIO node，但 network frontend 的
+  DeviceID 为 0；只有 backend 成功启动后才呈现 DeviceID 1。backend worker 只能通过有界
+  channel 传完整 Ethernet frame，并用 WakeHub 唤醒 WFI；不得从 worker 线程直接访问 guest
+  memory。frontend 当前只接受 MTU 1500 所需的 frame，额外允许一个 802.1Q tag 后的
+  1518-byte Ethernet frame。
+- `valheim-net` 当前使用 passt 的 QEMU frame-stream 协议（4-byte big-endian length 加完整
+  Ethernet frame）。启动时 passt 会关闭除 `--fd` 外的继承 fd，因此 readiness 不能使用普通
+  inherited pipe；现有实现让 passt 通过 `/proc/<valheim-pid>/fd/<memfd>` 写 PID，并校验 PID
+  后才认为 backend ready。helper 启动失败、超时、Valheim 正常退出或 panic/drop 路径都必须
+  kill/reap 子进程并 join worker，不能遗留 passt。passt build 必须同时保留相邻的
+  `passt.avx2`，否则 passt 的 x86_64 runtime dispatcher 会警告或不能选择 AVX2 build。
+- passt NAT 启动会读取宿主 `/etc/resolv.conf` 的第一个可用 IPv4 nameserver，显式作为
+  `--dns-host`，再把 guest-visible network 加 3 映射为 DNS proxy；找不到 IPv4 nameserver
+  时应在启动 guest 前报错。passt 参数固定关闭 TCP/UDP host port forwarding、gateway
+  host mapping 和 IPv6，不能把当前模式描述成可从 host 访问 guest。
+- network backend 运行期错误当前只记录并打印一次，frontend 不公布 link-status feature、
+  不热重启 helper，后续 TX 会丢弃而 guest 仍可能认为 carrier up。guest 写 status 0 时会
+  清 frontend queue/backlog，但不会清空 backend channel 中已经排队的 frame；后续若要求
+  严格 reset 隔离，需要给 backend 协议加入 generation 或 purge。
 - RustSBI 历史 test kernel 的 success marker 来自明确记录的单 hart patch；不要声称未修改的上游多 hart HSM 测试在 Valheim 上完整通过。
 - Debian 13 demo 的 rootfs 必须继续来自已固定并校验的 Debian 官方
   NoCloud 或 OCI artifact；不要用 BusyBox、手写 `/etc/os-release` 或自制目录树
@@ -681,11 +779,12 @@ openEuler 演示没有固定的 BIOS、kernel、rootfs、下载脚本或版本 h
   特权 chroot/base 晋升也必须位于该锁内，并在进入 Valheim 前确认没有本次 binfmt 或
   mount 残留后释放；来源 runtime lock 与实际 disk inode lock 则跨 `exec` 持有。
 - PLIC 会在 priority/enable/threshold/claim/complete 和 source level 变化后重算各 context
-  的 claim；CPU 每轮 interrupt poll 再按 S-context claimability 重建 SEIP。VirtIO IRQ 1
-  使用真正的 level input，ACK 后才 deassert。UART 仍通过 one-shot pulse 接口注入；CPU 只在
-  WFI 或 SEIP 对当前特权全局可投递时轮询 pulse device，避免在常见的 S-mode 临界区提前
-  消费下一脉冲。若改成完整 NS16550 line-level IRQ，必须继续保持 PLIC gateway 的
-  in-service/coalescing 语义。
+  的 claim；CPU 每轮 interrupt poll 再按 S-context claimability 重建 SEIP。VirtIO block
+  IRQ 1 和 network IRQ 2 都使用真正的 level input，ACK 后才 deassert；network RX backend
+  还必须通过 WakeHub 解除 WFI，避免 guest 空闲时依赖宿主轮询。UART 仍通过 one-shot pulse
+  接口注入；CPU 只在 WFI 或 SEIP 对当前特权全局可投递时轮询 pulse device，避免在常见的
+  S-mode 临界区提前消费下一脉冲。若改成完整 NS16550 line-level IRQ，必须继续保持 PLIC
+  gateway 的 in-service/coalescing 语义。
 - production CLINT 只支持 host-monotonic realtime：`mtime` 以 10 MHz 在 guest 执行、
   WFI 和宿主被抢占期间持续流逝，不得恢复 instruction-tick 或 WFI fast-forward。
   `ClockSource` 注入只用于无 sleep 的可重复测试，不是面向 CLI 的 deterministic/turbo
@@ -763,6 +862,19 @@ cat /etc/debian_version
 安装、`dpkg --audit` 为空、392 个 installed package 和 manifest hash；宿主 qemu chroot
 及真实 Valheim guest 都要用 GCC 编译并运行最小 C 程序，且退出后不得残留 Valheim
 binfmt entry、loop mount 或 chroot bind mount。`--from-oci` 不应触发 sudo/chroot。
+
+修改 VirtIO network、`valheim-net`、passt 参数/构建或 Linux DHCP/resolver 接入时，还必须
+保留默认离线启动，并分别验证 `--net none`、默认 `--net nat` 和至少一个自定义 RFC 1918
+`--net-subnet`。真实 Linux guest 应确认：发现第二个 legacy VirtIO device；DHCP 得到
+network 加 15、default route 指向加 2、`/proc/net/pnp` 和实际 resolver 指向加 3；公网
+IPv4 DNS 与 TCP/UDP 出站可用；`/proc/net/if_inet6` 不存在；`/proc/interrupts` 的
+`virtio1`（network IRQ 2）在收发时增长。NoCloud symlink resolver 和 OCI regular
+resolver 必须分别验收，离线时两者都不得被 `/init` 改写；这项要求不等于可以把只完成
+OCI 的网络验收写成 NoCloud 已验证。至少再确认 passt helper 启动失败会阻止 guest 启动，
+Valheim 正常退出和 `Ctrl-C` 后都没有遗留 helper/worker，两个并行实例能在逻辑隔离下复用
+同一 guest-visible subnet，并且没有 host→guest listener/端口转发。frontend、backend 或
+WFI 路径的测试还应覆盖 direct/indirect RX/TX、malformed descriptor、队列 wrap、IRQ
+ACK/deassert、backend backpressure/failure、异步 RX 唤醒和 clean shutdown/reap。
 
 修改 CLINT、TIME CSR、WFI 或 RustSBI timer relay 时，Debian 还必须确认启动日志包含
 `SBI TIME extension detected` 和 10 MHz `sched_clock`，`time sleep 1` 约为一秒、
